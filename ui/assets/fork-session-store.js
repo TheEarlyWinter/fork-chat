@@ -276,6 +276,17 @@ export function normalizeForkSnapshot(input) {
       messages: normalizedMessages,
     };
     if (requestId) normCard.requestId = requestId;
+    if (rawCard.isMerge) normCard.isMerge = true;
+    if (rawCard.isBattle) normCard.isBattle = true;
+    if (Array.isArray(rawCard.parentIds)) {
+      const validParentIds = [];
+      for (const pid of rawCard.parentIds) {
+        if (typeof pid === 'string' && ID_REGEX.test(pid) && pid !== cardId) {
+          validParentIds.push(pid);
+        }
+      }
+      if (validParentIds.length > 0) normCard.parentIds = validParentIds;
+    }
     if (typeof rawCard.savedScrollTop === 'number' && Number.isFinite(rawCard.savedScrollTop) && rawCard.savedScrollTop >= 0) {
       normCard.savedScrollTop = rawCard.savedScrollTop;
     }
@@ -286,10 +297,18 @@ export function normalizeForkSnapshot(input) {
 
   // 4. 校验父引用存在性与 DAG 无环性
   for (const card of normalizedCards) {
-    if (card.parentId) {
-      if (!cardMap.has(card.parentId)) {
-        throw createError("INVALID_SESSION_SNAPSHOT", `Parent card not found: ${card.parentId}`);
+    const parentList = Array.from(new Set([
+      ...(card.parentId ? [card.parentId] : []),
+      ...(card.parentIds || []),
+    ]));
+
+    for (const pId of parentList) {
+      if (!cardMap.has(pId)) {
+        throw createError("INVALID_SESSION_SNAPSHOT", `Parent card not found: ${pId}`);
       }
+    }
+
+    if (card.parentId) {
       // 检查闭环
       const visited = new Set([card.id]);
       let curr = card.parentId;

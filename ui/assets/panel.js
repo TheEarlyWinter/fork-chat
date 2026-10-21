@@ -132,6 +132,13 @@ const btnBattleCancel = document.getElementById('btn-battle-cancel');
 const btnBattleSubmit = document.getElementById('btn-battle-submit');
 const btnUseLastPrompt = document.getElementById('btn-use-last-prompt');
 
+// 多选与合并收敛 (Merge) 元素
+const mergeToolbar = document.getElementById('merge-toolbar');
+const mergeCountText = document.getElementById('merge-count-text');
+const btnMergeSubmit = document.getElementById('btn-merge-submit');
+const btnMergeCancel = document.getElementById('btn-merge-cancel');
+const multiSelectedCardIds = new Set();
+
 let battleTargetCard = null;
 const battleSelectedAgentIds = new Set();
 
@@ -212,59 +219,69 @@ function updateTransform() {
   viewport.style.backgroundSize = `${24 * view.scale}px ${24 * view.scale}px`;
 }
 
-// 绘制所有卡片之间的贝塞尔曲线
+// 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
 function renderConnectors() {
   connectorsSvg.innerHTML = '';
 
   cards.forEach(child => {
-    if (!child.parentId) return;
-    const parent = cards.find(c => c.id === child.parentId);
-    if (!parent) return;
+    const parentIds = Array.isArray(child.parentIds) && child.parentIds.length > 0
+      ? child.parentIds
+      : (child.parentId ? [child.parentId] : []);
 
-    const siblings = cards.filter(c => c.parentId === parent.id);
-    const sibIndex = siblings.indexOf(child);
-    const sibCount = siblings.length;
-    // 多分支子卡片在起点微调 Y 锚点错位，形成规整线束扇出效果
-    const startOffsetY = sibCount > 1
-      ? 110 + (sibIndex - (sibCount - 1) / 2) * 12
-      : 110;
+    if (parentIds.length === 0) return;
 
-    // 起点：父卡片右侧边缘锚点
-    const startX = parent.x + parent.width;
-    const startY = parent.y + startOffsetY;
+    parentIds.forEach((pId, pIndex) => {
+      const parent = cards.find(c => c.id === pId);
+      if (!parent) return;
 
-    // 终点：子卡片左侧中点
-    const endX = child.x;
-    const endY = child.y + 110;
+      const siblings = cards.filter(c => c.parentId === parent.id || (Array.isArray(c.parentIds) && c.parentIds.includes(parent.id)));
+      const sibIndex = siblings.indexOf(child);
+      const sibCount = siblings.length;
+      // 多分支子卡片在起点微调 Y 锚点错位，形成规整线束扇出效果
+      const startOffsetY = sibCount > 1
+        ? 110 + (sibIndex - (sibCount - 1) / 2) * 12
+        : 110;
 
-    const deltaX = Math.abs(endX - startX) * 0.55;
+      // 起点：父卡片右侧边缘锚点
+      const startX = parent.x + parent.width;
+      const startY = parent.y + startOffsetY;
 
-    // 平滑贝塞尔曲线
-    const d = `M ${startX} ${startY} C ${startX + deltaX} ${startY}, ${endX - deltaX} ${endY}, ${endX} ${endY}`;
+      // 终点：子卡片左侧中点（多亲合流汇入时也按线束微调终点 Y 锚点）
+      const endOffsetY = parentIds.length > 1
+        ? 110 + (pIndex - (parentIds.length - 1) / 2) * 14
+        : 110;
+      const endX = child.x;
+      const endY = child.y + endOffsetY;
 
-    // 背景粗边描边
-    const pathBg = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    pathBg.setAttribute('d', d);
-    pathBg.setAttribute('fill', 'none');
-    pathBg.setAttribute('stroke', '#ffffff');
-    pathBg.setAttribute('stroke-width', '5');
-    connectorsSvg.appendChild(pathBg);
+      const deltaX = Math.abs(endX - startX) * 0.55;
 
-    // 主连线
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', d);
-    path.setAttribute('fill', 'none');
-    path.setAttribute('stroke', '#18181b');
-    path.setAttribute('stroke-width', '1.8');
-    connectorsSvg.appendChild(path);
+      // 平滑贝塞尔曲线
+      const d = `M ${startX} ${startY} C ${startX + deltaX} ${startY}, ${endX - deltaX} ${endY}, ${endX} ${endY}`;
 
-    // 终点小微圆环
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', endX);
-    circle.setAttribute('cy', endY);
-    circle.setAttribute('r', '3');
-    circle.setAttribute('fill', '#18181b');
-    connectorsSvg.appendChild(circle);
+      // 背景粗边描边
+      const pathBg = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      pathBg.setAttribute('d', d);
+      pathBg.setAttribute('fill', 'none');
+      pathBg.setAttribute('stroke', '#ffffff');
+      pathBg.setAttribute('stroke-width', '5');
+      connectorsSvg.appendChild(pathBg);
+
+      // 主连线
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', '#18181b');
+      path.setAttribute('stroke-width', '1.8');
+      connectorsSvg.appendChild(path);
+
+      // 终点小微圆环
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', endX);
+      circle.setAttribute('cy', endY);
+      circle.setAttribute('r', '3');
+      circle.setAttribute('fill', '#18181b');
+      connectorsSvg.appendChild(circle);
+    });
   });
 }
 
@@ -618,6 +635,95 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   await Promise.allSettled(sendPromises);
 }
 
+function toggleMultiSelectCard(cardId) {
+  if (multiSelectedCardIds.has(cardId)) {
+    multiSelectedCardIds.delete(cardId);
+  } else {
+    if (multiSelectedCardIds.size === 0 && selectedCardId && selectedCardId !== cardId) {
+      multiSelectedCardIds.add(selectedCardId);
+    }
+    multiSelectedCardIds.add(cardId);
+  }
+  updateMultiSelectionUI();
+}
+
+function clearMultiSelect() {
+  if (multiSelectedCardIds.size === 0) return;
+  multiSelectedCardIds.clear();
+  updateMultiSelectionUI();
+}
+
+function updateMultiSelectionUI() {
+  cards.forEach(c => {
+    const el = document.getElementById(`dom-${c.id}`);
+    if (el) {
+      if (multiSelectedCardIds.has(c.id)) {
+        el.classList.add('is-multi-selected');
+      } else {
+        el.classList.remove('is-multi-selected');
+      }
+    }
+  });
+
+  if (multiSelectedCardIds.size >= 2) {
+    if (mergeToolbar) mergeToolbar.hidden = false;
+    if (mergeCountText) mergeCountText.textContent = `已选 ${multiSelectedCardIds.size} 个分支`;
+  } else {
+    if (mergeToolbar) mergeToolbar.hidden = true;
+  }
+}
+
+function synthesizeMergePrompt(selectedCards) {
+  const branchSummaries = selectedCards.map((card, idx) => {
+    const userMsg = card.messages.filter(m => m.role === 'user' && !m.failed).at(-1);
+    const asstMsg = card.messages.filter(m => m.role === 'assistant' && !m.localOnly && !m.failed && (!m.status || m.status === 'completed')).at(-1);
+
+    const questionText = userMsg?.content || userMsg?.text || '（沿用前置主题）';
+    const answerText = asstMsg ? (outputFor(asstMsg).body.trim() || asstMsg.text) : '（尚无推导结论）';
+    const truncatedAnswer = answerText.length > 600 ? answerText.slice(0, 600) + '… [已截断核心]' : answerText;
+
+    return `### 分支 #${idx + 1}：${card.title}\n- **探讨问题**：${questionText}\n- **推导结论要点**：\n${truncatedAnswer}`;
+  }).join('\n\n');
+
+  return `你现在作为首席架构裁判与决策顾问，请对以下 ${selectedCards.length} 个独立探索分支的推导结论进行深度交叉对比与合流收敛：\n\n${branchSummaries}\n\n---\n【合流裁决任务】：\n1. **核心共识与关键分歧**：提炼各个分支方案的交集共识与核心分歧点；\n2. **适用边界与权衡代价 (Trade-offs)**：客观剖析各方案在性能、复杂度、可靠性及维护成本上的利弊得失；\n3. **终局综合决策方案**：给出最终的落地裁决意见与明确的执行路线。`;
+}
+
+async function createMergeCardFromSelected() {
+  const selectedCards = cards.filter(c => multiSelectedCardIds.has(c.id));
+  if (selectedCards.length < 2) return null;
+
+  const maxX = Math.max(...selectedCards.map(c => c.x + (c.width || 340)));
+  const targetX = maxX + 140;
+  const avgY = Math.round(selectedCards.reduce((acc, c) => acc + c.y, 0) / selectedCards.length);
+  const targetY = calculateBranchYPositions({ x: maxX, y: avgY, width: 0 }, 1, targetX)[0];
+
+  const newId = uniqueId('merge_node');
+  const sourceTitles = selectedCards.map(c => c.title.split(' ')[0]).join(' + ');
+
+  const mergeCard = {
+    id: newId,
+    parentId: selectedCards[0].id,
+    parentIds: selectedCards.map(c => c.id),
+    isMerge: true,
+    title: `合并总结 (${sourceTitles})`,
+    x: targetX,
+    y: targetY,
+    width: 360,
+    messages: [],
+  };
+
+  cards.push(mergeCard);
+  clearMultiSelect();
+  renderCards();
+  sessionController?.scheduleSave();
+
+  fitViewportToCluster([...selectedCards, mergeCard]);
+
+  const prompt = synthesizeMergePrompt(selectedCards);
+  void sendCardPrompt(mergeCard, prompt);
+  return mergeCard;
+}
+
 let selectedCardId = null;
 let isSpacePressed = false;
 
@@ -799,19 +905,22 @@ function renderCards(preserve = true) {
     cardEl.style.top = `${card.y}px`;
     cardEl.style.width = `${card.width}px`;
 
-    const isBranch = !!card.parentId;
+    const isBranch = Boolean(card.parentId || (Array.isArray(card.parentIds) && card.parentIds.length > 0));
     const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
+    const isMerge = Boolean(card.isMerge || card.title?.startsWith('合并总结'));
     const busy = activeRequests.has(card.id);
     const chainBusy = chainIsBusy(card);
-    if (card.id === selectedCardId) {
+    if (multiSelectedCardIds.has(card.id)) {
+      cardEl.classList.add('is-multi-selected');
+    } else if (card.id === selectedCardId) {
       cardEl.classList.add('is-selected-card');
     }
     cardEl.innerHTML = `
       <div class="card-header" data-drag-handle="true">
         <div class="card-title-box">
-          <div class="card-dot" style="${isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : '')}"></div>
+          <div class="card-dot" style="${isMerge ? 'background-color: #18181b; border-radius: 2px;' : (isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : ''))}"></div>
           <span class="card-title">${escapeHtml(card.title)}</span>
-          ${isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : '')}
+          ${isMerge ? '<span class="card-origin-tag tag-merge">[合并总结]</span>' : (isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : ''))}
         </div>
         <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
       </div>
@@ -884,6 +993,12 @@ function bindCardEvents(cardEl, card) {
   }
   cardEl.addEventListener('mousedown', (e) => {
     if (isSpacePressed) return;
+    if (e.shiftKey) {
+      e.stopPropagation();
+      toggleMultiSelectCard(card.id);
+      return;
+    }
+    clearMultiSelect();
     selectCard(card.id, false);
   });
   inputEl.addEventListener('focus', () => {
@@ -998,9 +1113,10 @@ viewport.addEventListener('mousedown', (e) => {
     e.preventDefault();
     return;
   }
-  if (e.target.closest('.chat-card') || e.target.closest('.floating-zoom-bar') || e.target.closest('.canvas-header')) {
+  if (e.target.closest('.chat-card') || e.target.closest('.floating-zoom-bar') || e.target.closest('.canvas-header') || e.target.closest('.floating-merge-toolbar')) {
     return;
   }
+  clearMultiSelect();
   selectCard(null);
   view.isDragging = true;
   view.dragStartX = e.clientX - view.x;
@@ -1063,6 +1179,10 @@ window.addEventListener('keydown', (e) => {
       closeBattleDialog();
       return;
     }
+    if (multiSelectedCardIds.size > 0) {
+      clearMultiSelect();
+      return;
+    }
     if (isEditing) {
       document.activeElement.blur();
       return;
@@ -1088,6 +1208,15 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     autoTidyLayout();
     return;
+  }
+
+  // 7. Shift + M 多分支合并总结 (Merge)
+  if ((e.key === 'm' || e.key === 'M') && e.shiftKey && !isEditing) {
+    if (multiSelectedCardIds.size >= 2) {
+      e.preventDefault();
+      void createMergeCardFromSelected();
+      return;
+    }
   }
 });
 
@@ -1429,6 +1558,14 @@ btnBattleSubmit?.addEventListener('click', async () => {
   }
 });
 
+btnMergeCancel?.addEventListener('click', () => {
+  clearMultiSelect();
+});
+
+btnMergeSubmit?.addEventListener('click', () => {
+  void createMergeCardFromSelected();
+});
+
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
@@ -1453,5 +1590,10 @@ if (typeof window !== 'undefined') {
     getSelectedCardId: () => selectedCardId,
     getIsSpacePressed: () => isSpacePressed,
     autoTidyLayout,
+    toggleMultiSelectCard,
+    clearMultiSelect,
+    getMultiSelectedCardIds: () => multiSelectedCardIds,
+    synthesizeMergePrompt,
+    createMergeCardFromSelected,
   };
 }

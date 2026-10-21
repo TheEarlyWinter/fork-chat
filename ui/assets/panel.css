@@ -779,3 +779,43 @@ html, body {
   min-width: 36px;
   text-align: center;
 }
+
+/* 视口浮动多选合并操作条 (纯白极简规范) */
+.floating-merge-toolbar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background-color: #ffffff;
+  border: 1px solid #18181b;
+  border-radius: 999px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  z-index: 25;
+}
+
+.floating-merge-toolbar[hidden] {
+  display: none !important;
+}
+
+.merge-count-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+}
+
+.chat-card.is-multi-selected {
+  border-color: #18181b;
+  outline: 2px dashed #18181b;
+  outline-offset: 2px;
+}
+
+.card-origin-tag.tag-merge {
+  color: #18181b;
+  font-weight: 600;
+  border-bottom: 1px solid #18181b;
+}
