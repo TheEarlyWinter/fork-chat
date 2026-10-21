@@ -10,9 +10,7 @@
   "capabilities": [
     "app/models.infer",
     "app/agents.read",
-    "app/tools.expose-to-model",
     "app/sessions.read",
-    "app/input.status",
     "app/ui.clipboard-write"
   ],
   "contributes": {
@@ -34,23 +32,6 @@
           "route": "/function-panel.html"
         }
       }
-    ],
-    "ui": {
-      "inputStatus": [
-        {
-          "id": "worldline-status",
-          "title": "分叉分支状态",
-          "text": "分叉分支: 主干 α"
-        }
-      ],
-      "messageActions": [
-        {
-          "id": "fork-action",
-          "title": "分叉独立分支",
-          "messages": "all",
-          "toolName": "timeline_fork_universe"
-        }
-      ]
-    }
+    ]
   }
 }
