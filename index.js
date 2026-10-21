@@ -235,10 +235,104 @@ export default defineApp(async (sdk) => {
     } catch {}
   }
 
-  // 注册 HTTP API 路由：提供模型池查询与打字机流式推理接口
+  // 助手元数据与人格 Prompt 提取
+  const agentsBaseDir = path.resolve(process.env.HOME || "", ".hanako", "agents");
+
+  async function getAgentFullProfile(agentId) {
+    const dir = path.join(agentsBaseDir, agentId);
+    let name = agentId;
+    let yuan = "unknown";
+    let model = "gemini-3.8-flash-high";
+    let provider = "gemini";
+    let description = "";
+    let systemPrompt = "";
+
+    try {
+      const configText = await fs.readFile(path.join(dir, "config.yaml"), "utf-8");
+      const nameMatch = configText.match(/name:\s*([^\n\r]+)/);
+      const yuanMatch = configText.match(/yuan:\s*([^\n\r]+)/);
+      const modelMatch = configText.match(/models:[\s\S]*?chat:[\s\S]*?id:\s*([^\n\r]+)/);
+      const providerMatch = configText.match(/models:[\s\S]*?chat:[\s\S]*?provider:\s*([^\n\r]+)/);
+      if (nameMatch) name = nameMatch[1].trim();
+      if (yuanMatch) yuan = yuanMatch[1].trim();
+      if (modelMatch) model = modelMatch[1].trim();
+      if (providerMatch) provider = providerMatch[1].trim();
+    } catch {}
+
+    try {
+      const descText = await fs.readFile(path.join(dir, "description.md"), "utf-8");
+      description = descText.replace(/<!--[\s\S]*?-->/g, "").trim();
+    } catch {}
+
+    try {
+      const agentsMd = await fs.readFile(path.join(dir, "AGENTS.md"), "utf-8");
+      systemPrompt = agentsMd.trim();
+    } catch {}
+
+    if (!systemPrompt && description) {
+      systemPrompt = `你是 ${name}。${description}`;
+    }
+
+    return {
+      id: agentId,
+      name,
+      yuan,
+      model,
+      provider,
+      description,
+      systemPrompt,
+    };
+  }
+
+  async function listAllAgents() {
+    const list = [];
+    try {
+      // 优先从 sdk.bus 获取官方注册列表
+      if (sdk.bus?.request) {
+        try {
+          const res = await sdk.bus.request("agent:list", { scope: "all" });
+          if (Array.isArray(res?.agents)) {
+            for (const a of res.agents) {
+              const full = await getAgentFullProfile(a.id);
+              if (a.name) full.name = a.name;
+              if (a.yuan) full.yuan = a.yuan;
+              full.isCurrent = Boolean(a.isCurrent);
+              list.push(full);
+            }
+          }
+        } catch {}
+      }
+
+      // 如果列表为空则直接从文件系统枚举
+      if (list.length === 0) {
+        const entries = await fs.readdir(agentsBaseDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const profile = await getAgentFullProfile(entry.name);
+            list.push(profile);
+          }
+        }
+      }
+    } catch (e) {
+      await sdk.logger.warn("读取助手列表失败: " + String(e));
+    }
+    return list;
+  }
+
+  // 注册 HTTP API 路由：提供模型池与助手列表查询、打字机流式推理接口
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
-      // 1. 获取模型列表
+      // 1. 获取系统助手列表接口 (包含人格与绑定模型)
+      app.get("/api/agents", async (c) => {
+        try {
+          const agents = await listAllAgents();
+          return c.json({ ok: true, agents });
+        } catch (err) {
+          return c.json({ ok: false, error: String(err) }, 500);
+        }
+      });
+
+      // 2. 获取模型列表 (向后兼容)
       app.get("/api/models", async (c) => {
         try {
           if (sdk.models?.list) {
@@ -264,7 +358,7 @@ export default defineApp(async (sdk) => {
         }
       });
 
-      // 2. 真实大模型流式推理接口 (Server-Sent Stream)
+      // 3. 真实大模型流式推理接口 (Server-Sent Stream)
       app.post("/api/chat/stream", async (c) => {
         let body;
         try {
@@ -273,13 +367,29 @@ export default defineApp(async (sdk) => {
           return c.text("Invalid JSON body", 400);
         }
 
-        const { modelRef, messages, systemPrompt } = body || {};
+        const { agentId, modelRef, messages, systemPrompt } = body || {};
         const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-        // 解析 provider 与 model
+        // 解析目标模型与人格 Prompt
         let provider = "gemini";
         let model = "gemini-3.8-flash-high";
-        if (typeof modelRef === "string" && modelRef.includes("/")) {
+        let finalSystemPrompt = systemPrompt || "你是专业、敏锐、逻辑严密的智能分析助手。回答要条理清晰、直击核心、不讲套话废话。";
+
+        // 如果传入了 agentId，全量注入该助手的真实设定与绑定模型
+        if (agentId) {
+          try {
+            const agentProfile = await getAgentFullProfile(agentId);
+            if (agentProfile) {
+              if (agentProfile.provider) provider = agentProfile.provider;
+              if (agentProfile.model) model = agentProfile.model;
+              if (agentProfile.systemPrompt) {
+                finalSystemPrompt = `${agentProfile.systemPrompt}\n\n[回答指引]：请完全沉浸并严格保持你的身份设定、语言习惯、语气和性格特征，针对用户的对话内容给出真实、自然的回应。`;
+              }
+            }
+          } catch (e) {
+            await sdk.logger.warn(`加载助手 ${agentId} 失败: ` + String(e));
+          }
+        } else if (typeof modelRef === "string" && modelRef.includes("/")) {
           const slash = modelRef.indexOf("/");
           provider = modelRef.slice(0, slash);
           model = modelRef.slice(slash + 1);
@@ -316,7 +426,7 @@ export default defineApp(async (sdk) => {
                 provider,
                 model,
                 messages: formattedMessages,
-                systemPrompt: systemPrompt || "你是专业、敏锐、逻辑严密的智能分析助手。回答要条理清晰、直击核心、不讲套话废话。",
+                systemPrompt: finalSystemPrompt,
               };
 
               // 优先使用 streamEvents 逐 token 迭代

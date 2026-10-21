@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>模型列表 · 分叉对话</title>
+  <title>助手列表 · 分叉对话</title>
   <style>
     :root {
       --bg: #ffffff;
@@ -95,14 +95,14 @@
       border-color: var(--border-dark);
     }
 
-    /* 模型列表 */
-    .model-list {
+    /* 助手列表 */
+    .agent-list {
       display: flex;
       flex-direction: column;
       gap: 8px;
       flex: 1;
     }
-    .model-card {
+    .agent-card {
       padding: 10px 10px;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -113,21 +113,21 @@
       gap: 6px;
       transition: all 0.15s ease;
     }
-    .model-card:hover {
+    .agent-card:hover {
       border-color: #a1a1aa;
       background: var(--bg-hover);
     }
-    .model-card.active {
+    .agent-card.active {
       border-color: var(--border-dark);
       background: #ffffff;
       box-shadow: 0 0 0 1px var(--border-dark);
     }
-    .model-card-top {
+    .agent-card-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    .model-name {
+    .agent-name {
       font-size: 12px;
       font-weight: 600;
       color: var(--text);
@@ -141,7 +141,7 @@
       border-radius: 50%;
       background: var(--text-dim);
     }
-    .model-card.active .dot-indicator {
+    .agent-card.active .dot-indicator {
       background: var(--border-dark);
     }
     .active-tag {
@@ -152,14 +152,22 @@
       color: #ffffff;
       border-radius: 2px;
     }
-    .model-meta {
+    .yuan-tag {
+      font-size: 9px;
+      padding: 1px 5px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text-muted);
+    }
+    .agent-meta {
       font-size: 10px;
       color: var(--text-muted);
       display: flex;
       align-items: center;
       gap: 6px;
     }
-    .model-provider-badge {
+    .agent-provider-badge {
       text-transform: uppercase;
       font-size: 9px;
       font-weight: 600;
@@ -167,6 +175,16 @@
       background: var(--bg-subtle);
       border: 1px solid var(--border);
       border-radius: 2px;
+    }
+    .agent-desc {
+      font-size: 10px;
+      color: var(--text-muted);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .empty-state {
@@ -182,18 +200,18 @@
   <div class="panel-container">
     <div class="panel-header">
       <div class="panel-title-box">
-        <span class="panel-title">推理模型池</span>
-        <span class="panel-badge mono" id="model-count">0</span>
+        <span class="panel-title">助手列表</span>
+        <span class="panel-badge mono" id="agent-count">0</span>
       </div>
       <button class="btn-refresh" id="btn-refresh" type="button">刷新</button>
     </div>
 
     <div class="search-box">
-      <input type="text" class="search-input" id="search-input" placeholder="过滤模型名称或厂商...">
+      <input type="text" class="search-input" id="search-input" placeholder="搜索助手姓名、底座或模型...">
     </div>
 
-    <div class="model-list" id="model-list">
-      <div class="empty-state">正在检索宿主接入的模型清单...</div>
+    <div class="agent-list" id="agent-list">
+      <div class="empty-state">正在检索系统助手清单...</div>
     </div>
   </div>
 

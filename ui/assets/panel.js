@@ -34,23 +34,35 @@ const surface = document.getElementById('surface');
 const connectorsSvg = document.getElementById('connectors-svg');
 const cardsLayer = document.getElementById('cards-layer');
 const badgeStats = document.getElementById('badge-stats');
-const activeModelDisplay = document.getElementById('active-model-display');
+const activeAgentDisplay = document.getElementById('active-agent-display');
 const zoomText = document.getElementById('zoom-text');
 const btnZoomIn = document.getElementById('btn-zoom-in');
 const btnZoomOut = document.getElementById('btn-zoom-out');
 const btnResetView = document.getElementById('btn-reset-view');
 const btnNewRoot = document.getElementById('btn-new-root');
 
-// 跨窗口同步模型状态
+// 跨窗口同步助手与模型状态
 const bus = new BroadcastChannel('fork-chat-bus');
-const initialModelName = localStorage.getItem('fork_chat_active_model_name') || 'Gemini 3.8 Flash High';
-if (activeModelDisplay) {
-  activeModelDisplay.textContent = `当前模型: ${initialModelName}`;
+let currentAgent = {
+  id: localStorage.getItem('fork_chat_active_agent_id') || 'hakimi',
+  name: localStorage.getItem('fork_chat_active_agent_name') || 'Hakimi',
+  model: localStorage.getItem('fork_chat_active_agent_model') || 'gemini-3.8-flash-high',
+  provider: localStorage.getItem('fork_chat_active_agent_provider') || 'gemini'
+};
+
+function updateHeaderStatus() {
+  if (activeAgentDisplay) {
+    activeAgentDisplay.textContent = `当前助手: ${currentAgent.name} [${currentAgent.model || 'default'}]`;
+  }
 }
+updateHeaderStatus();
 
 bus.onmessage = (e) => {
-  if (e.data?.type === 'MODEL_CHANGED' && e.data.model && activeModelDisplay) {
-    activeModelDisplay.textContent = `当前模型: ${e.data.model.name || e.data.model.id}`;
+  if (e.data?.type === 'AGENT_CHANGED' && e.data.agent) {
+    currentAgent = { ...currentAgent, ...e.data.agent };
+    updateHeaderStatus();
+  } else if (e.data?.type === 'MODEL_CHANGED' && e.data.model) {
+    updateHeaderStatus();
   }
 };
 
@@ -136,7 +148,7 @@ function renderCards() {
       <div class="card-body" id="body-${card.id}">
         ${card.messages.map(m => `
           <div class="msg-row ${m.role === 'user' ? 'msg-user' : 'msg-asst'}">
-            <span class="msg-role">${m.role === 'user' ? 'User' : 'Assistant'}</span>
+            <span class="msg-role">${m.role === 'user' ? 'User' : escapeHtml(m.agentName || currentAgent.name || 'Assistant')}</span>
             <div class="msg-bubble">${escapeHtml(m.text)}</div>
           </div>
         `).join('')}
@@ -233,19 +245,25 @@ function bindCardEvents(cardEl, card) {
     const contextMessages = buildChainContext(card);
 
     // 新增 assistant 占位消息并进入流式态
-    const asstMsg = { role: 'assistant', text: '...', streaming: true };
+    const asstMsg = {
+      role: 'assistant',
+      agentId: currentAgent.id,
+      agentName: currentAgent.name,
+      text: '...',
+      streaming: true
+    };
     card.messages.push(asstMsg);
     renderCards();
 
     try {
-      const activeRef = localStorage.getItem('fork_chat_active_model_ref') || 'gemini/gemini-3.8-flash-high';
       const apiUrl = hana.api.url('/api/chat/stream');
       
       const res = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          modelRef: activeRef,
+          agentId: currentAgent.id,
+          modelRef: currentAgent.provider && currentAgent.model ? `${currentAgent.provider}/${currentAgent.model}` : currentAgent.model,
           messages: contextMessages
         })
       });
