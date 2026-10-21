@@ -1590,6 +1590,8 @@ if (typeof window !== 'undefined') {
     getSelectedCardId: () => selectedCardId,
     getIsSpacePressed: () => isSpacePressed,
     autoTidyLayout,
+    renderCards,
+    renderConnectors,
     toggleMultiSelectCard,
     clearMultiSelect,
     getMultiSelectedCardIds: () => multiSelectedCardIds,

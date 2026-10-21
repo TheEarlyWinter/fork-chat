@@ -167,8 +167,9 @@ html, body {
   position: absolute;
   top: 0;
   left: 0;
-  width: 10000px;
-  height: 10000px;
+  width: 100%;
+  height: 100%;
+  overflow: visible !important;
   pointer-events: none;
   z-index: 1;
 }
@@ -178,8 +179,8 @@ html, body {
   position: absolute;
   top: 0;
   left: 0;
-  width: 10000px;
-  height: 10000px;
+  width: 100%;
+  height: 100%;
   z-index: 2;
   pointer-events: none;
 }
