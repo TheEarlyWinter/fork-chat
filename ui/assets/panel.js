@@ -644,7 +644,7 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   const existingChildren = cards.filter(c => c.parentId === parentCard.id);
   const startBranchIndex = existingChildren.length + 1;
   const total = selectedAgents.length;
-  const targetX = parentCard.x + parentCard.width + 120;
+  const targetX = parentCard.x + (parentCard.width || 340) + 120;
   const yPositions = calculateBranchYPositions(parentCard, total, targetX);
 
   const newCards = [];
@@ -870,7 +870,7 @@ function createBranchCard(card, { autoFocus = true } = {}) {
   const lastMsg = lastMessage ? outputFor(lastMessage).body.trim() || '父级卡片' : '父级卡片';
   const snippet = lastMsg.length > 20 ? lastMsg.slice(0, 20) + '...' : lastMsg;
 
-  const targetX = card.x + card.width + 120;
+  const targetX = card.x + (card.width || 340) + 120;
   const yPositions = calculateBranchYPositions(card, 1, targetX);
 
   const isDocParent = Boolean(card.isDoc);
@@ -1029,6 +1029,9 @@ function renderCards(preserve = true) {
           <div class="branch-tooltip">对比分支</div>
         </div>
       </div>
+
+      <!-- 右侧边缘拖拽调整宽度手柄 -->
+      <div class="card-resize-handle" data-action="resize-card" title="按住拖拽调整卡片宽度"></div>
     `;
 
     bindCardEvents(cardEl, card);
@@ -1217,6 +1220,44 @@ function bindCardEvents(cardEl, card) {
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   });
+
+  // 1.1 卡片右侧边缘拖拽调整宽度
+  const resizeHandle = cardEl.querySelector('[data-action="resize-card"]');
+  if (resizeHandle) {
+    resizeHandle.addEventListener('mousedown', (e) => {
+      if (isSpacePressed) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (!sessionController?.state.ready || sessionController.state.busy) return;
+      const resizeGeneration = sessionController.generation;
+      const startMouseX = e.clientX;
+      const startWidth = card.width || 340;
+      cardEl.classList.add('is-resizing');
+      document.body?.classList.add('is-card-resizing');
+
+      const onMouseMove = (moveEvent) => {
+        if (sessionController.generation !== resizeGeneration || !cards.includes(card)) return;
+        const dx = (moveEvent.clientX - startMouseX) / view.scale;
+        const newWidth = Math.min(Math.max(Math.round(startWidth + dx), 260), 1200);
+        card.width = newWidth;
+        cardEl.style.width = `${newWidth}px`;
+        renderConnectors();
+      };
+
+      const onMouseUp = () => {
+        cardEl.classList.remove('is-resizing');
+        document.body?.classList.remove('is-card-resizing');
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        if (sessionController.generation === resizeGeneration) {
+          sessionController.scheduleSave();
+        }
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    });
+  }
 
   // 2. 发送消息并执行打字机流式推理
   const doSend = async () => {
@@ -1442,14 +1483,38 @@ function autoTidyLayout() {
 
   let currentY = 80;
   const startX = 80;
-  const stepX = 340 + 120; // 460
   const cardH = 360;
   const gapY = 32;
   const gapRoot = 60;
 
+  // 计算每层的最大卡片宽度，确保拉伸后的宽卡片在排版时列间距自适应且不重叠
+  const depthMap = new Map();
+  function assignDepth(node, depth) {
+    depthMap.set(node.id, depth);
+    const children = childrenMap.get(node.id) || [];
+    children.forEach(child => assignDepth(child, depth + 1));
+  }
+  roots.forEach(root => assignDepth(root, 0));
+
+  const maxColWidth = new Map();
+  cards.forEach(c => {
+    const d = depthMap.get(c.id) || 0;
+    const w = c.width || 340;
+    maxColWidth.set(d, Math.max(maxColWidth.get(d) || 340, w));
+  });
+
+  const colStartX = new Map();
+  let accumulatedX = startX;
+  const maxDepth = Math.max(0, ...Array.from(depthMap.values()));
+  for (let d = 0; d <= maxDepth; d++) {
+    colStartX.set(d, accumulatedX);
+    const colW = maxColWidth.get(d) || 340;
+    accumulatedX += colW + 120;
+  }
+
   function layoutSubtree(node, depth) {
     const children = childrenMap.get(node.id) || [];
-    node.targetX = startX + depth * stepX;
+    node.targetX = colStartX.get(depth) ?? (startX + depth * 460);
 
     if (children.length === 0) {
       node.targetY = currentY;

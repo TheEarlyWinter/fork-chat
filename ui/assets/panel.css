@@ -612,7 +612,48 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  z-index: 5;
+  z-index: 12;
+}
+
+/* 卡片右侧边缘拖拽调整宽度手柄 */
+.card-resize-handle {
+  position: absolute;
+  right: -5px;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: ew-resize;
+  z-index: 8;
+  user-select: none;
+  touch-action: none;
+}
+
+.card-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 4px;
+  width: 2px;
+  background-color: transparent;
+  border-radius: 1px;
+  transition: background-color 0.15s ease;
+}
+
+.card-resize-handle:hover::after,
+.chat-card.is-resizing .card-resize-handle::after {
+  background-color: #a1a1aa;
+}
+
+.chat-card.is-resizing {
+  user-select: none;
+  border-color: #18181b;
+  box-shadow: 0 0 0 1px #18181b, 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+
+body.is-card-resizing {
+  cursor: ew-resize !important;
+  user-select: none !important;
 }
 
 .branch-anchor-btn {
