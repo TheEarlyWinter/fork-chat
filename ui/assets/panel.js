@@ -1575,12 +1575,14 @@ async function extractDocumentFile(file) {
       body: JSON.stringify({ filename: name, contentBase64 }),
     });
     const data = await res.json();
+
     if (data && data.ok) {
       return {
         ...data,
         size: file.size || data.charCount,
       };
     }
+    // 解析失败时把原因说清楚（扫描件、字体映射、文件损坏各有各的说法）
     throw new Error(data?.error || '文档解析服务返回异常');
   } catch (err) {
     return {

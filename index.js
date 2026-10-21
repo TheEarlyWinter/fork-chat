@@ -336,8 +336,10 @@ export default defineApp(async (sdk) => {
           return c.json({ ok: false, error: err.message || String(err) }, 400);
         }
       });
+
     });
   }
 
   await sdk.logger.info("分叉对话 (Fork Chat) 核心服务就绪。");
+
 });
