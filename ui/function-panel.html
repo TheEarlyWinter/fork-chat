@@ -227,77 +227,57 @@
       text-overflow: ellipsis;
     }
 
-    /* 思考强度控制区（纯白极简规范） */
-    .thinking-level-section {
-      padding: 8px 10px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: #ffffff;
+    /* 助手卡片内嵌独立思考强度配置栏（纯白极简规范） */
+    .agent-thinking-row {
+      margin-top: 4px;
+      padding-top: 6px;
+      border-top: 1px dashed var(--border);
       display: flex;
       flex-direction: column;
-      gap: 6px;
-      transition: all 0.15s ease;
+      gap: 5px;
     }
-    .thinking-level-section.is-disabled {
-      background: var(--bg-hover);
-      border-color: var(--border);
-    }
-    .thinking-level-header {
+    .agent-thinking-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-    }
-    .thinking-level-title {
-      font-size: 10px;
-      font-weight: 600;
+      font-size: 9px;
       color: var(--text-muted);
-      letter-spacing: 0.04em;
+      letter-spacing: 0.03em;
     }
-    .thinking-level-badge {
-      font-size: 10px;
-      padding: 1px 6px;
+    .agent-thinking-badge {
+      font-size: 9px;
+      padding: 0 4px;
       background: var(--bg-subtle);
       border: 1px solid var(--border);
       border-radius: 999px;
       color: var(--text);
     }
-    .thinking-level-options {
+    .agent-thinking-pills {
       display: flex;
       flex-wrap: wrap;
-      gap: 5px;
+      gap: 4px;
     }
-    .thinking-opt-btn {
+    .thinking-pill {
       background: #ffffff;
       border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 3px 8px;
-      font-size: 11px;
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-size: 10px;
       font-family: var(--mono);
       color: var(--text-muted);
       cursor: pointer;
       transition: all 0.15s ease;
+      line-height: 1.2;
     }
-    .thinking-opt-btn:hover:not(:disabled) {
+    .thinking-pill:hover {
       color: var(--text);
       border-color: var(--border-dark);
     }
-    .thinking-opt-btn.active {
+    .thinking-pill.active {
       background: var(--border-dark);
       color: #ffffff;
       border-color: var(--border-dark);
       font-weight: 600;
-    }
-    .thinking-opt-btn:disabled {
-      color: var(--text-dim);
-      border-color: var(--border);
-      background: var(--bg-subtle);
-      cursor: not-allowed;
-      opacity: 0.6;
-    }
-    .thinking-level-hint {
-      font-size: 10px;
-      color: var(--text-muted);
-      line-height: 1.3;
     }
 
     /* 会话列表样式 */
@@ -545,18 +525,6 @@
             <input type="text" class="search-input" id="search-input" aria-label="搜索助手" placeholder="搜索助手姓名、底座或模型...">
           </div>
           <button class="btn-refresh" id="btn-refresh" type="button">刷新</button>
-        </div>
-
-        <!-- 思考强度动态自适应选择区 -->
-        <div class="thinking-level-section" id="thinking-level-section">
-          <div class="thinking-level-header">
-            <span class="thinking-level-title mono">THINKING EFFORT / 思考强度</span>
-            <span class="thinking-level-badge mono" id="thinking-level-current-badge">默认</span>
-          </div>
-          <div class="thinking-level-options" id="thinking-level-options" role="radiogroup" aria-label="思考强度选择">
-            <button type="button" class="thinking-opt-btn active" role="radio" aria-checked="true">默认</button>
-          </div>
-          <div class="thinking-level-hint mono" id="thinking-level-hint" hidden>当前模型不支持思考强度调整</div>
         </div>
 
         <div class="agent-list" id="agent-list">

@@ -24,13 +24,7 @@ const sessionContextMenu = document.getElementById('session-context-menu');
 const btnMenuRename = document.getElementById('session-menu-rename');
 const btnMenuDelete = document.getElementById('session-menu-delete');
 
-// 思考强度 DOM 元素引用
-const thinkingSectionEl = document.getElementById('thinking-level-section');
-const thinkingOptionsEl = document.getElementById('thinking-level-options');
-const thinkingBadgeEl = document.getElementById('thinking-level-current-badge');
-const thinkingHintEl = document.getElementById('thinking-level-hint');
-
-// 思考强度字典与状态
+// 思考强度字典与助手独立配置
 const THINKING_LEVEL_LABELS = {
   default: '默认',
   off: '关闭',
@@ -43,7 +37,26 @@ const THINKING_LEVEL_LABELS = {
 };
 
 let models = [];
-let currentReasoningEffort = localStorage.getItem('fork_chat_reasoning_effort') || 'default';
+
+function getAgentReasoningEffort(agentId) {
+  if (!agentId) return 'default';
+  try {
+    return localStorage.getItem(`fork_chat_agent_effort_${agentId}`) || 'default';
+  } catch {
+    return 'default';
+  }
+}
+
+function setAgentReasoningEffort(agentId, effort) {
+  if (!agentId) return;
+  try {
+    if (!effort || effort === 'default') {
+      localStorage.removeItem(`fork_chat_agent_effort_${agentId}`);
+    } else {
+      localStorage.setItem(`fork_chat_agent_effort_${agentId}`, effort);
+    }
+  } catch {}
+}
 
 // 助手状态
 let agents = [];
@@ -96,87 +109,6 @@ function escapeHtml(str) {
 // 1. 助手列表管理
 // -------------------------------------------------------------
 
-function renderThinkingLevels() {
-  if (!thinkingSectionEl || !thinkingOptionsEl) return;
-
-  const current = agents.find(a => a.id === activeAgentId);
-  const matchedModel = models.find(m => current && (m.id === current.model || m.ref === `${current.provider}/${current.model}` || m.ref === current.model));
-
-  // 判定是否支持思考强度调整
-  const supportsReasoning = Boolean(current?.reasoning || matchedModel?.reasoning);
-  const rawLevels = (Array.isArray(current?.thinkingLevels) && current.thinkingLevels.length > 0)
-    ? current.thinkingLevels
-    : (Array.isArray(matchedModel?.thinkingLevels) ? matchedModel.thinkingLevels : []);
-
-  // 过滤出合法档位
-  const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim());
-
-  if (!supportsReasoning || availableLevels.length === 0) {
-    // 该模型不支持思考强度调整：优雅置灰
-    thinkingSectionEl.classList.add('is-disabled');
-    if (thinkingHintEl) {
-      thinkingHintEl.hidden = false;
-      thinkingHintEl.textContent = '当前模型不支持思考强度调整';
-    }
-    if (thinkingBadgeEl) {
-      thinkingBadgeEl.textContent = '不支持';
-    }
-
-    thinkingOptionsEl.innerHTML = '';
-    const defBtn = document.createElement('button');
-    defBtn.type = 'button';
-    defBtn.className = 'thinking-opt-btn active';
-    defBtn.disabled = true;
-    defBtn.textContent = '默认';
-    thinkingOptionsEl.appendChild(defBtn);
-    return;
-  }
-
-  // 支持思考强度的模型
-  thinkingSectionEl.classList.remove('is-disabled');
-  if (thinkingHintEl) thinkingHintEl.hidden = true;
-
-  // 选项集：始终包含“default”以及模型支持的所有档位
-  const options = ['default', ...availableLevels];
-
-  // 校验当前选中的档位是否在合法选项集中，若不在则安全回退到 default
-  if (!options.includes(currentReasoningEffort)) {
-    currentReasoningEffort = 'default';
-    try { localStorage.setItem('fork_chat_reasoning_effort', 'default'); } catch {}
-  }
-
-  if (thinkingBadgeEl) {
-    thinkingBadgeEl.textContent = THINKING_LEVEL_LABELS[currentReasoningEffort] || currentReasoningEffort;
-  }
-
-  thinkingOptionsEl.innerHTML = '';
-  options.forEach(opt => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    const isActive = opt === currentReasoningEffort;
-    btn.className = `thinking-opt-btn ${isActive ? 'active' : ''}`;
-    btn.textContent = THINKING_LEVEL_LABELS[opt] || opt;
-    btn.title = opt === 'default' ? '使用模型默认思考配置' : `设置思考强度为 ${opt}`;
-    btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
-    btn.setAttribute('role', 'radio');
-
-    btn.addEventListener('click', () => {
-      currentReasoningEffort = opt;
-      try { localStorage.setItem('fork_chat_reasoning_effort', opt); } catch {}
-      renderThinkingLevels();
-
-      // 广播思考强度变更事件给主画布，附带 targetCanvasId
-      channel.postMessage({
-        type: 'REASONING_EFFORT_CHANGED',
-        reasoningEffort: opt === 'default' ? null : opt,
-        targetCanvasId: boundCanvasId || undefined,
-      });
-    });
-
-    thinkingOptionsEl.appendChild(btn);
-  });
-}
-
 function renderAgentList() {
   if (loadError) {
     agentCountEl.textContent = '0';
@@ -207,6 +139,22 @@ function renderAgentList() {
     card.className = `agent-card ${isActive ? 'active' : ''}`;
     card.id = `agent-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
+    // 匹配该助手绑定模型的思考能力
+    const matchedModel = models.find(m => m.id === a.model || m.ref === `${a.provider}/${a.model}` || m.ref === a.model);
+    const supportsReasoning = Boolean(a.reasoning || matchedModel?.reasoning);
+    const rawLevels = (Array.isArray(a.thinkingLevels) && a.thinkingLevels.length > 0)
+      ? a.thinkingLevels
+      : (Array.isArray(matchedModel?.thinkingLevels) ? matchedModel.thinkingLevels : []);
+    const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim());
+
+    // 读取该助手独立保存的思考强度
+    let currentEffort = getAgentReasoningEffort(a.id);
+    const options = ['default', ...availableLevels];
+    if (!options.includes(currentEffort)) {
+      currentEffort = 'default';
+      setAgentReasoningEffort(a.id, 'default');
+    }
+
     card.innerHTML = `
       <div class="agent-card-top">
         <span class="agent-name">
@@ -222,6 +170,70 @@ function renderAgentList() {
       ${a.description ? `<div class="agent-desc">${escapeHtml(a.description)}</div>` : ''}
     `;
 
+    // 若该助手支持思考深度，内嵌独立的胶囊单选栏
+    if (supportsReasoning && availableLevels.length > 0) {
+      const thinkingRow = document.createElement('div');
+      thinkingRow.className = 'agent-thinking-row';
+      thinkingRow.setAttribute('data-agent-id', a.id);
+
+      const header = document.createElement('div');
+      header.className = 'agent-thinking-header';
+
+      const headerTitle = document.createElement('span');
+      headerTitle.className = 'mono';
+      headerTitle.textContent = '思考深度 / EFFORT';
+      header.appendChild(headerTitle);
+
+      const badge = document.createElement('span');
+      badge.className = 'agent-thinking-badge mono';
+      badge.id = `badge-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      badge.textContent = THINKING_LEVEL_LABELS[currentEffort] || currentEffort;
+      header.appendChild(badge);
+
+      thinkingRow.appendChild(header);
+
+      const pillsBox = document.createElement('div');
+      pillsBox.className = 'agent-thinking-pills';
+      pillsBox.setAttribute('role', 'radiogroup');
+      pillsBox.setAttribute('aria-label', `${a.name || a.id}思考强度`);
+
+      options.forEach(opt => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const isOptActive = opt === currentEffort;
+        btn.className = `thinking-pill ${isOptActive ? 'active' : ''}`;
+        btn.id = `pill-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${opt}`;
+        btn.setAttribute('data-effort', opt);
+        btn.setAttribute('data-agent-id', a.id);
+        btn.setAttribute('role', 'radio');
+        btn.setAttribute('aria-checked', isOptActive ? 'true' : 'false');
+        btn.textContent = THINKING_LEVEL_LABELS[opt] || opt;
+        btn.title = opt === 'default' ? '使用模型默认思考配置' : `设置 ${a.name || a.id} 思考强度为 ${opt}`;
+
+        btn.addEventListener('click', (e) => {
+          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+          setAgentReasoningEffort(a.id, opt);
+
+          // 若修改的是当前活跃的助手，即时同步并广播给画布
+          if (a.id === activeAgentId) {
+            localStorage.setItem('fork_chat_reasoning_effort', opt);
+            channel.postMessage({
+              type: 'REASONING_EFFORT_CHANGED',
+              reasoningEffort: opt === 'default' ? null : opt,
+              targetCanvasId: boundCanvasId || undefined,
+            });
+          }
+
+          renderAgentList();
+        });
+
+        pillsBox.appendChild(btn);
+      });
+
+      thinkingRow.appendChild(pillsBox);
+      card.appendChild(thinkingRow);
+    }
+
     card.addEventListener('click', () => {
       activeAgentId = a.id;
       localStorage.setItem('fork_chat_active_agent_id', a.id);
@@ -229,14 +241,21 @@ function renderAgentList() {
       localStorage.setItem('fork_chat_active_agent_model', a.model || '');
       localStorage.setItem('fork_chat_active_agent_provider', a.provider || '');
       
-      // 联动重绘思考强度控制区
-      renderThinkingLevels();
+      const agentEffort = getAgentReasoningEffort(a.id);
+      localStorage.setItem('fork_chat_reasoning_effort', agentEffort);
 
-      // 广播助手变更事件给主画布，附带 targetCanvasId 与思考强度
+      // 广播助手变更事件给主画布，附带该助手专属的思考强度
       channel.postMessage({
         type: 'AGENT_CHANGED',
         agent: a,
-        reasoningEffort: currentReasoningEffort === 'default' ? null : currentReasoningEffort,
+        reasoningEffort: agentEffort === 'default' ? null : agentEffort,
+        targetCanvasId: boundCanvasId || undefined,
+      });
+
+      // 广播当前思考强度变更给主画布
+      channel.postMessage({
+        type: 'REASONING_EFFORT_CHANGED',
+        reasoningEffort: agentEffort === 'default' ? null : agentEffort,
         targetCanvasId: boundCanvasId || undefined,
       });
 
@@ -274,7 +293,6 @@ async function loadAgents() {
   } catch (err) {
     agents = [];
     loadError = `助手列表加载失败：${err.message}；可点击刷新重试。`;
-    renderThinkingLevels();
     renderAgentList();
     return;
   }
@@ -291,18 +309,25 @@ async function loadAgents() {
     localStorage.setItem('fork_chat_active_agent_model', current.model || '');
     localStorage.setItem('fork_chat_active_agent_provider', current.provider || '');
     
+    const agentEffort = getAgentReasoningEffort(current.id);
+    localStorage.setItem('fork_chat_reasoning_effort', agentEffort);
+
     // 仅在尚未收到 canvas 状态时广播初始值；已绑定且有 canvasState 时不强行广播覆盖
     if (!boundCanvasId) {
       channel.postMessage({
         type: 'AGENT_CHANGED',
         agent: current,
-        reasoningEffort: currentReasoningEffort === 'default' ? null : currentReasoningEffort,
+        reasoningEffort: agentEffort === 'default' ? null : agentEffort,
+        targetCanvasId: boundCanvasId || undefined,
+      });
+      channel.postMessage({
+        type: 'REASONING_EFFORT_CHANGED',
+        reasoningEffort: agentEffort === 'default' ? null : agentEffort,
         targetCanvasId: boundCanvasId || undefined,
       });
     }
   }
 
-  renderThinkingLevels();
   renderAgentList();
 }
 
@@ -957,19 +982,17 @@ channel.addEventListener('message', (event) => {
     // 恢复 session 中绑定的 agent：更新 activeAgentId / localStorage / 高亮，不反向发 AGENT_CHANGED 避免循环
     if (data.agent && data.agent.id) {
       const restoredId = data.agent.id;
+      if (data.agent.reasoningEffort !== undefined) {
+        setAgentReasoningEffort(restoredId, data.agent.reasoningEffort || 'default');
+      }
       if (restoredId !== activeAgentId) {
         activeAgentId = restoredId;
         localStorage.setItem('fork_chat_active_agent_id', restoredId);
         if (data.agent.name) localStorage.setItem('fork_chat_active_agent_name', data.agent.name);
         if (data.agent.model) localStorage.setItem('fork_chat_active_agent_model', data.agent.model);
         if (data.agent.provider) localStorage.setItem('fork_chat_active_agent_provider', data.agent.provider);
-        renderAgentList();
       }
-      if (data.agent.reasoningEffort !== undefined) {
-        currentReasoningEffort = data.agent.reasoningEffort || 'default';
-        try { localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort); } catch {}
-      }
-      renderThinkingLevels();
+      renderAgentList();
     }
 
     renderSessionList();
