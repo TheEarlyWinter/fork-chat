@@ -227,57 +227,40 @@
       text-overflow: ellipsis;
     }
 
-    /* 助手卡片内嵌独立思考强度配置栏（纯白极简规范） */
+    /* 助手卡片内嵌独立思考深度下拉菜单（纯白极简规范） */
     .agent-thinking-row {
       margin-top: 4px;
       padding-top: 6px;
       border-top: 1px dashed var(--border);
       display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-    .agent-thinking-header {
-      display: flex;
       align-items: center;
       justify-content: space-between;
-      font-size: 9px;
+      gap: 6px;
+    }
+    .agent-thinking-label {
+      font-size: 10px;
       color: var(--text-muted);
-      letter-spacing: 0.03em;
+      letter-spacing: 0.02em;
     }
-    .agent-thinking-badge {
-      font-size: 9px;
-      padding: 0 4px;
-      background: var(--bg-subtle);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      color: var(--text);
-    }
-    .agent-thinking-pills {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-    }
-    .thinking-pill {
+    .thinking-select {
       background: #ffffff;
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: 4px;
       padding: 2px 6px;
       font-size: 10px;
       font-family: var(--mono);
-      color: var(--text-muted);
+      color: var(--text);
+      outline: none;
       cursor: pointer;
       transition: all 0.15s ease;
-      line-height: 1.2;
+      max-width: 140px;
     }
-    .thinking-pill:hover {
-      color: var(--text);
+    .thinking-select:hover {
       border-color: var(--border-dark);
     }
-    .thinking-pill.active {
-      background: var(--border-dark);
-      color: #ffffff;
+    .thinking-select:focus {
       border-color: var(--border-dark);
-      font-weight: 600;
+      box-shadow: 0 0 0 1px var(--border-dark);
     }
 
     /* 会话列表样式 */

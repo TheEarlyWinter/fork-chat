@@ -170,67 +170,53 @@ function renderAgentList() {
       ${a.description ? `<div class="agent-desc">${escapeHtml(a.description)}</div>` : ''}
     `;
 
-    // 若该助手支持思考深度，内嵌独立的胶囊单选栏
+    // 若该助手支持思考深度，内嵌独立的一级下拉选择菜单（纯白极简规范）
     if (supportsReasoning && availableLevels.length > 0) {
       const thinkingRow = document.createElement('div');
       thinkingRow.className = 'agent-thinking-row';
       thinkingRow.setAttribute('data-agent-id', a.id);
 
-      const header = document.createElement('div');
-      header.className = 'agent-thinking-header';
+      const label = document.createElement('span');
+      label.className = 'agent-thinking-label mono';
+      label.textContent = '思考深度:';
+      thinkingRow.appendChild(label);
 
-      const headerTitle = document.createElement('span');
-      headerTitle.className = 'mono';
-      headerTitle.textContent = '思考深度 / EFFORT';
-      header.appendChild(headerTitle);
-
-      const badge = document.createElement('span');
-      badge.className = 'agent-thinking-badge mono';
-      badge.id = `badge-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-      badge.textContent = THINKING_LEVEL_LABELS[currentEffort] || currentEffort;
-      header.appendChild(badge);
-
-      thinkingRow.appendChild(header);
-
-      const pillsBox = document.createElement('div');
-      pillsBox.className = 'agent-thinking-pills';
-      pillsBox.setAttribute('role', 'radiogroup');
-      pillsBox.setAttribute('aria-label', `${a.name || a.id}思考强度`);
+      const select = document.createElement('select');
+      select.className = 'thinking-select mono';
+      select.id = `select-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      select.setAttribute('aria-label', `${a.name || a.id}思考强度`);
 
       options.forEach(opt => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        const isOptActive = opt === currentEffort;
-        btn.className = `thinking-pill ${isOptActive ? 'active' : ''}`;
-        btn.id = `pill-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${opt}`;
-        btn.setAttribute('data-effort', opt);
-        btn.setAttribute('data-agent-id', a.id);
-        btn.setAttribute('role', 'radio');
-        btn.setAttribute('aria-checked', isOptActive ? 'true' : 'false');
-        btn.textContent = THINKING_LEVEL_LABELS[opt] || opt;
-        btn.title = opt === 'default' ? '使用模型默认思考配置' : `设置 ${a.name || a.id} 思考强度为 ${opt}`;
+        const option = document.createElement('option');
+        option.value = opt;
+        option.textContent = THINKING_LEVEL_LABELS[opt] || opt;
+        if (opt === currentEffort) option.selected = true;
+        select.appendChild(option);
+      });
+      select.value = currentEffort;
 
-        btn.addEventListener('click', (e) => {
-          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-          setAgentReasoningEffort(a.id, opt);
+      const stopProp = (e) => {
+        if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+      };
+      select.addEventListener('mousedown', stopProp);
+      select.addEventListener('click', stopProp);
+      select.addEventListener('change', (e) => {
+        stopProp(e);
+        const newEffort = select.value || 'default';
+        setAgentReasoningEffort(a.id, newEffort);
 
-          // 若修改的是当前活跃的助手，即时同步并广播给画布
-          if (a.id === activeAgentId) {
-            localStorage.setItem('fork_chat_reasoning_effort', opt);
-            channel.postMessage({
-              type: 'REASONING_EFFORT_CHANGED',
-              reasoningEffort: opt === 'default' ? null : opt,
-              targetCanvasId: boundCanvasId || undefined,
-            });
-          }
-
-          renderAgentList();
-        });
-
-        pillsBox.appendChild(btn);
+        // 若修改的是当前活跃的助手，即时同步并广播给画布
+        if (a.id === activeAgentId) {
+          localStorage.setItem('fork_chat_reasoning_effort', newEffort);
+          channel.postMessage({
+            type: 'REASONING_EFFORT_CHANGED',
+            reasoningEffort: newEffort === 'default' ? null : newEffort,
+            targetCanvasId: boundCanvasId || undefined,
+          });
+        }
       });
 
-      thinkingRow.appendChild(pillsBox);
+      thinkingRow.appendChild(select);
       card.appendChild(thinkingRow);
     }
 
