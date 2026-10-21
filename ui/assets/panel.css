@@ -293,6 +293,12 @@ html, body {
   color: var(--text-muted);
 }
 
+.card-origin-tag.tag-battle {
+  color: var(--text-main);
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
 .card-close-btn {
   background: transparent;
   border: none;

@@ -220,9 +220,17 @@ function renderConnectors() {
     const parent = cards.find(c => c.id === child.parentId);
     if (!parent) return;
 
+    const siblings = cards.filter(c => c.parentId === parent.id);
+    const sibIndex = siblings.indexOf(child);
+    const sibCount = siblings.length;
+    // 多分支子卡片在起点微调 Y 锚点错位，形成规整线束扇出效果
+    const startOffsetY = sibCount > 1
+      ? 110 + (sibIndex - (sibCount - 1) / 2) * 12
+      : 110;
+
     // 起点：父卡片右侧边缘锚点
     const startX = parent.x + parent.width;
-    const startY = parent.y + 110;
+    const startY = parent.y + startOffsetY;
 
     // 终点：子卡片左侧中点
     const endX = child.x;
@@ -515,11 +523,62 @@ async function openBattleDialog(card, initialPromptText = '') {
   }
 }
 
+function fitViewportToCluster(clusterCards) {
+  if (!clusterCards || clusterCards.length === 0) return;
+  const minX = Math.min(...clusterCards.map(c => c.x));
+  const maxX = Math.max(...clusterCards.map(c => c.x + (c.width || 340)));
+  const minY = Math.min(...clusterCards.map(c => c.y));
+  const maxY = Math.max(...clusterCards.map(c => c.y + 360));
+
+  const padX = 80;
+  const padY = 80;
+  const clusterWidth = (maxX - minX) + padX * 2;
+  const clusterHeight = (maxY - minY) + padY * 2;
+
+  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
+  const vpWidth = vpRect.width || 1000;
+  const vpHeight = vpRect.height || 700;
+
+  const targetScale = Math.min(1.0, Math.max(0.45, Math.min(vpWidth / clusterWidth, vpHeight / clusterHeight)));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  view.scale = Number(targetScale.toFixed(2));
+  view.x = Math.round(vpWidth / 2 - centerX * view.scale);
+  view.y = Math.round(vpHeight / 2 - centerY * view.scale);
+  updateTransform();
+}
+
+function calculateBranchYPositions(parentCard, count, targetX) {
+  const step = 380;
+  const totalSpan = (count - 1) * step;
+  const idealStartY = Math.round(parentCard.y - (totalSpan / 2));
+  const candidateYs = Array.from({ length: count }, (_, i) => idealStartY + i * step);
+
+  const existingInColumn = cards.filter(c => c.id !== parentCard.id && Math.abs(c.x - targetX) < 120);
+  if (existingInColumn.length === 0) {
+    return candidateYs;
+  }
+
+  // 检测理想排布是否与现有卡片发生重叠（间距小于 320px 视为重叠）
+  const hasCollision = candidateYs.some(y => existingInColumn.some(c => Math.abs(c.y - y) < 320));
+  if (!hasCollision) {
+    return candidateYs;
+  }
+
+  // 发生碰撞，向下平移至已有列的最底端之后
+  const maxY = Math.max(...existingInColumn.map(c => c.y));
+  const safeStartY = maxY + step;
+  return Array.from({ length: count }, (_, i) => safeStartY + i * step);
+}
+
 async function runBattleBranches(parentCard, prompt, selectedAgents) {
   if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
   const existingChildren = cards.filter(c => c.parentId === parentCard.id);
   const startBranchIndex = existingChildren.length + 1;
   const total = selectedAgents.length;
+  const targetX = parentCard.x + parentCard.width + 120;
+  const yPositions = calculateBranchYPositions(parentCard, total, targetX);
 
   const newCards = [];
   selectedAgents.forEach((agent, i) => {
@@ -528,16 +587,13 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
     const effort = getAgentReasoningEffort(agent.id);
     const effortLabel = effort && effort !== 'default' ? ` · 思考 ${effort}` : '';
 
-    const cardHeight = 360;
-    const totalSpan = (total - 1) * cardHeight;
-    const startY = parentCard.y - (totalSpan / 2);
-
     const childCard = {
       id: newId,
       parentId: parentCard.id,
+      isBattle: true,
       title: `对比 #${branchIndex} (${agent.name || agent.id}${effortLabel})`,
-      x: parentCard.x + parentCard.width + 120,
-      y: Math.round(startY + i * cardHeight),
+      x: targetX,
+      y: yPositions[i],
       width: 340,
       messages: [],
     };
@@ -549,10 +605,7 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   sessionController.scheduleSave();
 
   if (newCards.length > 0) {
-    const midCard = newCards[Math.floor(newCards.length / 2)];
-    view.x = -midCard.x + 300;
-    view.y = -midCard.y + 140;
-    updateTransform();
+    fitViewportToCluster([parentCard, ...newCards]);
   }
 
   const sendPromises = newCards.map((childCard, i) => {
@@ -596,14 +649,15 @@ function renderCards(preserve = true) {
     cardEl.style.width = `${card.width}px`;
 
     const isBranch = !!card.parentId;
+    const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
     const busy = activeRequests.has(card.id);
     const chainBusy = chainIsBusy(card);
     cardEl.innerHTML = `
       <div class="card-header" data-drag-handle="true">
         <div class="card-title-box">
-          <div class="card-dot" style="${isBranch ? 'background-color: #71717a;' : ''}"></div>
+          <div class="card-dot" style="${isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : '')}"></div>
           <span class="card-title">${escapeHtml(card.title)}</span>
-          ${isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : ''}
+          ${isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : '')}
         </div>
         <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
       </div>
@@ -1097,8 +1151,11 @@ if (typeof window !== 'undefined') {
     loadAvailableAgents,
     getAvailableAgents: () => cachedAgents,
     getCards: () => cards,
+    getView: () => view,
     openBattleDialog,
     closeBattleDialog,
     runBattleBranches,
+    calculateBranchYPositions,
+    fitViewportToCluster,
   };
 }
