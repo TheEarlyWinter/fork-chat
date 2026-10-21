@@ -615,20 +615,26 @@ html, body {
   z-index: 12;
 }
 
-/* 卡片右侧边缘拖拽调整宽度手柄 */
+/* 2D 卡片自由缩放手柄组 (右侧宽、底侧高、右下角对角) */
 .card-resize-handle {
   position: absolute;
-  right: -5px;
-  top: 0;
-  bottom: 0;
-  width: 10px;
-  cursor: ew-resize;
-  z-index: 8;
   user-select: none;
   touch-action: none;
 }
 
-.card-resize-handle::after {
+/* 右边缘拉伸手柄 */
+.card-resize-handle.handle-right,
+.card-resize-handle[data-direction="right"] {
+  right: -5px;
+  top: 0;
+  bottom: 12px;
+  width: 10px;
+  cursor: ew-resize;
+  z-index: 8;
+}
+
+.card-resize-handle.handle-right::after,
+.card-resize-handle[data-direction="right"]::after {
   content: '';
   position: absolute;
   top: 10px;
@@ -640,9 +646,67 @@ html, body {
   transition: background-color 0.15s ease;
 }
 
-.card-resize-handle:hover::after,
-.chat-card.is-resizing .card-resize-handle::after {
+.card-resize-handle.handle-right:hover::after,
+.chat-card.is-resizing .card-resize-handle.handle-right::after {
   background-color: #a1a1aa;
+}
+
+/* 底部边缘拉伸手柄 */
+.card-resize-handle.handle-bottom,
+.card-resize-handle[data-direction="bottom"] {
+  left: 0;
+  right: 12px;
+  bottom: -5px;
+  height: 10px;
+  cursor: s-resize;
+  z-index: 8;
+}
+
+.card-resize-handle.handle-bottom::after,
+.card-resize-handle[data-direction="bottom"]::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 4px;
+  height: 2px;
+  background-color: transparent;
+  border-radius: 1px;
+  transition: background-color 0.15s ease;
+}
+
+.card-resize-handle.handle-bottom:hover::after,
+.chat-card.is-resizing .card-resize-handle.handle-bottom::after {
+  background-color: #a1a1aa;
+}
+
+/* 右下角对角缩放手柄 */
+.card-resize-handle.handle-corner,
+.card-resize-handle[data-direction="corner"] {
+  right: -4px;
+  bottom: -4px;
+  width: 14px;
+  height: 14px;
+  cursor: se-resize;
+  z-index: 10;
+}
+
+.card-resize-handle.handle-corner::after,
+.card-resize-handle[data-direction="corner"]::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 5px;
+  height: 5px;
+  border-right: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+  transition: border-color 0.15s ease;
+}
+
+.card-resize-handle.handle-corner:hover::after,
+.chat-card.is-resizing .card-resize-handle.handle-corner::after {
+  border-color: #71717a;
 }
 
 .chat-card.is-resizing {
@@ -651,9 +715,25 @@ html, body {
   box-shadow: 0 0 0 1px #18181b, 0 6px 20px rgba(0, 0, 0, 0.08);
 }
 
+.chat-card.has-custom-height .card-body {
+  max-height: none;
+  flex: 1 1 0;
+}
+
 body.is-card-resizing {
-  cursor: ew-resize !important;
   user-select: none !important;
+}
+
+body.is-card-resizing.resizing-ew {
+  cursor: ew-resize !important;
+}
+
+body.is-card-resizing.resizing-s {
+  cursor: s-resize !important;
+}
+
+body.is-card-resizing.resizing-se {
+  cursor: se-resize !important;
 }
 
 .branch-anchor-btn {

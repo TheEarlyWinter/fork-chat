@@ -962,6 +962,10 @@ function renderCards(preserve = true) {
     cardEl.style.left = `${card.x}px`;
     cardEl.style.top = `${card.y}px`;
     cardEl.style.width = `${card.width}px`;
+    if (typeof card.height === 'number') {
+      cardEl.style.height = `${card.height}px`;
+      cardEl.classList.add('has-custom-height');
+    }
 
     const isBranch = Boolean(card.parentId || (Array.isArray(card.parentIds) && card.parentIds.length > 0));
     const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
@@ -1030,15 +1034,23 @@ function renderCards(preserve = true) {
         </div>
       </div>
 
-      <!-- 右侧边缘拖拽调整宽度手柄 -->
-      <div class="card-resize-handle" data-action="resize-card" title="按住拖拽调整卡片宽度"></div>
+      <!-- 2D 自由拉伸手柄组：右边缘(宽)、底边缘(高)、右下角(宽高对角) -->
+      <div class="card-resize-handle handle-right" data-action="resize-card" data-direction="right" title="按住拖拽调整卡片宽度"></div>
+      <div class="card-resize-handle handle-bottom" data-action="resize-card" data-direction="bottom" title="按住拖拽调整卡片高度"></div>
+      <div class="card-resize-handle handle-corner" data-action="resize-card" data-direction="corner" title="按住拖拽同时调整宽高"></div>
     `;
 
     bindCardEvents(cardEl, card);
     cardsLayer.appendChild(cardEl);
 
     const bodyEl = cardEl.querySelector(`#body-${card.id}`);
-    if (bodyEl) bodyEl.scrollTop = card.scrollToEnd || card.savedScrollTop === undefined ? bodyEl.scrollHeight : card.savedScrollTop;
+    if (bodyEl) {
+      if (typeof card.height === 'number') {
+        bodyEl.style.maxHeight = 'none';
+        bodyEl.style.flex = '1 1 0';
+      }
+      bodyEl.scrollTop = card.scrollToEnd || card.savedScrollTop === undefined ? bodyEl.scrollHeight : card.savedScrollTop;
+    }
     card.scrollToEnd = false;
   });
 
@@ -1221,32 +1233,56 @@ function bindCardEvents(cardEl, card) {
     window.addEventListener('mouseup', onMouseUp);
   });
 
-  // 1.1 卡片右侧边缘拖拽调整宽度
-  const resizeHandle = cardEl.querySelector('[data-action="resize-card"]');
-  if (resizeHandle) {
-    resizeHandle.addEventListener('mousedown', (e) => {
+  // 1.1 卡片 2D 自由拖拽缩放（右侧宽、底部高、右下角宽高对角）
+  const setupResize = (selector, direction) => {
+    const handle = cardEl.querySelector(selector);
+    if (!handle || handle.__resizeBound) return;
+    handle.__resizeBound = true;
+
+    handle.addEventListener('mousedown', (e) => {
       if (isSpacePressed) return;
       e.stopPropagation();
       e.preventDefault();
       if (!sessionController?.state.ready || sessionController.state.busy) return;
       const resizeGeneration = sessionController.generation;
       const startMouseX = e.clientX;
+      const startMouseY = e.clientY;
       const startWidth = card.width || 340;
+      const startHeight = card.height || cardEl.offsetHeight || 360;
+
       cardEl.classList.add('is-resizing');
       document.body?.classList.add('is-card-resizing');
+      if (direction === 'bottom') document.body?.classList.add('resizing-s');
+      else if (direction === 'corner') document.body?.classList.add('resizing-se');
+      else document.body?.classList.add('resizing-ew');
 
       const onMouseMove = (moveEvent) => {
         if (sessionController.generation !== resizeGeneration || !cards.includes(card)) return;
         const dx = (moveEvent.clientX - startMouseX) / view.scale;
-        const newWidth = Math.min(Math.max(Math.round(startWidth + dx), 260), 1200);
-        card.width = newWidth;
-        cardEl.style.width = `${newWidth}px`;
+        const dy = (moveEvent.clientY - startMouseY) / view.scale;
+
+        if (direction === 'right' || direction === 'corner') {
+          const newWidth = Math.min(Math.max(Math.round(startWidth + dx), 260), 1200);
+          card.width = newWidth;
+          cardEl.style.width = `${newWidth}px`;
+        }
+        if (direction === 'bottom' || direction === 'corner') {
+          const newHeight = Math.min(Math.max(Math.round(startHeight + dy), 200), 1600);
+          card.height = newHeight;
+          cardEl.style.height = `${newHeight}px`;
+          cardEl.classList.add('has-custom-height');
+          const bodyEl = cardEl.querySelector(`#body-${card.id}`);
+          if (bodyEl) {
+            bodyEl.style.maxHeight = 'none';
+            bodyEl.style.flex = '1 1 0';
+          }
+        }
         renderConnectors();
       };
 
       const onMouseUp = () => {
         cardEl.classList.remove('is-resizing');
-        document.body?.classList.remove('is-card-resizing');
+        document.body?.classList.remove('is-card-resizing', 'resizing-s', 'resizing-se', 'resizing-ew');
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
         if (sessionController.generation === resizeGeneration) {
@@ -1257,7 +1293,12 @@ function bindCardEvents(cardEl, card) {
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     });
-  }
+  };
+
+  setupResize('[data-direction="right"]', 'right');
+  setupResize('[data-direction="bottom"]', 'bottom');
+  setupResize('[data-direction="corner"]', 'corner');
+  setupResize('[data-action="resize-card"]', 'right');
 
   // 2. 发送消息并执行打字机流式推理
   const doSend = async () => {
@@ -1515,10 +1556,11 @@ function autoTidyLayout() {
   function layoutSubtree(node, depth) {
     const children = childrenMap.get(node.id) || [];
     node.targetX = colStartX.get(depth) ?? (startX + depth * 460);
+    const nodeH = typeof node.height === 'number' ? node.height : cardH;
 
     if (children.length === 0) {
       node.targetY = currentY;
-      currentY += cardH + gapY;
+      currentY += nodeH + gapY;
       return;
     }
 
@@ -1529,6 +1571,7 @@ function autoTidyLayout() {
     const firstChild = children[0];
     const lastChild = children[children.length - 1];
     node.targetY = Math.round((firstChild.targetY + lastChild.targetY) / 2);
+    currentY = Math.max(currentY, node.targetY + nodeH + gapY);
   }
 
   roots.forEach(root => {
@@ -1629,6 +1672,13 @@ async function extractDocumentFile(file) {
   }
 
   // 2. Word (.docx) 与 PDF 等复杂格式：调用后端解析服务
+  // 扫描件可能被升级到云端，等十几二十秒是正常的，先把话说在前面，别让人以为卡死了
+  const idleBadge = badgeStats ? badgeStats.textContent : '';
+  if (badgeStats) {
+    badgeStats.textContent = ext === '.pdf'
+      ? `正在解析 ${name}…（扫描件会走云端，可能要十几秒）`
+      : `正在解析 ${name}…`;
+  }
   try {
     let contentBase64 = '';
     if (typeof file.arrayBuffer === 'function') {
@@ -1660,6 +1710,8 @@ async function extractDocumentFile(file) {
       text: `[解析提示] 无法完全提取 ${name} 的文本内容: ${err.message || String(err)}`,
       preview: `文档解析遇到异常: ${err.message || String(err)}`,
     };
+  } finally {
+    if (badgeStats && idleBadge) badgeStats.textContent = idleBadge;
   }
 }
 
@@ -1690,7 +1742,7 @@ async function createDocumentCard(file, targetCoord = null) {
       {
         role: 'assistant',
         localOnly: true,
-        text: `【资料源就绪】已成功解析《${result.filename}》（${formatFileSize(result.size)} · ${result.charCount} 字）。\n\n点击卡片右侧 [+] 追问 或 [⑂ 对比]，即可以此文档为基座开辟分析分支。`,
+        text: `【资料源就绪】已成功解析《${result.filename}》（${formatFileSize(result.size)} · ${result.charCount} 字）· 引擎：${result.engineLabel || '本地'}。\n\n点击卡片右侧 [+] 追问 或 [⑂ 对比]，即可以此文档为基座开辟分析分支。`,
         docPreview: result.preview,
         docMeta: {
           name: result.filename,

@@ -180,6 +180,14 @@ export function normalizeForkSnapshot(input) {
     if (!Number.isFinite(cardWidth) || cardWidth < 220 || cardWidth > 2000) {
       throw createError("INVALID_SESSION_SNAPSHOT", `Card width out of range [220, 2000]: ${cardWidth}`);
     }
+    let cardHeight = undefined;
+    if (rawCard.height !== undefined && rawCard.height !== null) {
+      const parsedH = Number(rawCard.height);
+      if (!Number.isFinite(parsedH) || parsedH < 180 || parsedH > 3000) {
+        throw createError("INVALID_SESSION_SNAPSHOT", `Card height out of range [180, 3000]: ${parsedH}`);
+      }
+      cardHeight = Math.round(parsedH);
+    }
 
     // draft 字段
     const draft = typeof rawCard.draft === "string" ? rawCard.draft : "";
@@ -286,6 +294,7 @@ export function normalizeForkSnapshot(input) {
       draft,
       messages: normalizedMessages,
     };
+    if (typeof cardHeight === 'number') normCard.height = cardHeight;
     if (requestId) normCard.requestId = requestId;
     if (rawCard.isMerge) normCard.isMerge = true;
     if (rawCard.isBattle) normCard.isBattle = true;
