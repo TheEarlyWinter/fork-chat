@@ -120,6 +120,20 @@ const deleteDialogProgress = document.getElementById('delete-dialog-progress');
 const btnDeleteConfirm = document.getElementById('btn-delete-confirm');
 const btnDeleteCancel = document.getElementById('btn-delete-cancel');
 
+// 多模型横向推导 (Battle) 对话框元素
+const battleDialog = document.getElementById('battle-dialog');
+const battlePromptInput = document.getElementById('battle-prompt-input');
+const battleAgentsList = document.getElementById('battle-agents-list');
+const battleSelectedCount = document.getElementById('battle-selected-count');
+const battleDialogError = document.getElementById('battle-dialog-error');
+const btnBattleClose = document.getElementById('btn-battle-close');
+const btnBattleCancel = document.getElementById('btn-battle-cancel');
+const btnBattleSubmit = document.getElementById('btn-battle-submit');
+const btnUseLastPrompt = document.getElementById('btn-use-last-prompt');
+
+let battleTargetCard = null;
+const battleSelectedAgentIds = new Set();
+
 // 跨窗口同步助手与模型状态
 const bus = new BroadcastChannel('fork-chat-bus');
 let currentAgent = {
@@ -410,6 +424,146 @@ async function sendCardPrompt(card, text, options = {}) {
   }
 }
 
+function updateBattleSelectedCount() {
+  if (battleSelectedCount) {
+    battleSelectedCount.textContent = `已选 ${battleSelectedAgentIds.size} 个`;
+  }
+}
+
+function renderBattleAgentsList(agents) {
+  if (!battleAgentsList) return;
+  battleAgentsList.innerHTML = '';
+
+  agents.forEach(agent => {
+    const item = document.createElement('div');
+    const isChecked = battleSelectedAgentIds.has(agent.id);
+    item.className = `battle-agent-item ${isChecked ? 'is-selected' : ''}`;
+    item.id = `battle-agent-${agent.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+    const effort = getAgentReasoningEffort(agent.id);
+    const effortText = effort && effort !== 'default' ? `思考 ${effort}` : '默认思考';
+
+    item.innerHTML = `
+      <div class="battle-agent-item-left">
+        <input type="checkbox" id="chk-battle-${agent.id.replace(/[^a-zA-Z0-9_-]/g, '_')}" ${isChecked ? 'checked' : ''} tabindex="-1">
+        <span class="battle-agent-name">${escapeHtml(agent.name || agent.id)}</span>
+      </div>
+      <div class="battle-agent-item-right">
+        <span class="battle-agent-model mono">${escapeHtml(agent.model || 'default')}</span>
+        <span class="battle-agent-effort-badge mono">${escapeHtml(effortText)}</span>
+      </div>
+    `;
+
+    item.addEventListener('click', (e) => {
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+      const chk = item.querySelector('input[type="checkbox"]');
+      const nowChecked = !battleSelectedAgentIds.has(agent.id);
+      if (nowChecked) {
+        battleSelectedAgentIds.add(agent.id);
+      } else {
+        battleSelectedAgentIds.delete(agent.id);
+      }
+      if (chk) chk.checked = nowChecked;
+      if (nowChecked) item.classList.add('is-selected');
+      else item.classList.remove('is-selected');
+      updateBattleSelectedCount();
+    });
+
+    battleAgentsList.appendChild(item);
+  });
+}
+
+function closeBattleDialog() {
+  if (typeof battleDialog?.close === 'function') battleDialog.close();
+  battleTargetCard = null;
+}
+
+async function openBattleDialog(card, initialPromptText = '') {
+  if (chainIsBusy(card) || !cards.includes(card)) return;
+  battleTargetCard = card;
+  if (battleDialogError) battleDialogError.textContent = '';
+
+  const lastUserMsg = card.messages.filter(m => m.role === 'user' && !m.failed).at(-1)?.text || '';
+  const prompt = (typeof initialPromptText === 'string' && initialPromptText.trim())
+    ? initialPromptText.trim()
+    : (card.draft || lastUserMsg);
+
+  if (battlePromptInput) {
+    battlePromptInput.value = prompt;
+  }
+  if (btnUseLastPrompt) {
+    btnUseLastPrompt.onclick = () => {
+      if (lastUserMsg && battlePromptInput) battlePromptInput.value = lastUserMsg;
+    };
+  }
+
+  const agents = await loadAvailableAgents();
+  battleSelectedAgentIds.clear();
+
+  if (agents.length <= 2) {
+    agents.forEach(a => battleSelectedAgentIds.add(a.id));
+  } else {
+    agents.slice(0, 2).forEach(a => battleSelectedAgentIds.add(a.id));
+  }
+
+  renderBattleAgentsList(agents);
+  updateBattleSelectedCount();
+
+  if (typeof battleDialog?.showModal === 'function') {
+    battleDialog.showModal();
+    battlePromptInput?.focus?.({ preventScroll: true });
+  }
+}
+
+async function runBattleBranches(parentCard, prompt, selectedAgents) {
+  if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
+  const existingChildren = cards.filter(c => c.parentId === parentCard.id);
+  const startBranchIndex = existingChildren.length + 1;
+  const total = selectedAgents.length;
+
+  const newCards = [];
+  selectedAgents.forEach((agent, i) => {
+    const branchIndex = startBranchIndex + i;
+    const newId = uniqueId('battle_branch');
+    const effort = getAgentReasoningEffort(agent.id);
+    const effortLabel = effort && effort !== 'default' ? ` · 思考 ${effort}` : '';
+
+    const cardHeight = 360;
+    const totalSpan = (total - 1) * cardHeight;
+    const startY = parentCard.y - (totalSpan / 2);
+
+    const childCard = {
+      id: newId,
+      parentId: parentCard.id,
+      title: `对比 #${branchIndex} (${agent.name || agent.id}${effortLabel})`,
+      x: parentCard.x + parentCard.width + 120,
+      y: Math.round(startY + i * cardHeight),
+      width: 340,
+      messages: [],
+    };
+    newCards.push(childCard);
+    cards.push(childCard);
+  });
+
+  renderCards();
+  sessionController.scheduleSave();
+
+  if (newCards.length > 0) {
+    const midCard = newCards[Math.floor(newCards.length / 2)];
+    view.x = -midCard.x + 300;
+    view.y = -midCard.y + 140;
+    updateTransform();
+  }
+
+  const sendPromises = newCards.map((childCard, i) => {
+    const agent = selectedAgents[i];
+    const effort = getAgentReasoningEffort(agent.id);
+    return sendCardPrompt(childCard, prompt, { agent, reasoningEffort: effort });
+  });
+
+  await Promise.allSettled(sendPromises);
+}
+
 // 渲染所有卡片
 function renderCards(preserve = true) {
   // Never copy the previous session's DOM state into a newly loaded canvas.
@@ -467,13 +621,20 @@ function renderCards(preserve = true) {
       <div class="card-footer">
         <input type="text" class="card-input" placeholder="输入对话或追问..." id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
         <button class="card-send-btn" data-action="send" ${chainBusy ? 'disabled' : ''}>发送</button>
+        <button class="card-send-btn btn-card-battle" data-action="battle" ${chainBusy ? 'disabled' : ''} title="多模型横向推导 / 对抗">对比 ▾</button>
         <button class="card-send-btn" data-action="cancel" ${busy ? '' : 'hidden'}>取消</button>
       </div>
 
-      <!-- 右侧连线追问锚点 -->
-      <div class="branch-anchor-btn" data-action="branch" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '从这里开辟追问分支'}">
-        +
-        <div class="branch-tooltip">从此拉出追问</div>
+      <!-- 右侧连线追问与对比锚点组 -->
+      <div class="branch-anchors-group">
+        <div class="branch-anchor-btn" data-action="branch" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '从这里开辟追问分支'}">
+          +
+          <div class="branch-tooltip">从此拉出追问</div>
+        </div>
+        <div class="branch-anchor-btn btn-anchor-battle" data-action="branch-battle" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '多模型横向对比分支'}">
+          ⑂
+          <div class="branch-tooltip">对比分支</div>
+        </div>
       </div>
     `;
 
@@ -499,8 +660,10 @@ function bindCardEvents(cardEl, card) {
   const header = cardEl.querySelector('[data-drag-handle="true"]');
   const inputEl = cardEl.querySelector(`#input-${card.id}`);
   const btnSend = cardEl.querySelector('[data-action="send"]');
+  const btnBattle = cardEl.querySelector('[data-action="battle"]');
   const btnClose = cardEl.querySelector('[data-action="close"]');
   const btnBranch = cardEl.querySelector('[data-action="branch"]');
+  const btnBranchBattle = cardEl.querySelector('[data-action="branch-battle"]');
   const btnCancel = cardEl.querySelector('[data-action="cancel"]');
   for (const message of card.messages) {
     if (!message.requestId) continue;
@@ -521,6 +684,17 @@ function bindCardEvents(cardEl, card) {
     active.message.status = 'cancelled';
     active.message.failed = true;
     paintMessage(active.message);
+  });
+
+  btnBattle?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (chainIsBusy(card) || !cards.includes(card)) return;
+    void openBattleDialog(card, inputEl.value.trim());
+  });
+  btnBranchBattle?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (chainIsBusy(card) || !cards.includes(card)) return;
+    void openBattleDialog(card, inputEl.value.trim());
   });
 
   // 1. 卡片拖拽移动
@@ -884,6 +1058,34 @@ window.addEventListener('pagehide', () => {
   void sessionController.close().catch(() => {});
 });
 
+btnBattleClose?.addEventListener('click', closeBattleDialog);
+btnBattleCancel?.addEventListener('click', closeBattleDialog);
+battleDialog?.addEventListener('cancel', (e) => {
+  e.preventDefault();
+  closeBattleDialog();
+});
+
+btnBattleSubmit?.addEventListener('click', async () => {
+  const prompt = battlePromptInput?.value?.trim() || '';
+  if (!prompt) {
+    if (battleDialogError) battleDialogError.textContent = '请输入推导问题。';
+    return;
+  }
+  if (battleSelectedAgentIds.size === 0) {
+    if (battleDialogError) battleDialogError.textContent = '请至少选择一个对比助手。';
+    return;
+  }
+  if (battleDialogError) battleDialogError.textContent = '';
+
+  const targetCard = battleTargetCard;
+  const agents = cachedAgents.filter(a => battleSelectedAgentIds.has(a.id));
+  closeBattleDialog();
+
+  if (targetCard && cards.includes(targetCard)) {
+    void runBattleBranches(targetCard, prompt, agents);
+  }
+});
+
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
@@ -895,5 +1097,8 @@ if (typeof window !== 'undefined') {
     loadAvailableAgents,
     getAvailableAgents: () => cachedAgents,
     getCards: () => cards,
+    openBattleDialog,
+    closeBattleDialog,
+    runBattleBranches,
   };
 }

@@ -442,12 +442,20 @@ html, body {
   background-color: #27272a;
 }
 
-/* 核心锚点：右侧追问拉出按钮 */
-.branch-anchor-btn {
+/* 核心锚点：右侧追问与对比拉出按钮组 */
+.branch-anchors-group {
   position: absolute;
   right: -14px;
   top: 50%;
   transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 5;
+}
+
+.branch-anchor-btn {
+  position: relative;
   width: 26px;
   height: 26px;
   border-radius: 50%;
@@ -462,14 +470,19 @@ html, body {
   font-size: 13px;
   font-weight: 600;
   transition: transform 0.15s ease, background-color 0.15s ease;
-  z-index: 5;
   user-select: none;
 }
 
 .branch-anchor-btn:hover {
   background-color: #18181b;
   color: #ffffff;
-  transform: translateY(-50%) scale(1.1);
+  transform: scale(1.1);
+}
+
+.branch-anchor-btn.btn-anchor-battle {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
 }
 
 .branch-tooltip {
@@ -486,10 +499,232 @@ html, body {
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
+  z-index: 10;
 }
 
 .branch-anchor-btn:hover .branch-tooltip {
   opacity: 1;
+}
+
+.card-send-btn.btn-card-battle {
+  background-color: #ffffff;
+  color: var(--text-main);
+  border: 1px solid var(--border-dark);
+}
+
+.card-send-btn.btn-card-battle:hover {
+  background-color: var(--bg-card-header);
+  border-color: #18181b;
+}
+
+/* 对比推导模态框（纯白极简规范） */
+.battle-dialog {
+  margin: auto;
+  width: min(520px, calc(100vw - 36px));
+  padding: 22px 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+.battle-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.battle-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.battle-dialog-title-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.battle-tag {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.battle-dialog-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-main);
+}
+
+.battle-dialog-close {
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.battle-dialog-close:hover {
+  color: var(--text-main);
+}
+
+.battle-dialog-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 16px;
+}
+
+.battle-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.battle-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.battle-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: 0.03em;
+}
+
+.battle-selected-count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.battle-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.battle-link-btn:hover {
+  color: var(--text-main);
+}
+
+.battle-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #ffffff;
+  color: var(--text-main);
+  resize: vertical;
+  min-height: 60px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.battle-prompt-input:focus {
+  border-color: var(--border-dark);
+}
+
+.battle-agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.battle-agent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.battle-agent-item:hover {
+  border-color: var(--border-dark);
+  background: var(--bg-card-header);
+}
+
+.battle-agent-item.is-selected {
+  border-color: #18181b;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px #18181b;
+}
+
+.battle-agent-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.battle-agent-item input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: #18181b;
+}
+
+.battle-agent-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-main);
+}
+
+.battle-agent-item-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.battle-agent-model {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.battle-agent-effort-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  color: var(--text-main);
+}
+
+.battle-dialog-error {
+  font-size: 11px;
+  color: #b91c1c;
+  margin-top: 4px;
+}
+
+.battle-dialog-error:empty {
+  display: none;
+}
+
+.battle-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }
 
 /* 视口浮动缩放条 */

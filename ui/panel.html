@@ -60,6 +60,42 @@
       <button class="btn btn-danger" id="btn-delete-confirm" type="button">确认删除</button>
     </div>
   </dialog>
+
+  <!-- 多模型横向推导 / 对抗对话框（纯白极简规范） -->
+  <dialog class="battle-dialog" id="battle-dialog" aria-labelledby="battle-dialog-title" aria-describedby="battle-dialog-desc">
+    <div class="battle-dialog-header">
+      <div class="battle-dialog-title-box">
+        <span class="battle-tag mono">BATTLE / BENCHMARK</span>
+        <h2 id="battle-dialog-title">多模型横向推导</h2>
+      </div>
+      <button class="battle-dialog-close" id="btn-battle-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <p id="battle-dialog-desc" class="battle-dialog-desc">在当前上下文基础上，并发拉出多条独立分支同台推导。</p>
+    
+    <div class="battle-form-section">
+      <div class="battle-section-header">
+        <label class="battle-label mono" for="battle-prompt-input">推导问题 / PROMPT</label>
+        <button class="battle-link-btn mono" id="btn-use-last-prompt" type="button">引用父级上一问</button>
+      </div>
+      <textarea class="battle-prompt-input" id="battle-prompt-input" rows="3" placeholder="输入本次需要多模型对比推导的问题..."></textarea>
+    </div>
+
+    <div class="battle-form-section">
+      <div class="battle-section-header">
+        <label class="battle-label mono">选择对比助手 / AGENTS (可多选)</label>
+        <span class="battle-selected-count mono" id="battle-selected-count">已选 0 个</span>
+      </div>
+      <div class="battle-agents-list" id="battle-agents-list" role="group" aria-label="对比助手列表">
+        <!-- 动态渲染助手列表 -->
+      </div>
+      <div class="battle-dialog-error" id="battle-dialog-error" role="alert"></div>
+    </div>
+
+    <div class="battle-dialog-actions">
+      <button class="btn btn-outline" id="btn-battle-cancel" type="button">取消</button>
+      <button class="btn btn-primary" id="btn-battle-submit" type="button">开始并发推导</button>
+    </div>
+  </dialog>
   <script type="module" src="./assets/panel.js"></script>
 </body>
 </html>
