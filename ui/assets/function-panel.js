@@ -94,7 +94,9 @@ function renderAgentList() {
 async function loadAgents() {
   agentListEl.innerHTML = '<div class="empty-state">正在检索系统助手清单...</div>';
   try {
-    const res = await fetch(hana.api.url('/api/agents'));
+    const res = hana.api?.fetch
+      ? await hana.api.fetch('api/agents')
+      : await fetch(hana.api.url('api/agents'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.ok && Array.isArray(data.agents) && data.agents.length > 0) {

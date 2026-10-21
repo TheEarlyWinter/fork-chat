@@ -256,17 +256,29 @@ function bindCardEvents(cardEl, card) {
     renderCards();
 
     try {
-      const apiUrl = hana.api.url('/api/chat/stream');
-      
-      const res = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agentId: currentAgent.id,
-          modelRef: currentAgent.provider && currentAgent.model ? `${currentAgent.provider}/${currentAgent.model}` : currentAgent.model,
-          messages: contextMessages
-        })
-      });
+      let res;
+      if (hana.api?.fetch) {
+        res = await hana.api.fetch('api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: currentAgent.id,
+            modelRef: currentAgent.provider && currentAgent.model ? `${currentAgent.provider}/${currentAgent.model}` : currentAgent.model,
+            messages: contextMessages
+          })
+        });
+      } else {
+        const apiUrl = hana.api.url('api/chat/stream');
+        res = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: currentAgent.id,
+            modelRef: currentAgent.provider && currentAgent.model ? `${currentAgent.provider}/${currentAgent.model}` : currentAgent.model,
+            messages: contextMessages
+          })
+        });
+      }
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -287,12 +299,15 @@ function bindCardEvents(cardEl, card) {
         }
         asstMsg.text = accumulated;
         
-        // 实时平滑刷新卡片文字
-        const bubbleEl = cardEl.querySelector(`#body-${card.id} .msg-row:last-child .msg-bubble`);
-        if (bubbleEl) {
-          bubbleEl.textContent = accumulated;
-          const bodyEl = cardEl.querySelector(`#body-${card.id}`);
-          if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+        // 动态定位当前最新的 DOM 节点刷新打字机文字
+        const liveCardEl = document.getElementById(`dom-${card.id}`);
+        if (liveCardEl) {
+          const bubbleEl = liveCardEl.querySelector(`#body-${card.id} .msg-row:last-child .msg-bubble`);
+          if (bubbleEl) {
+            bubbleEl.textContent = accumulated;
+            const bodyEl = liveCardEl.querySelector(`#body-${card.id}`);
+            if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+          }
         }
       }
     } catch (err) {
