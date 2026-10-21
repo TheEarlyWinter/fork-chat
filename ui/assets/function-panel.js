@@ -145,7 +145,8 @@ function renderAgentList() {
     const rawLevels = (Array.isArray(a.thinkingLevels) && a.thinkingLevels.length > 0)
       ? a.thinkingLevels
       : (Array.isArray(matchedModel?.thinkingLevels) ? matchedModel.thinkingLevels : []);
-    const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim());
+    // 过滤掉测试遗留的 "off" 显眼包，仅保留真正递增的深度档位
+    const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim() && lvl.trim().toLowerCase() !== 'off');
 
     // 读取该助手独立保存的思考强度
     let currentEffort = getAgentReasoningEffort(a.id);
