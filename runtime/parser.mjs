@@ -1,253 +1,173 @@
 #!/usr/bin/env node
-/**
- * App 的 Node 助手：替主进程把大文件流式送去 MinerU。
- *
- * 为什么需要它：主进程走的是宿主的 network.fetch RPC，每条消息上限 32 MiB，
- * 26 MB 的扫描件一转 base64 就 34 MiB，必然被拒。这个进程用原生 HTTP/HTTPS
- * 直连，文件从磁盘边读边发，不经过任何消息通道。
- *
- * 边界（都在这里自己兜）：
- *   - 只监听 127.0.0.1，端口由 App 传入并预先声明给宿主
- *   - 只读 dataDir 内、由 App 交办的文件，真实路径与符号链接都校验
- *   - 只连 MinerU 官方域名，https，重定向逐跳复核
- *   - Token 只从请求体拿，不进日志、不进命令行
- *   - 结果落盘，回给 App 的只有小状态与文件路径
- */
-import http from "node:http";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import { parsePdfWithMineru, storeMineruCache } from "../lib/mineru-parse.js";
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { parsePdfWithMineru, storeMineruCache } from '../lib/mineru-parse.js';
+import { privateDirectory, openCheckedFile, readCheckedFile, exclusiveFile } from '../lib/file-safety.js';
+import { assertMineruUrl, createCheckedFetch, parserError } from '../lib/parser-network.js';
 
-const READY_MARKER = "PARSER_READY";
-const MAX_JOB_BYTES = 200 * 1024 * 1024;
-const MAX_CONCURRENT_JOBS = 2;
-const MAX_ZIP_BYTES = 250 * 1024 * 1024;
-const JOB_TTL_MS = 10 * 60 * 1000;
+const MAX_FILE = 200 * 1024 * 1024;
+const FILE_ID = /^[a-f0-9]{32}\.[a-z0-9]{1,8}$/;
+const JOB_ID = /^[a-f0-9]{32}$/;
+export const assertSafeUrl = assertMineruUrl;
 
-const port = Number(process.argv[2] || process.env.PARSER_PORT || 0);
-const dataDir = process.env.PARSER_DATA_DIR || process.cwd();
-const resultDir = path.join(dataDir, "helper-results");
-
-/** jobId → { status, stage, startedAt, ... } */
-const jobs = new Map();
-let running = 0;
-
-function log(message) {
-  // 只用 stdout 报状态，不打印文件内容、Token 或签名 URL
-  process.stdout.write(`${JSON.stringify({ type: "log", text: String(message).slice(0, 300) })}\n`);
+export async function assertReadableInsideDataDir(target, dataDir = process.env.PARSER_DATA_DIR || process.cwd()) {
+  const root = await privateDirectory(dataDir, 'uploads');
+  const file = await openCheckedFile(root, path.resolve(target), MAX_FILE);
+  try { return { realPath: file.filePath, size: file.size }; } finally { await file.handle.close(); }
 }
 
-/** 只连官方域名，https，且不接受可疑跳转 */
-const ALLOWED_HOSTS = ["mineru.net", "cdn-mineru.openxlab.org.cn", "oss-mineru.openxlab.org.cn"];
-export function assertSafeUrl(raw, label) {
-  let url;
-  try {
-    url = new URL(String(raw));
-  } catch {
-    throw new Error(`${label}不是合法地址`);
-  }
-  if (url.protocol !== "https:") throw new Error(`${label}必须使用 https`);
-  const host = url.hostname.toLowerCase();
-  const ok = ALLOWED_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
-  if (!ok) throw new Error(`${label}域名不在白名单：${host}`);
-  return url;
-}
-
-/** 包一层 fetch：带上超时与响应体上限，跳转后复核目标域名 */
-async function nodeFetch(input, init = {}) {
-  const { timeoutMs, maxResponseBytes, ...rest } = init;
-  const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
-  let current = String(input);
-  assertSafeUrl(current, "请求地址");
-
-  for (let hop = 0; hop < 4; hop += 1) {
-    const response = await fetch(current, { ...rest, signal, redirect: "manual" });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location) return response;
-      current = new URL(location, current).toString();
-      assertSafeUrl(current, "跳转地址");
-      if (rest.method && rest.method !== "GET" && rest.method !== "HEAD") {
-        throw new Error("上传请求遇到跳转，已拒绝以免重放内容");
+export async function createParserService({ dataDir, authToken, generation = 'test', fetchImpl, parseFn = parsePdfWithMineru, jobTimeoutMs, cancelWaitMs = 1000 } = {}) {
+  if (!/^[a-f0-9]{64}$/.test(authToken || '')) throw new Error('缺少运行时控制凭据');
+  const uploadsRoot = await privateDirectory(dataDir, 'uploads');
+  const resultsRoot = await privateDirectory(dataDir, 'helper-results');
+  const checkedFetch = createCheckedFetch({ fetchImpl });
+  const jobs = new Map();
+  let active = 0;
+  const authorised = req => {
+    const actual = Buffer.from(String(req.headers.authorization || ''));
+    const expected = Buffer.from(`Bearer ${authToken}`);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  };
+  const send = (res, status, data) => {
+    if (!res.destroyed) { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); }
+  };
+  const publicJob = job => ({ status: job.status, stage: job.stage, error: job.error, code: job.code, settled: job.settled, resultFile: job.status === 'done' ? job.resultFile : undefined, elapsedMs: Date.now() - job.startedAt });
+  const cancel = job => {
+    if (job.status !== 'running') return;
+    job.status = 'cancelled'; job.stage = '已取消'; job.error = '已取消'; job.code = 'REQUEST_CANCELLED';
+    job.controller.abort(new DOMException('已取消', 'AbortError'));
+    for (const stream of job.streams) stream.destroy(new DOMException('已取消', 'AbortError'));
+  };
+  async function run(job) {
+    let resultFile;
+    try {
+      const signal = job.controller.signal;
+      const hash = createHash('sha256');
+      for await (const chunk of job.file.handle.createReadStream({ start: 0, autoClose: false })) {
+        signal.throwIfAborted(); hash.update(chunk);
       }
-      continue;
+      if (hash.digest('hex') !== job.sha256) throw new Error('上传文件完整性校验失败');
+      signal.throwIfAborted();
+      const result = await parseFn({
+        buffer: null, fileName: job.filename, fileSize: job.file.size, options: job.options, signal,
+        fetchFn: (input, init = {}) => checkedFetch(input, { ...init, signal }),
+        createBody: () => {
+          signal.throwIfAborted();
+          const stream = job.file.handle.createReadStream({ start: 0, autoClose: false });
+          job.streams.add(stream);
+          stream.once('close', () => job.streams.delete(stream));
+          return stream;
+        },
+        onProgress(stage) { if (job.status === 'running') job.stage = String(stage).slice(0, 80); },
+      });
+      signal.throwIfAborted();
+      // parseFn's output is bounded; never put ZIP bytes in an RPC or status response.
+      if (result._zip) await storeMineruCache({ dataDir, cacheId: result.cacheId, zipBytes: result._zip });
+      signal.throwIfAborted();
+      const { _zip, ...payload } = result;
+      resultFile = `${job.id}.json`;
+      const out = await exclusiveFile(resultsRoot, resultFile);
+      try { await out.writeFile(JSON.stringify({ ...payload, engineLabel: 'MinerU 云端' })); } finally { await out.close(); }
+      signal.throwIfAborted();
+      job.resultFile = resultFile; job.status = 'done'; job.stage = '完成';
+    } catch (error) {
+      if (job.status === 'running') {
+        job.status = 'error'; job.stage = '失败'; job.code = error?.name === 'AbortError' ? 'REQUEST_CANCELLED' : 'PARSE_FAILED';
+        job.error = parserError(error, [job.options?.token]);
+      }
+      if (resultFile) await fs.rm(path.join(resultsRoot, resultFile), { force: true }).catch(() => {});
+    } finally {
+      clearTimeout(job.timer);
+      for (const stream of job.streams) stream.destroy();
+      await job.file.handle.close().catch(() => {});
+      job.options = null; job.file = null; job.streams.clear();
+      job.settled = true; job.finishedAt = Date.now(); active--;
+      job.expiry = setTimeout(() => {
+        jobs.delete(job.id);
+        if (job.resultFile) void fs.rm(path.join(resultsRoot, job.resultFile), { force: true }).catch(() => {});
+      }, 10 * 60 * 1000);
+      job.expiry.unref();
     }
-    const declared = Number(response.headers.get("content-length") || 0);
-    if (maxResponseBytes && declared && declared > maxResponseBytes) {
-      throw new Error(`响应过大：${declared} 字节`);
+  }
+  async function body(req) {
+    let bytes = 0; const chunks = [];
+    for await (const chunk of req) {
+      bytes += chunk.length;
+      if (bytes > 64 * 1024) throw new Error('控制请求过大');
+      chunks.push(chunk);
     }
-    return response;
+    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
   }
-  throw new Error("跳转次数过多");
-}
-
-export async function assertReadableInsideDataDir(target) {
-  const realDataDir = await fsp.realpath(dataDir);
-  const resolved = path.resolve(String(target));
-  if (!resolved.startsWith(realDataDir + path.sep)) throw new Error("文件不在 App 数据目录内");
-  const stat = await fsp.lstat(resolved);
-  if (stat.isSymbolicLink()) throw new Error("拒绝读取符号链接");
-  if (!stat.isFile()) throw new Error("目标不是普通文件");
-  if (stat.size > MAX_JOB_BYTES) throw new Error(`文件超过 ${Math.round(MAX_JOB_BYTES / 1048576)} MB`);
-  return { realPath: resolved, size: stat.size };
-}
-
-async function runJob(jobId, job) {
-  running += 1;
-  try {
-    const { realPath, size } = await assertReadableInsideDataDir(job.filePath);
-    job.size = size;
-    job.stage = "上传文件";
-    log(`任务 ${jobId.slice(0, 8)} 开始，${(size / 1048576).toFixed(2)} MB`);
-
-    const result = await parsePdfWithMineru({
-      buffer: null,
-      fileName: job.filename || path.basename(realPath),
-      fileSize: size,
-      options: job.options,
-      fetchFn: nodeFetch,
-      createBody: () => fs.createReadStream(realPath),
-      onProgress: (stage) => {
-        job.stage = stage;
-      },
-    });
-
-    const zipBytes = result._zip;
-    if (zipBytes && zipBytes.length > MAX_ZIP_BYTES) throw new Error("结果包超过上限");
-    await storeMineruCache({ dataDir, cacheId: result.cacheId, zipBytes });
-
-    await fsp.mkdir(resultDir, { recursive: true });
-    const resultPath = path.join(resultDir, `${jobId}.json`);
-    const payload = {
-      ok: true,
-      source: result.source,
-      engine: result.engine,
-      engineLabel: "MinerU 云端",
-      modelVersion: result.modelVersion,
-      language: result.language,
-      ocrFallback: result.ocrFallback,
-      fileName: result.fileName,
-      charCount: result.charCount,
-      pageCount: result.pageCount,
-      imageCount: result.imageCount,
-      elapsedMs: result.elapsedMs,
-      cacheId: result.cacheId,
-      text: result.text,
-    };
-    await fsp.writeFile(resultPath, JSON.stringify(payload));
-
-    job.status = "done";
-    job.stage = "完成";
-    job.chars = result.charCount;
-    job.resultPath = resultPath;
-    log(`任务 ${jobId.slice(0, 8)} 完成，${result.charCount} 字`);
-  } catch (err) {
-    job.status = "error";
-    job.stage = "失败";
-    job.error = String(err?.message || err).slice(0, 500);
-    log(`任务 ${jobId.slice(0, 8)} 失败：${job.error}`);
-  } finally {
-    job.finishedAt = Date.now();
-    running -= 1;
-    setTimeout(() => jobs.delete(jobId), JOB_TTL_MS).unref?.();
-  }
-}
-
-function sendJson(res, status, body) {
-  const data = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(data) });
-  res.end(data);
-}
-
-async function readBody(req, limit = 256 * 1024) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > limit) throw new Error("请求体过大");
-    chunks.push(chunk);
-  }
-  if (!total) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const server = http.createServer(async (req, res) => {
+    if (!authorised(req)) { req.resume(); return send(res, 401, { ok: false, error: '控制请求未授权' }); }
+    try {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, protocol: 2, generation, active });
+      if (req.method === 'POST' && url.pathname === '/jobs') {
+        const input = await body(req);
+        if (!FILE_ID.test(input.fileId || '') || !/^[a-f0-9]{64}$/.test(input.sha256 || '') || input.jobId !== undefined || input.filePath !== undefined) throw new Error('文件引用无效');
+        if (typeof input.options?.token !== 'string' || !input.options.token || input.options.token.length > 8192) throw new Error('缺少有效 MinerU 配置');
+        const api = assertMineruUrl(input.options.apiBase || 'https://mineru.net/api/v4');
+        if (!(api.hostname === 'mineru.net' || api.hostname.endsWith('.mineru.net'))) throw new Error('API 域名无效');
+        if (!String(input.filename || '').toLowerCase().endsWith('.pdf')) throw new Error('云端只支持 PDF');
+        const file = await openCheckedFile(uploadsRoot, path.join(uploadsRoot, input.fileId), MAX_FILE);
+        if (active >= 2) { await file.handle.close(); return send(res, 429, { ok: false, error: '助手正在忙' }); }
+        // Reserve after every await, before starting asynchronous work.
+        active++;
+        const id = randomUUID().replaceAll('-', '');
+        const job = { id, file, sha256: input.sha256, filename: path.basename(input.filename).slice(0, 200), options: { ...input.options, apiBase: api.href.replace(/\/$/, '') }, controller: new AbortController(), streams: new Set(), status: 'running', stage: '准备解析', startedAt: Date.now(), settled: false };
+        jobs.set(id, job);
+        if (jobs.size > 64) for (const [oldId, old] of jobs) if (old.settled && oldId !== id) {
+          jobs.delete(oldId); clearTimeout(old.expiry);
+          if (old.resultFile) void fs.rm(path.join(resultsRoot, old.resultFile), { force: true }).catch(() => {});
+          break;
+        }
+        const duration = jobTimeoutMs ?? Math.min(15 * 60 * 1000, Math.max(30000, ((Number(input.options.timeoutSeconds) || 300) + 120) * 1000));
+        job.timer = setTimeout(() => cancel(job), duration); job.timer.unref();
+        job.finished = run(job);
+        return send(res, 202, { ok: true, jobId: id, timeoutMs: duration });
+      }
+      const id = url.pathname.startsWith('/jobs/') ? url.pathname.slice(6) : '';
+      if (!JOB_ID.test(id) || !jobs.has(id)) return send(res, 404, { ok: false, error: '任务不存在或已过期' });
+      const job = jobs.get(id);
+      if (req.method === 'GET') return send(res, 200, { ok: true, ...publicJob(job) });
+      if (req.method === 'DELETE') {
+        cancel(job);
+        let timer;
+        await Promise.race([job.finished, new Promise(resolve => { timer = setTimeout(resolve, cancelWaitMs); })]);
+        clearTimeout(timer);
+        return send(res, 200, { ok: true, ...publicJob(job) });
+      }
+      return send(res, 405, { ok: false });
+    } catch (error) { return send(res, 400, { ok: false, error: parserError(error) }); }
+  });
+  server.requestTimeout = 15000; server.headersTimeout = 10000;
+  return {
+    server, jobs,
+    async close() {
+      for (const job of jobs.values()) { cancel(job); clearTimeout(job.expiry); }
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+      await Promise.allSettled([...jobs.values()].map(job => job.finished));
+      for (const job of jobs.values()) clearTimeout(job.expiry);
+    },
+  };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-
-const server = isMain
-  ? http.createServer(handleRequest)
-  : null;
-
-async function handleRequest(req, res) {
-  try {
-    const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
-
-    if (req.method === "GET" && url.pathname === "/health") {
-      return sendJson(res, 200, { ok: true, ready: true, running, jobs: jobs.size });
-    }
-
-    if (req.method === "POST" && url.pathname === "/jobs") {
-      if (running >= MAX_CONCURRENT_JOBS) return sendJson(res, 429, { ok: false, error: "助手正在忙，请稍候" });
-      const body = await readBody(req);
-      if (!body.filePath) return sendJson(res, 400, { ok: false, error: "缺少 filePath" });
-      if (!body.options?.token) return sendJson(res, 400, { ok: false, error: "缺少 MinerU 配置" });
-      const jobId = String(body.jobId || randomUUID().replace(/-/g, "").slice(0, 16));
-      const job = {
-        status: "running",
-        stage: "排队",
-        startedAt: Date.now(),
-        filePath: String(body.filePath),
-        filename: String(body.filename || ""),
-        options: body.options,
-      };
-      jobs.set(jobId, job);
-      void runJob(jobId, job);
-      return sendJson(res, 202, { ok: true, jobId });
-    }
-
-    if (req.method === "GET" && url.pathname.startsWith("/jobs/")) {
-      const jobId = decodeURIComponent(url.pathname.slice("/jobs/".length));
-      const job = jobs.get(jobId);
-      if (!job) return sendJson(res, 404, { ok: false, error: "任务不存在或已过期" });
-      return sendJson(res, 200, {
-        ok: true,
-        status: job.status,
-        stage: job.stage,
-        chars: job.chars,
-        resultPath: job.resultPath,
-        error: job.error,
-        elapsedMs: Date.now() - job.startedAt,
-      });
-    }
-
-    if (req.method === "DELETE" && url.pathname.startsWith("/jobs/")) {
-      const jobId = decodeURIComponent(url.pathname.slice("/jobs/".length));
-      const job = jobs.get(jobId);
-      if (!job) return sendJson(res, 404, { ok: false, error: "任务不存在" });
-      job.status = "error";
-      job.error = "已取消";
-      return sendJson(res, 200, { ok: true });
-    }
-
-    return sendJson(res, 404, { ok: false, error: "未知路径" });
-  } catch (err) {
-    return sendJson(res, 400, { ok: false, error: String(err?.message || err).slice(0, 300) });
-  }
-}
-
-if (server) {
-  server.listen(port, "127.0.0.1", () => {
-    const actual = server.address()?.port;
-    // 宿主靠这一行认定服务就绪，然后才允许代理到这个端口
-    process.stdout.write(`${READY_MARKER} ${actual}\n`);
-  });
-
-  function shutdown() {
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 3000).unref?.();
-  }
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+if (isMain) {
+  const port = Number(process.argv[2]);
+  const name = process.argv[3];
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{32}\.json$/.test(name || '')) throw new Error('运行时启动参数无效');
+  const dataDir = process.cwd();
+  const control = await privateDirectory(dataDir, '.parser-control');
+  const config = JSON.parse((await readCheckedFile(control, path.join(control, name), 2048)).toString('utf8'));
+  await fs.rm(path.join(control, name));
+  const service = await createParserService({ dataDir, authToken: config.token, generation: name.slice(0, 32) });
+  service.server.listen(port, '127.0.0.1', () => process.stdout.write('PARSER_READY\n'));
+  const shutdown = () => { void service.close().finally(() => process.exit(0)); setTimeout(() => process.exit(1), 3000).unref(); };
+  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

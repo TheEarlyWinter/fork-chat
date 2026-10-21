@@ -4,20 +4,10 @@ import { createChatService } from "./lib/chat.js";
 import { parseDocumentSmart } from "./lib/parse-router.js";
 import { resolveMineruOptions } from "./lib/mineru-parse.js";
 import { createAppSettings } from "./lib/app-settings.js";
-import { createUploadStore } from "./lib/upload-store.js";
+import { createDocumentService } from "./lib/document-service.js";
+import { parserError } from "./lib/parser-network.js";
 import fs from "node:fs/promises";
 import path from "node:path";
-import net from "node:net";
-
-/** 调用方身份：拿不到就用 local，至少不会跨会话串读 */
-function ownerOf(c) {
-  return (
-    c.req.header("x-hana-app-surface-session") ||
-    c.req.header("x-hana-document-binding") ||
-    c.req.header("x-hana-app-iframe-ticket") ||
-    "local"
-  );
-}
 
 export const name = "timeline-reverser";
 
@@ -269,60 +259,7 @@ export default defineApp(async (sdk) => {
   /** 宿主网络出口：manifest 没声明 network 时这里会是 null，云端解析自动降级 */
   const hostFetch = sdk.network?.fetch ? (input, init) => sdk.network.fetch(input, init) : null;
 
-  /** 异步解析任务表：放内存就行，App 重启丢了也无所谓，文件还在磁盘上 */
-  const parseJobs = new Map();
-  /** 分块上传账本：所有体积极限在服务端再算一遍，不信前端 */
-  const uploadStore = createUploadStore({ dataDir, logger: sdk.logger });
-  const MAX_CONCURRENT_JOBS = 4;
-  /** 超过这个体积就走 Node 肋手流式上传，不再挤 32 MiB 的 RPC */
-  const LARGE_FILE_BYTES = 16 * 1024 * 1024;
-  let parserRuntime = null;
-
-  /** 找一个空闲的回环端口，宿主要求提前声明端口才能代理 */
-  function pickLoopbackPort() {
-    return new Promise((resolve, reject) => {
-      const probe = net.createServer();
-      probe.once("error", reject);
-      probe.listen(0, "127.0.0.1", () => {
-        const port = probe.address().port;
-        probe.close(() => resolve(port));
-      });
-    });
-  }
-
-  /** 确保 Node 肋手在跑。权限没批时这里会抛错，交给上层说清楚 */
-  async function ensureParserRuntime() {
-    if (parserRuntime?.state === "ready") return parserRuntime;
-    if (typeof sdk.runtime?.start !== "function") {
-      throw Object.assign(new Error("当前宿主不支持托管运行时，大文件无法云端解析"), { code: "runtime_unsupported" });
-    }
-    const port = await pickLoopbackPort();
-    const info = await sdk.runtime.start({
-      runtime: "node",
-      entry: "runtime/parser.mjs",
-      args: [String(port)],
-      profile: "native",
-      network: "external",
-      service: { port, readyMarker: "PARSER_READY" },
-    });
-    parserRuntime = info;
-    void sdk.logger.info(`[parser-runtime] 已启动 ${info.runtimeId} · ${info.state} · ${info.profile}/${info.network}`);
-    return info;
-  }
-
-  /** 等肋手报就绪，宿主得先看到 readyMarker 才会打开代理 */
-  async function waitParserReady(info, timeoutMs = 15000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const current = await sdk.runtime.get(info.runtimeId).catch(() => null);
-      if (current?.service?.state === "ready") return current;
-      if (current?.state === "failed" || current?.state === "exited") {
-        throw new Error(`解析助手启动失败（${current.state}）`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-    throw new Error("解析助手未在预期时间内就绪");
-  }
+  const documents = createDocumentService({ sdk, dataDir, getConfig });
 
   /** 脱敏 token：只露头尾，够用户认出是哪一把 */
   const maskToken = (token) => {
@@ -345,11 +282,7 @@ export default defineApp(async (sdk) => {
         type: "object",
         properties: {
           filename: { type: "string", description: "展示用文件名，需带扩展名，例如 论文.pdf" },
-          path: {
-            type: "string",
-            description: "文档在 App 数据目录内的相对路径，例如 uploads/1699.pdf。与 contentBase64 二选一。",
-          },
-          contentBase64: { type: "string", description: "文档的 Base64 内容。文件较大时优先用 path。" },
+          contentBase64: { type: "string", description: "不超过 16 MiB 的文件内容（Base64）。大文件必须在面板上传，不支持路径读取。" },
           mode: {
             type: "string",
             enum: ["auto", "local", "cloud"],
@@ -357,25 +290,15 @@ export default defineApp(async (sdk) => {
           },
           maxChars: { type: "number", description: "返回文本的字符上限，默认 40000" },
         },
-        required: ["filename"],
+        required: ["filename", "contentBase64"],
       },
       execute: async (args) => {
         const payload = args || {};
         const maxChars = Number.isFinite(payload.maxChars) ? Math.max(1000, Math.min(200000, payload.maxChars)) : 40000;
         try {
-          let contentBase64 = typeof payload.contentBase64 === "string" ? payload.contentBase64 : undefined;
-          if (!contentBase64 && payload.path) {
-            // 只允许读 App 数据目录内的文件，防止顺着手滑读穿到别处
-            const root = path.resolve(dataDir);
-            const abs = path.resolve(root, String(payload.path));
-            if (!abs.startsWith(root + path.sep)) {
-              return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "只能读取 App 数据目录内的文件" }) }] };
-            }
-            contentBase64 = (await fs.readFile(abs)).toString("base64");
-          }
-          if (!contentBase64) {
-            return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "缺少文件内容（需要 path 或 contentBase64）" }) }] };
-          }
+          if (payload.path !== undefined) throw new Error("工具不接受任意 path，请使用面板上传或小文件 contentBase64");
+          const contentBase64 = payload.contentBase64;
+          if (typeof contentBase64 !== "string" || !contentBase64 || contentBase64.length > Math.ceil(16 * 1024 * 1024 / 3) * 4) throw new Error("缺少文件内容或超过 16 MiB，请在面板上传");
           const result = await parseDocumentSmart({
             filename: payload.filename,
             contentBase64,
@@ -411,7 +334,7 @@ export default defineApp(async (sdk) => {
           };
         } catch (err) {
           return {
-            content: [{ type: "text", text: JSON.stringify({ ok: false, error: err?.message || String(err), code: err?.code || null }) }],
+            content: [{ type: "text", text: JSON.stringify({ ok: false, error: parserError(err), code: err?.code || null }) }],
           };
         }
       },
@@ -505,226 +428,7 @@ export default defineApp(async (sdk) => {
       // 4. 取消流式推理接口
       app.post("/api/chat/cancel", (c) => chatService.handleCancel(c));
 
-      // 5. 大文件分块上传：宿主单次 RPC 上限 32 MiB，base64 再胀三分之一，
-      // 26 MB 的扫描件直接就被挡在门外，所以大文件只能切块送进来
-      // 5. 分块上传：首块不带 uploadId（由服务端开户），后续块带回来。
-      // 体积极限、块数、归属全在 lib/upload-store.js 里把关，前端说的尺寸不算数。
-      app.post("/api/document/upload", async (c) => {
-        try {
-          const body = await c.req.json();
-          const owner = ownerOf(c);
-          let uploadId = String(body.uploadId || "");
-
-          if (!uploadId) {
-            uploadId = uploadStore.begin({
-              owner,
-              filename: body.filename,
-              size: body.size ?? body.totalSize,
-              total: body.total,
-            }).uploadId;
-          }
-
-          const chunk = Buffer.from(String(body.chunk || ""), "base64");
-          const result = await uploadStore.writeChunk({ uploadId, owner, index: body.index, buffer: chunk });
-          return c.json({ ok: true, ...result });
-        } catch (err) {
-          return c.json({ ok: false, error: err.message || String(err) }, 400);
-        }
-      });
-
-      /** 解析侧取文件：只认已完成、且属于本次调用方的上传 */
-      async function resolveDocument({ uploadId, contentBase64, owner }) {
-        if (uploadId) {
-          const ref = await uploadStore.resolve({ uploadId, owner });
-          if (!ref) throw Object.assign(new Error("上传不存在、未完成或不属于本次会话"), { code: "upload_not_found" });
-          // 不在这里读进内存：大文件要交给助手流式上传
-          return { filePath: ref.filePath, filename: ref.filename, size: ref.size, uploadId };
-        }
-        if (contentBase64) {
-          const buffer = Buffer.from(String(contentBase64), "base64");
-          if (!buffer.length) throw new Error("直传内容为空");
-          if (buffer.length > 16 * 1024 * 1024) {
-            throw Object.assign(new Error("直传内容超过 16 MB，请改用分块上传"), { code: "too_large" });
-          }
-          return { contentBase64: buffer.toString("base64"), size: buffer.length };
-        }
-        throw Object.assign(new Error("缺少文件引用"), { code: "missing_file" });
-      }
-
-      /**
-       * 大文件走 Node 肋手：文件从磁盘边读边发，不经过 32 MiB 的消息通道。
-       * 助手只回小状态，结果文本落在 dataDir 里由这边读。
-       */
-      async function parseViaHelper({ doc, onProgress }) {
-        const info = await ensureParserRuntime();
-        await waitParserReady(info);
-        const options = resolveMineruOptions(getConfig);
-        if (!options?.token) throw Object.assign(new Error("未配置 MinerU Token"), { code: "no_token" });
-
-        const startRes = await sdk.runtime.fetch(info.runtimeId, "/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: doc.filename,
-            filePath: doc.filePath,
-            options: {
-              token: options.token,
-              apiBase: options.apiBase,
-              modelVersion: options.modelVersion,
-              language: options.language,
-              isOcr: options.isOcr,
-              enableFormula: options.enableFormula,
-              enableTable: options.enableTable,
-              timeoutSeconds: options.timeoutSeconds,
-              pollIntervalSeconds: options.pollIntervalSeconds,
-            },
-          }),
-          timeoutMs: 10000,
-        });
-        const startData = await startRes.json();
-        if (!startData.ok || !startData.jobId) throw new Error(startData.error || "解析助手拒绝了该任务");
-        const helperJobId = startData.jobId;
-
-        const deadline = Date.now() + Math.max(5 * 60 * 1000, (options.timeoutSeconds || 300) * 1000);
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-          const statusRes = await sdk.runtime.fetch(info.runtimeId, `/jobs/${encodeURIComponent(helperJobId)}`, {
-            timeoutMs: 10000,
-          });
-          const data = await statusRes.json();
-          if (data.status === "done") {
-            const payload = JSON.parse(await fs.readFile(data.resultPath, "utf8"));
-            await fs.rm(data.resultPath, { force: true }).catch(() => {});
-            return { ...payload, ok: true };
-          }
-          if (data.status === "error") throw new Error(data.error || "解析失败");
-          if (data.stage) onProgress?.(data.stage);
-        }
-        throw new Error("云端解析超时");
-      }
-
-      // 5a. 统一文档资料解析接口 (MD/TXT/Word/PDF)：本地优先，可选云端
-      // 文件来源只接受 contentBase64（≤ 16 MB）或已完成的上传引用
-      app.post("/api/document/extract", async (c) => {
-        try {
-          const body = await c.req.json();
-          const owner = ownerOf(c);
-          const doc = await resolveDocument({ uploadId: body.uploadId, contentBase64: body.contentBase64, owner });
-          const result = await parseDocumentSmart({
-            filename: body.filename || doc.filename,
-            text: body.text,
-            contentBase64: doc.contentBase64,
-            mode: body.mode,
-            getConfig,
-            fetchFn: hostFetch,
-            dataDir,
-            logger: sdk.logger,
-          });
-          if (doc.uploadId) void uploadStore.release({ uploadId: doc.uploadId });
-          return c.json(result);
-        } catch (err) {
-          return c.json({ ok: false, error: err.message || String(err), code: err.code || null }, 400);
-        }
-      });
-
-      // 5c. 异步解析任务：长请求会被宿主或代理层提前招断，所以拆成
-      // 「发起 → 轮询」两步。每个请求都在秒级完成，不再赌链路耐心。
-      app.post("/api/document/parse", async (c) => {
-        try {
-          const body = await c.req.json();
-          const owner = ownerOf(c);
-
-          const running = [...parseJobs.values()].filter((job) => job.status === "running").length;
-          if (running >= MAX_CONCURRENT_JOBS) {
-            return c.json({ ok: false, error: "同时进行的解析任务过多，请等前一个跑完" }, 429);
-          }
-
-          const doc = await resolveDocument({ uploadId: body.uploadId, contentBase64: body.contentBase64, owner });
-          void sdk.logger.info(
-            `[parse] 发起 · ${doc.filename || body.filename || "-"} · ${((doc.size || 0) / 1048576).toFixed(2)} MB · ${doc.uploadId ? "uploadId" : "base64"}`,
-          );
-
-          const jobId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-          const job = {
-            status: "running",
-            stage: "准备解析",
-            startedAt: Date.now(),
-            filename: doc.filename || body.filename,
-            owner: ownerOf(c),
-            uploadId: doc.uploadId || null,
-          };
-          parseJobs.set(jobId, job);
-
-          // 后台跑，不堵这个请求
-          void (async () => {
-            try {
-              const cloudOn = getConfig("mineruEnabled") === true;
-              const useHelper = Boolean(doc.filePath) && doc.size > LARGE_FILE_BYTES && cloudOn;
-              let result;
-              if (useHelper) {
-                job.stage = "交给解析助手";
-                result = await parseViaHelper({ doc, onProgress: (stage) => { job.stage = stage; } });
-              } else {
-                // 小文件直接读；本地引擎只靠 pdf.js，不必绕助手
-                const contentBase64 = doc.contentBase64 || (await fs.readFile(doc.filePath)).toString("base64");
-                result = await parseDocumentSmart({
-                  filename: doc.filename || body.filename,
-                  text: body.text,
-                  contentBase64,
-                  mode: body.mode,
-                  getConfig,
-                  fetchFn: hostFetch,
-                  dataDir,
-                  logger: sdk.logger,
-                  onProgress: (stage) => {
-                    job.stage = stage;
-                  },
-                });
-              }
-              job.status = "done";
-              job.result = result;
-              job.stage = "完成";
-              void sdk.logger.info(`[parse] 完成 · ${result.engineLabel} · ${result.charCount} 字 · ${Date.now() - job.startedAt}ms`);
-            } catch (err) {
-              job.status = "error";
-              job.error = err?.message || String(err);
-              job.code = err?.code || null;
-              void sdk.logger.warn(`[parse] 失败 · ${job.error}`);
-            } finally {
-              job.finishedAt = Date.now();
-              // 临时扫描件不再需要，立刻清掉
-              if (job.uploadId) void uploadStore.release({ uploadId: job.uploadId });
-              // 结果留给前端取，五分钟后再清，防止无限堆内存
-              setTimeout(() => parseJobs.delete(jobId), 5 * 60 * 1000).unref?.();
-            }
-          })();
-
-          return c.json({ ok: true, jobId });
-        } catch (err) {
-          const status = err.code === "too_large" ? 413 : err.code === "upload_not_found" || err.code === "missing_file" ? 400 : 500;
-          return c.json({ ok: false, error: err.message || String(err), code: err.code || null }, status);
-        }
-      });
-
-      app.get("/api/document/parse/:jobId", (c) => {
-        const jobId = String(c.req.param("jobId") || "");
-        const job = parseJobs.get(jobId);
-        if (!job) {
-          return c.json({ ok: false, error: "任务不存在或已过期" }, 404);
-        }
-        if (job.owner !== ownerOf(c)) {
-          return c.json({ ok: false, error: "任务不属于本次会话" }, 403);
-        }
-        return c.json({
-          ok: true,
-          status: job.status,
-          stage: job.stage,
-          elapsedMs: Date.now() - job.startedAt,
-          result: job.status === "done" ? job.result : undefined,
-          error: job.error,
-          code: job.code,
-        });
-      });
+      documents.register(app);
 
       // 5d. UI 侧错误上报：界面里抛的异常在哪儿都看不到，先送到日志里
       app.post("/api/document/client-error", async (c) => {
@@ -788,20 +492,10 @@ export default defineApp(async (sdk) => {
 
   await sdk.logger.info("分叉对话 (Fork Chat) 核心服务就绪。");
 
-  // 运行时自检：不起任何外部请求，只确认助手能拉起、回环端口能通。
-  // 权限没批时这一行会写清楚原因，不用等到用户拖大文件才发现。
-  void (async () => {
-    try {
-      const info = await ensureParserRuntime();
-      const ready = await waitParserReady(info, 10000);
-      const health = await sdk.runtime.fetch(info.runtimeId, "/health", { timeoutMs: 5000 });
-      const data = await health.json().catch(() => ({}));
-      void sdk.logger.info(
-        `[parser-runtime] 自检通过 · ${info.runtimeId} · ${ready.profile}/${ready.network} · health=${data.ok === true}`,
-      );
-    } catch (err) {
-      void sdk.logger.warn(`[parser-runtime] 自检未通过 · ${err?.message || String(err)}（大文件云端解析暂不可用）`);
-    }
-  })();
+  // Local authenticated health check only; never calls MinerU.
+  void documents.runtime.ready().then(
+    () => sdk.logger.info("[parser-runtime] 自检通过 · authenticated protocol v2"),
+    error => sdk.logger.warn(`[parser-runtime] 自检未通过 code=${String(error.code || "RUNTIME_UNAVAILABLE").replace(/[^A-Za-z0-9_:-]/g, "").slice(0, 80)}`),
+  ).catch(() => {});
 
 });

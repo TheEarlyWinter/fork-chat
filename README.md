@@ -5,6 +5,17 @@
 
 ---
 
+## 大文件解析与安全边界（1.7.2）
+
+面板大文件采用分块上传 → App 私有暂存文件 → 正式 Node `native` / `external` runtime → 原生文件流上传。控制 RPC 只传受限文件引用、SHA-256、配置和状态，不再把整份 PDF Base64 内联到宿主 `network.fetch`。工具入口只接受最多 16 MiB 的内容，不接受路径。
+
+- 需要 `app/runtime.execute`、`app/runtime.native`、`app/runtime.network`；拒绝权限或 sandbox 不可用时明确失败，不降级到无隔离执行。
+- 上传归属来自宿主可信请求上下文；helper 所有接口通过随机 capability 鉴权，凭据以 0600 一次性文件交接，不进入启动参数。
+- 拒绝路径中的符号链接，固定已校验 FD 并检查文件哈希；响应按实际字节限额，逐跳检查官方 HTTPS 地址，跨 origin 剥离凭据。
+- 取消贯穿网络和文件流；失败或取消不会创建成功资料卡。结果 ZIP 仅缓存在本 App 数据目录，不公开发布。
+
+离线验证命令：`node --experimental-vm-modules --test --test-timeout=15000 tests/*.test.mjs`。包含真实 Node CLI、helper HTTP、本地假上游及 26,764,891 字节哈希比对；不需要真实 PDF、API 凭据或付费请求。离线通过不等于 Hana 正式 sandbox 或 MinerU 云端验收；正式安装、自检和真实云端测试须分别确认。
+
 ## 核心设计理念
 
 传统的 AI 对话界面本质上是单向的**一维线性链条（Linear Linked List）**。当你在对话中想针对某一句话做延伸测试、对比不同推导思路，或者想“岔开话题”时，后续的讨论会严重污染主线上下文，试错成本极高。

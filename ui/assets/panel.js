@@ -1687,9 +1687,13 @@ async function extractDocumentFile(file) {
       ? `正在解析 ${name}…（扫描件会走云端，可能要十几秒）`
       : `正在解析 ${name}…`;
   }
+  let parseJobId = null, parseCompleted = false;
+  const cancelParser = () => {
+    if (parseJobId && !parseCompleted) void requestHost(hana, `/api/document/parse/${encodeURIComponent(parseJobId)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+  };
+  window.addEventListener?.('pagehide', cancelParser, { once: true });
   try {
-    // 宿主单次 RPC 上限 32 MiB，base64 再胀三分之一。超过 16 MB 就分块送，
-    // 否则 26 MB 的扫描件根本到不了解析器就会被宿主拒收。
+    // UI uploads are bounded chunks; outbound cloud transfers use the authorised runtime.
     const CHUNK_RAW_BYTES = 6 * 1024 * 1024;
     const CHUNK_THRESHOLD = 16 * 1024 * 1024;
     let requestBody = { filename: name };
@@ -1733,9 +1737,10 @@ async function extractDocumentFile(file) {
     });
     const startData = await startRes.json();
     if (!startData.ok || !startData.jobId) throw new Error(startData.error || '无法启动解析任务');
+    parseJobId = startData.jobId;
 
     let data = null;
-    const deadline = Date.now() + 5 * 60 * 1000;
+    const deadline = Date.now() + Math.min(20 * 60 * 1000, Math.max(30000, Number(startData.timeoutMs) || 5 * 60 * 1000));
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1200));
       window.__forkChatLastStage = '轮询解析进度';
@@ -1746,14 +1751,15 @@ async function extractDocumentFile(file) {
         data = status.result;
         break;
       }
-      if (status.status === 'error') throw new Error(status.error || '解析失败');
+      if (['error', 'cancelled'].includes(status.status)) throw new Error(status.error || '解析失败或已取消');
       if (badgeStats && status.stage) {
         badgeStats.textContent = `正在解析 ${name}…（${status.stage} · ${Math.round((status.elapsedMs || 0) / 1000)}s）`;
       }
     }
-    if (!data) throw new Error('解析超时（超过 5 分钟）');
+    if (!data) throw new Error('解析超过等待时限，已请求取消');
 
     if (data && data.ok) {
+      parseCompleted = true;
       return {
         ...data,
         size: file.size || data.charCount,
@@ -1783,6 +1789,8 @@ async function extractDocumentFile(file) {
       error: err.message || String(err),
     };
   } finally {
+    window.removeEventListener?.('pagehide', cancelParser);
+    cancelParser();
     if (badgeStats && idleBadge) badgeStats.textContent = idleBadge;
   }
 }

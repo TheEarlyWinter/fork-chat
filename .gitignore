@@ -23,5 +23,6 @@ build/
 # Internal development and test suites
 tests/
 REPAIR-NOTES.md
+docs/delivery-*.md
 *.test.mjs
 

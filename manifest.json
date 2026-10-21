@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "timeline-reverser",
   "name": "分叉对话",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "minAppVersion": "0.1050.9",
   "description": "打破线性聊天。树状多分支对话与模型推导工作台，支持向右分叉追问、独立回溯与真实模型流式推导。",
   "entry": "index.js",
