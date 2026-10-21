@@ -109,6 +109,7 @@ const zoomText = document.getElementById('zoom-text');
 const btnZoomIn = document.getElementById('btn-zoom-in');
 const btnZoomOut = document.getElementById('btn-zoom-out');
 const btnResetView = document.getElementById('btn-reset-view');
+const btnAutoTidy = document.getElementById('btn-auto-tidy');
 const btnNewRoot = document.getElementById('btn-new-root');
 const sessionStatusEl = document.getElementById('session-status');
 const btnRetrySave = document.getElementById('btn-retry-save');
@@ -1078,7 +1079,15 @@ window.addEventListener('keydown', (e) => {
     if (currentCard) {
       e.preventDefault();
       closeCardHierarchy(currentCard);
+      return;
     }
+  }
+
+  // 6. Shift + A 树状一键自动整理 (Auto-Tidy)
+  if ((e.key === 'a' || e.key === 'A') && e.shiftKey && !isEditing) {
+    e.preventDefault();
+    autoTidyLayout();
+    return;
   }
 });
 
@@ -1114,6 +1123,80 @@ btnZoomIn.addEventListener('click', () => {
 btnZoomOut.addEventListener('click', () => {
   view.scale = Math.max(view.scale * 0.85, 0.4);
   updateTransform();
+});
+
+// 树状一键自动整理排版算法 (Auto-Tidy Engine)
+function autoTidyLayout() {
+  if (!cards || cards.length === 0) return;
+
+  const cardMap = new Map(cards.map(c => [c.id, c]));
+  const childrenMap = new Map();
+  const roots = [];
+
+  cards.forEach(c => {
+    childrenMap.set(c.id, []);
+  });
+
+  cards.forEach(c => {
+    if (c.parentId && cardMap.has(c.parentId)) {
+      childrenMap.get(c.parentId).push(c);
+    } else {
+      roots.push(c);
+    }
+  });
+
+  childrenMap.forEach(list => {
+    list.sort((a, b) => a.y - b.y);
+  });
+  roots.sort((a, b) => a.y - b.y);
+
+  let currentY = 80;
+  const startX = 80;
+  const stepX = 340 + 120; // 460
+  const cardH = 360;
+  const gapY = 32;
+  const gapRoot = 60;
+
+  function layoutSubtree(node, depth) {
+    const children = childrenMap.get(node.id) || [];
+    node.targetX = startX + depth * stepX;
+
+    if (children.length === 0) {
+      node.targetY = currentY;
+      currentY += cardH + gapY;
+      return;
+    }
+
+    children.forEach(child => {
+      layoutSubtree(child, depth + 1);
+    });
+
+    const firstChild = children[0];
+    const lastChild = children[children.length - 1];
+    node.targetY = Math.round((firstChild.targetY + lastChild.targetY) / 2);
+  }
+
+  roots.forEach(root => {
+    layoutSubtree(root, 0);
+    currentY += gapRoot;
+  });
+
+  cards.forEach(c => {
+    if (typeof c.targetX === 'number' && typeof c.targetY === 'number') {
+      c.x = c.targetX;
+      c.y = c.targetY;
+      delete c.targetX;
+      delete c.targetY;
+    }
+  });
+
+  renderCards();
+  sessionController?.scheduleSave();
+  fitViewportToCluster(cards);
+}
+
+btnAutoTidy?.addEventListener('click', () => {
+  autoTidyLayout();
 });
 
 btnResetView.addEventListener('click', () => {
@@ -1369,5 +1452,6 @@ if (typeof window !== 'undefined') {
     navigateCardFocus,
     getSelectedCardId: () => selectedCardId,
     getIsSpacePressed: () => isSpacePressed,
+    autoTidyLayout,
   };
 }
