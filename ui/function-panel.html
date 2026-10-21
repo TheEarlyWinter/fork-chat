@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>助手列表 · 分叉对话</title>
+  <title>功能面板 · 分叉对话</title>
   <style>
     :root {
       --bg: #ffffff;
@@ -18,6 +18,7 @@
       --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    [hidden] { display: none !important; }
     html, body {
       width: 100%;
       height: 100%;
@@ -77,9 +78,48 @@
       border-color: var(--border-dark);
     }
 
+    /* 一级助手与会话分组：原生 details 支持鼠标和键盘折叠。 */
+    .agent-group > summary,
+    .session-group > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 8px 0;
+    }
+    .agent-group > summary::-webkit-details-marker,
+    .session-group > summary::-webkit-details-marker { display: none; }
+    .agent-group > summary:focus-visible,
+    .session-group > summary:focus-visible {
+      outline: 1px solid var(--border-dark);
+      outline-offset: 3px;
+    }
+    .group-chevron {
+      display: inline-block;
+      width: 10px;
+      font-size: 16px;
+      line-height: 1;
+      color: var(--text-muted);
+      transition: transform 0.15s ease;
+    }
+    .agent-group[open] .group-chevron,
+    .session-group[open] .group-chevron { transform: rotate(90deg); }
+    .agent-group-content,
+    .session-group-content {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin: 10px 0 0 4px;
+      padding-left: 12px;
+      border-left: 1px solid var(--border);
+    }
+    .agent-toolbar,
+    .session-toolbar { display: flex; align-items: center; gap: 6px; }
+    .agent-toolbar .btn-refresh,
+    .session-toolbar .btn-refresh { flex-shrink: 0; }
+
     /* 搜索栏 */
     .search-box {
-      width: 100%;
+      flex: 1;
+      min-width: 0;
     }
     .search-input {
       width: 100%;
@@ -187,6 +227,224 @@
       text-overflow: ellipsis;
     }
 
+    /* 会话列表样式 */
+    .btn-primary {
+      flex: 1;
+      background: var(--border-dark);
+      color: #ffffff;
+      border: 1px solid var(--border-dark);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: #27272a;
+    }
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .session-status {
+      font-size: 10px;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+    .session-status:empty { display: none; }
+    .session-status.warn { color: #d97706; }
+    .session-status.error { color: #dc2626; }
+
+    .session-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .session-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      width: 100%;
+    }
+    .session-item {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      text-align: left;
+      font-family: inherit;
+      transition: all 0.15s ease;
+    }
+    .session-item:hover:not(:disabled) {
+      border-color: #a1a1aa;
+      background: var(--bg-hover);
+    }
+    .session-item.active {
+      border-color: var(--border-dark);
+      background: #ffffff;
+      box-shadow: 0 0 0 1px var(--border-dark);
+    }
+    .session-item:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .session-item-title {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .session-item-badge {
+      font-size: 10px;
+      padding: 1px 5px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .session-item.active .session-item-badge {
+      background: var(--border-dark);
+      color: #ffffff;
+      border-color: var(--border-dark);
+    }
+
+    .session-more {
+      width: 26px;
+      height: 32px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 0;
+      transition: all 0.15s ease;
+    }
+    .session-more:hover:not(:disabled) {
+      border-color: var(--border-dark);
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+    .session-more:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* 重命名行内编辑表单 */
+    .session-rename-form {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      width: 100%;
+    }
+    .session-rename-input {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 8px;
+      font-size: 11px;
+      border: 1px solid var(--border-dark);
+      border-radius: 4px;
+      outline: none;
+      background: #ffffff;
+      color: var(--text);
+      font-family: inherit;
+    }
+    .session-rename-btn {
+      flex-shrink: 0;
+      padding: 5px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      font-family: inherit;
+      transition: all 0.15s ease;
+    }
+    .session-rename-btn-save {
+      background: var(--border-dark);
+      color: #ffffff;
+      border-color: var(--border-dark);
+    }
+    .session-rename-btn-save:hover:not(:disabled) {
+      background: #27272a;
+    }
+    .session-rename-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* 会话右键/更多浮层菜单 */
+    .session-context-menu {
+      position: fixed;
+      z-index: 1000;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 130px;
+    }
+    .session-menu-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 11px;
+      text-align: left;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.1s ease;
+    }
+    .session-menu-item:hover,
+    .session-menu-item:focus-visible {
+      background: var(--bg-subtle);
+      outline: none;
+    }
+    .session-menu-item:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .session-menu-item.danger {
+      color: #dc2626;
+    }
+    .session-menu-item.danger:hover,
+    .session-menu-item.danger:focus-visible {
+      background: #fef2f2;
+    }
+    .session-menu-hint {
+      font-size: 9px;
+      color: var(--text-dim);
+    }
+
     .empty-state {
       padding: 24px 12px;
       text-align: center;
@@ -198,21 +456,65 @@
 </head>
 <body>
   <div class="panel-container">
-    <div class="panel-header">
-      <div class="panel-title-box">
-        <span class="panel-title">助手列表</span>
-        <span class="panel-badge mono" id="agent-count">0</span>
+    <!-- 一级助手分组 -->
+    <details class="agent-group" id="agent-group" open>
+      <summary class="panel-header">
+        <span class="panel-title-box">
+          <span class="group-chevron" aria-hidden="true">›</span>
+          <span class="panel-title">助手列表</span>
+          <span class="panel-badge mono" id="agent-count">0</span>
+        </span>
+      </summary>
+
+      <div class="agent-group-content">
+        <div class="agent-toolbar">
+          <div class="search-box">
+            <input type="text" class="search-input" id="search-input" aria-label="搜索助手" placeholder="搜索助手姓名、底座或模型...">
+          </div>
+          <button class="btn-refresh" id="btn-refresh" type="button">刷新</button>
+        </div>
+
+        <div class="agent-list" id="agent-list">
+          <div class="empty-state">正在检索系统助手清单...</div>
+        </div>
       </div>
-      <button class="btn-refresh" id="btn-refresh" type="button">刷新</button>
-    </div>
+    </details>
 
-    <div class="search-box">
-      <input type="text" class="search-input" id="search-input" placeholder="搜索助手姓名、底座或模型...">
-    </div>
+    <!-- 一级会话分组（与助手分组并列，放下方） -->
+    <details class="session-group" id="session-group" open>
+      <summary class="panel-header">
+        <span class="panel-title-box">
+          <span class="group-chevron" aria-hidden="true">›</span>
+          <span class="panel-title">会话列表</span>
+          <span class="panel-badge mono" id="session-count">0</span>
+        </span>
+      </summary>
 
-    <div class="agent-list" id="agent-list">
-      <div class="empty-state">正在检索系统助手清单...</div>
-    </div>
+      <div class="session-group-content">
+        <div class="session-toolbar">
+          <button class="btn-primary" id="btn-new-session" type="button">+ 新建会话</button>
+          <button class="btn-refresh" id="btn-refresh-sessions" type="button">刷新</button>
+        </div>
+
+        <div class="session-status" id="session-status" role="status" aria-live="polite"></div>
+
+        <div class="session-list" id="session-list" role="list">
+          <div class="empty-state">正在读取会话...</div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- 会话右键/更多定位菜单（放在 panel-container 外，以 hidden 控制） -->
+  <div id="session-context-menu" class="session-context-menu" role="menu" aria-label="会话选项" hidden>
+    <button type="button" class="session-menu-item" id="session-menu-rename" role="menuitem">
+      <span>重命名</span>
+      <span class="session-menu-hint">Enter</span>
+    </button>
+    <button type="button" class="session-menu-item danger" id="session-menu-delete" role="menuitem" title="不可撤销">
+      <span>删除</span>
+      <span class="session-menu-hint">不可撤销</span>
+    </button>
   </div>
 
   <script type="module" src="./assets/function-panel.js"></script>

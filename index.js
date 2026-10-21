@@ -1,4 +1,6 @@
 import { defineApp } from "./sdk/app-contract/server-client.js";
+import { createAgentDirectory } from "./lib/agents.js";
+import { createChatService } from "./lib/chat.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -235,91 +237,16 @@ export default defineApp(async (sdk) => {
     } catch {}
   }
 
-  // 助手元数据与人格 Prompt 提取
-  const agentsBaseDir = path.resolve(process.env.HOME || "", ".hanako", "agents");
+  const agentDirectory = createAgentDirectory(sdk);
+  const getAgentFullProfile = agentDirectory.getProfile;
+  const listAllAgents = agentDirectory.list;
 
-  async function getAgentFullProfile(agentId) {
-    const dir = path.join(agentsBaseDir, agentId);
-    let name = agentId;
-    let yuan = "unknown";
-    let model = "gemini-3.8-flash-high";
-    let provider = "gemini";
-    let description = "";
-    let systemPrompt = "";
+  const chatService = createChatService(sdk, {
+    getAgentFullProfile,
+    timeoutMs: 120000,
+  });
 
-    try {
-      const configText = await fs.readFile(path.join(dir, "config.yaml"), "utf-8");
-      const nameMatch = configText.match(/name:\s*([^\n\r]+)/);
-      const yuanMatch = configText.match(/yuan:\s*([^\n\r]+)/);
-      const modelMatch = configText.match(/models:[\s\S]*?chat:[\s\S]*?id:\s*([^\n\r]+)/);
-      const providerMatch = configText.match(/models:[\s\S]*?chat:[\s\S]*?provider:\s*([^\n\r]+)/);
-      if (nameMatch) name = nameMatch[1].trim();
-      if (yuanMatch) yuan = yuanMatch[1].trim();
-      if (modelMatch) model = modelMatch[1].trim();
-      if (providerMatch) provider = providerMatch[1].trim();
-    } catch {}
-
-    try {
-      const descText = await fs.readFile(path.join(dir, "description.md"), "utf-8");
-      description = descText.replace(/<!--[\s\S]*?-->/g, "").trim();
-    } catch {}
-
-    try {
-      const agentsMd = await fs.readFile(path.join(dir, "AGENTS.md"), "utf-8");
-      systemPrompt = agentsMd.trim();
-    } catch {}
-
-    if (!systemPrompt && description) {
-      systemPrompt = `你是 ${name}。${description}`;
-    }
-
-    return {
-      id: agentId,
-      name,
-      yuan,
-      model,
-      provider,
-      description,
-      systemPrompt,
-    };
-  }
-
-  async function listAllAgents() {
-    const list = [];
-    try {
-      // 优先从 sdk.bus 获取官方注册列表
-      if (sdk.bus?.request) {
-        try {
-          const res = await sdk.bus.request("agent:list", { scope: "all" });
-          if (Array.isArray(res?.agents)) {
-            for (const a of res.agents) {
-              const full = await getAgentFullProfile(a.id);
-              if (a.name) full.name = a.name;
-              if (a.yuan) full.yuan = a.yuan;
-              full.isCurrent = Boolean(a.isCurrent);
-              list.push(full);
-            }
-          }
-        } catch {}
-      }
-
-      // 如果列表为空则直接从文件系统枚举
-      if (list.length === 0) {
-        const entries = await fs.readdir(agentsBaseDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const profile = await getAgentFullProfile(entry.name);
-            list.push(profile);
-          }
-        }
-      }
-    } catch (e) {
-      await sdk.logger.warn("读取助手列表失败: " + String(e));
-    }
-    return list;
-  }
-
-  // 注册 HTTP API 路由：提供模型池与助手列表查询、打字机流式推理接口
+  // 注册 HTTP API 路由：提供模型池与助手列表查询、流式推理接口与取消接口
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
       // 1. 获取系统助手列表接口 (包含人格与绑定模型)
@@ -358,119 +285,11 @@ export default defineApp(async (sdk) => {
         }
       });
 
-      // 3. 真实大模型流式推理接口 (Server-Sent Stream)
-      app.post("/api/chat/stream", async (c) => {
-        let body;
-        try {
-          body = await c.req.json();
-        } catch {
-          return c.text("Invalid JSON body", 400);
-        }
+      // 3. 真实大模型流式推理接口（NDJSON 协议）
+      app.post("/api/chat/stream", (c) => chatService.handleStream(c));
 
-        const { agentId, modelRef, messages, systemPrompt } = body || {};
-        const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-        // 解析目标模型与人格 Prompt
-        let provider = "gemini";
-        let model = "gemini-3.8-flash-high";
-        let finalSystemPrompt = systemPrompt || "你是专业、敏锐、逻辑严密的智能分析助手。回答要条理清晰、直击核心、不讲套话废话。";
-
-        // 如果传入了 agentId，全量注入该助手的真实设定与绑定模型
-        if (agentId) {
-          try {
-            const agentProfile = await getAgentFullProfile(agentId);
-            if (agentProfile) {
-              if (agentProfile.provider) provider = agentProfile.provider;
-              if (agentProfile.model) model = agentProfile.model;
-              if (agentProfile.systemPrompt) {
-                finalSystemPrompt = `${agentProfile.systemPrompt}\n\n[回答指引]：请完全沉浸并严格保持你的身份设定、语言习惯、语气和性格特征，针对用户的对话内容给出真实、自然的回应。`;
-              }
-            }
-          } catch (e) {
-            await sdk.logger.warn(`加载助手 ${agentId} 失败: ` + String(e));
-          }
-        } else if (typeof modelRef === "string" && modelRef.includes("/")) {
-          const slash = modelRef.indexOf("/");
-          provider = modelRef.slice(0, slash);
-          model = modelRef.slice(slash + 1);
-        }
-
-        // 格式化 messages 为 AppModelMessageV2 契约
-        const formattedMessages = Array.isArray(messages) ? messages.map(m => {
-          if (m.role === "assistant") {
-            return {
-              role: "assistant",
-              content: [{ type: "text", text: String(m.content || m.text || "") }]
-            };
-          }
-          return {
-            role: "user",
-            content: String(m.content || m.text || "")
-          };
-        }) : [];
-
-        const stream = new ReadableStream({
-          async start(controller) {
-            const encoder = new TextEncoder();
-            const push = (text) => {
-              if (text) controller.enqueue(encoder.encode(text));
-            };
-
-            try {
-              if (!sdk.models || typeof sdk.models.stream !== "function") {
-                throw new Error("SDK 模型推理接口尚未放行或当前不可用");
-              }
-
-              const input = {
-                requestId,
-                provider,
-                model,
-                messages: formattedMessages,
-                systemPrompt: finalSystemPrompt,
-              };
-
-              // 优先使用 streamEvents 逐 token 迭代
-              if (typeof sdk.models.streamEvents === "function") {
-                for await (const event of sdk.models.streamEvents(input)) {
-                  if (event.type === "text-delta" && event.delta) {
-                    push(event.delta);
-                  } else if (event.type === "error") {
-                    throw new Error(event.message || event.code || "推理过程中返回错误");
-                  }
-                }
-              } else {
-                // 回退到 sdk.models.utility
-                const utilityRes = await sdk.models.utility({
-                  requestId,
-                  scope: "app",
-                  messages: formattedMessages.map(m => ({
-                    role: m.role,
-                    content: typeof m.content === "string" ? m.content : (m.content[0]?.text || "")
-                  }))
-                });
-                push(utilityRes.text || "");
-              }
-              controller.close();
-            } catch (err) {
-              const errStr = String(err?.message || err);
-              if (errStr.includes("AUTHORITY") || errStr.includes("PERMISSION") || errStr.includes("CAPABILITY") || errStr.includes("DENIED")) {
-                push(`\n\n【权限待确认】宿主新增权限「app/models.infer」尚未在客户端完成审批。请在 Hana 界面中点击「允许」即可开启真正的实时流式推理。\n\n（临时响应）：已完整承袭祖先节点上下文。当前模型权限待批准中。`);
-              } else {
-                push(`\n\n[推理服务响应: ${errStr}]`);
-              }
-              controller.close();
-            }
-          }
-        });
-
-        return new Response(stream, {
-          headers: {
-            "Content-Type": "text/plain; charset=utf-8",
-            "Cache-Control": "no-cache",
-            "X-Content-Type-Options": "nosniff"
-          }
-        });
-      });
+      // 4. 取消流式推理接口
+      app.post("/api/chat/cancel", (c) => chatService.handleCancel(c));
     });
   }
 

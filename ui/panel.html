@@ -24,6 +24,12 @@
       </div>
     </header>
 
+    <div class="session-strip">
+      <span id="session-status" role="status" aria-live="polite">正在恢复会话…</span>
+      <button class="btn btn-outline" id="btn-retry-save" type="button" hidden>重试保存</button>
+      <button class="btn btn-outline" id="btn-save-copy" type="button" hidden>保存副本</button>
+    </div>
+
     <!-- 主视口：无限画布层 -->
     <main class="canvas-viewport" id="viewport">
       <!-- 变换容器（平移与缩放） -->
@@ -43,6 +49,17 @@
     </main>
   </div>
 
+  <dialog class="session-delete-dialog" id="delete-session-dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-desc">
+    <h2 id="delete-dialog-title">删除会话？</h2>
+    <p id="delete-target-title" class="delete-target-title"></p>
+    <p id="delete-dialog-desc">此会话的全部分支和消息将被删除，此操作不可撤销。不会删除 Hana 原生聊天记录。</p>
+    <p id="delete-dialog-progress"></p>
+    <p id="delete-dialog-error" role="alert"></p>
+    <div class="delete-dialog-actions">
+      <button class="btn btn-outline" id="btn-delete-cancel" type="button" autofocus>取消</button>
+      <button class="btn btn-danger" id="btn-delete-confirm" type="button">确认删除</button>
+    </div>
+  </dialog>
   <script type="module" src="./assets/panel.js"></script>
 </body>
 </html>

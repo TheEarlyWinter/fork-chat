@@ -184,6 +184,47 @@ html, body {
   pointer-events: none;
 }
 
+.session-delete-dialog {
+  margin: auto;
+  width: min(420px, calc(100vw - 36px));
+  padding: 22px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.session-delete-dialog::backdrop { background: rgba(0, 0, 0, 0.28); }
+.session-delete-dialog h2 { font-size: 16px; margin: 0 0 12px; }
+.session-delete-dialog p { margin: 8px 0; }
+.delete-target-title { font-weight: 600; overflow-wrap: anywhere; white-space: pre-wrap; }
+#delete-dialog-progress { color: var(--text-muted); }
+#delete-dialog-error { color: #b91c1c; overflow-wrap: anywhere; }
+#delete-dialog-error:empty { display: none; }
+.delete-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.btn-danger { background: #b91c1c; color: #fff; border-color: #b91c1c; }
+
+.session-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.session-strip #session-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-strip .btn { font-size: 11px; padding: 2px 7px; flex-shrink: 0; }
+.session-strip .btn[hidden] { display: none; }
+
 /* 对话卡片 (Chat Node Card) */
 .chat-card {
   position: absolute;
@@ -308,6 +349,51 @@ html, body {
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
 }
+
+.assistant-asides {
+  border-left: 2px solid var(--border-subtle);
+  padding-left: 9px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.assistant-asides > summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.assistant-asides > summary:focus-visible {
+  outline: 1px solid var(--border-dark);
+  outline-offset: 2px;
+}
+
+.assistant-asides-text {
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  padding: 5px 0;
+}
+
+.msg-bubble[hidden], .assistant-asides[hidden] { display: none; }
+
+.request-status {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.card-send-btn:disabled,
+.branch-anchor-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.card-send-btn[hidden] { display: none; }
 
 /* 卡片底部输入区 */
 .card-footer {
