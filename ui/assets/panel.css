@@ -22,6 +22,10 @@
   padding: 0;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   width: 100vw;
   height: 100vh;
@@ -413,12 +417,157 @@ html, body {
   border-top: 1px solid var(--border-subtle);
   background-color: #ffffff;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   border-bottom-left-radius: 5px;
   border-bottom-right-radius: 5px;
   box-sizing: border-box;
   width: 100%;
+}
+
+.card-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.btn-card-attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  background: #ffffff;
+  color: #71717a;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-card-attach:hover {
+  color: #18181b;
+  border-color: #18181b;
+}
+
+.btn-card-attach:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-card.card-drop-active {
+  border: 1px dashed #18181b !important;
+  box-shadow: 0 0 0 2px rgba(24, 24, 27, 0.08) !important;
+  background-color: #fafafa !important;
+}
+
+.staged-attachments-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+}
+
+.staged-att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: #f4f4f5;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: #18181b;
+  max-width: 100%;
+}
+
+.staged-att-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staged-att-size {
+  color: #71717a;
+  font-size: 10px;
+}
+
+.staged-att-remove {
+  background: transparent;
+  border: none;
+  color: #71717a;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.staged-att-remove:hover {
+  color: #18181b;
+}
+
+.msg-attachments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.msg-attachment-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #ffffff;
+  overflow: hidden;
+  font-family: var(--font-mono);
+}
+
+.msg-attachment-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #18181b;
+  background: #fafafa;
+  cursor: pointer;
+  user-select: none;
+}
+
+.msg-attachment-header:hover {
+  background: #f4f4f5;
+}
+
+.msg-attachment-name {
+  font-weight: 500;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-attachment-meta {
+  color: #71717a;
+  font-size: 10px;
+  margin-left: auto;
+}
+
+.msg-attachment-preview {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-main);
+  background: #ffffff;
+  border-top: 1px solid var(--border-subtle);
+  max-height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .card-input {
@@ -840,6 +989,10 @@ html, body {
   justify-content: center;
   pointer-events: none;
   backdrop-filter: blur(2px);
+}
+
+.canvas-drop-indicator[hidden] {
+  display: none !important;
 }
 
 .drop-indicator-box {

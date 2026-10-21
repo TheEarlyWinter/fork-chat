@@ -55,8 +55,22 @@ function messageMarkup(message) {
       <pre class="doc-content-body">${escapeHtml(message.docPreview)}</pre>
     </details>
   ` : '';
-  if (!message.requestId || message.role !== 'assistant') return `${bubble}${docPreviewHtml}`;
-  return `${bubble}${docPreviewHtml}
+  const attachmentsHtml = Array.isArray(message.attachments) && message.attachments.length > 0 ? `
+    <div class="msg-attachments-list">
+      ${message.attachments.map(att => `
+        <details class="msg-attachment-item">
+          <summary class="msg-attachment-header">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <span class="msg-attachment-name">${escapeHtml(att.name)}</span>
+            <span class="msg-attachment-meta">${formatFileSize(att.size)} · ${att.charCount || 0} 字</span>
+          </summary>
+          <pre class="msg-attachment-preview">${escapeHtml(att.preview || att.content?.slice(0, 1500) || '')}</pre>
+        </details>
+      `).join('')}
+    </div>
+  ` : '';
+  if (!message.requestId || message.role !== 'assistant') return `${attachmentsHtml}${bubble}${docPreviewHtml}`;
+  return `${attachmentsHtml}${bubble}${docPreviewHtml}
     <details class="assistant-asides" id="asides-${message.requestId}" ${message.asidesOpen ? 'open' : ''} ${output.blocks.length ? '' : 'hidden'}>
       <summary id="asides-toggle-${message.requestId}">心境 / 沉思</summary>
       <div class="assistant-asides-text" id="asides-text-${message.requestId}">${escapeHtml(asidesText(output, message))}</div>
@@ -351,10 +365,20 @@ function buildChainContext(targetCard) {
       });
     }
     c.messages.forEach(m => {
-      if (!m.text || m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
+      if (!m.text && (!m.attachments || m.attachments.length === 0)) return;
+      if (m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
+
+      let content = outputFor(m).body;
+      if (m.role === 'user' && Array.isArray(m.attachments) && m.attachments.length > 0) {
+        const attSections = m.attachments.map(att =>
+          `【附件资料：《${att.name}》】\n${att.content || ''}`
+        ).join('\n\n');
+        content = attSections ? `${attSections}\n\n${content}` : content;
+      }
+
       msgs.push({
         role: m.role,
-        content: outputFor(m).body,
+        content,
       });
     });
   });
@@ -365,9 +389,15 @@ function buildChainContext(targetCard) {
 async function sendCardPrompt(card, text, options = {}) {
   if (chainIsBusy(card) || !cards.includes(card)) return;
   const trimmed = typeof text === 'string' ? text.trim() : '';
-  if (!trimmed) return;
+  const attachments = Array.isArray(options.attachments) && options.attachments.length > 0 ? options.attachments : undefined;
+  if (!trimmed && !attachments) return;
 
-  card.messages.push({ role: 'user', text: trimmed });
+  const userMsg = {
+    role: 'user',
+    text: trimmed || (attachments ? `[已附带 ${attachments.length} 份文档资料]` : ''),
+    ...(attachments ? { attachments } : {}),
+  };
+  card.messages.push(userMsg);
 
   // 祖先链路完整上下文
   const contextMessages = buildChainContext(card);
@@ -965,10 +995,27 @@ function renderCards(preserve = true) {
       </div>
 
       <div class="card-footer">
-        <input type="text" class="card-input" placeholder="${isDoc ? '输入关于此文档的问题...' : '输入对话或追问...'}" id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
-        <button class="card-send-btn" data-action="send" ${chainBusy ? 'disabled' : ''}>发送</button>
-        <button class="card-send-btn btn-card-battle" data-action="battle" ${chainBusy ? 'disabled' : ''} title="多模型横向推导 / 对抗">对比 ▾</button>
-        <button class="card-send-btn" data-action="cancel" ${busy ? '' : 'hidden'}>取消</button>
+        ${Array.isArray(card.stagedAttachments) && card.stagedAttachments.length > 0 ? `
+          <div class="staged-attachments-bar">
+            ${card.stagedAttachments.map((att, idx) => `
+              <div class="staged-att-chip" title="${escapeHtml(att.name)} (${formatFileSize(att.size)})">
+                <span class="staged-att-name">${escapeHtml(att.name)}</span>
+                <span class="staged-att-size">${formatFileSize(att.size)}</span>
+                <button class="staged-att-remove" data-action="remove-attachment" data-index="${idx}" title="移除附件">×</button>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        <div class="card-input-row">
+          <button class="btn-card-attach" data-action="attach" title="添加文档资料附件" ${chainBusy ? 'disabled' : ''}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <input type="text" class="card-input" placeholder="${isDoc ? '输入关于此文档的问题...' : '输入对话或追问...'}" id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
+          <button class="card-send-btn" data-action="send" ${chainBusy ? 'disabled' : ''}>发送</button>
+          <button class="card-send-btn btn-card-battle" data-action="battle" ${chainBusy ? 'disabled' : ''} title="多模型横向推导 / 对抗">对比 ▾</button>
+          <button class="card-send-btn" data-action="cancel" ${busy ? '' : 'hidden'}>取消</button>
+        </div>
+        <input type="file" id="file-${card.id}" class="card-file-input" style="display: none;" accept=".md,.markdown,.txt,.docx,.pdf,.json,.csv,.py,.js,.ts,.html,.css,.yml,.yaml,.xml,.sh,.sql" multiple>
       </div>
 
       <!-- 右侧连线追问与对比锚点组 -->
@@ -1057,6 +1104,88 @@ function bindCardEvents(cardEl, card) {
     void openBattleDialog(card, inputEl.value.trim());
   });
 
+  const btnAttach = cardEl.querySelector('[data-action="attach"]');
+  const fileInput = cardEl.querySelector(`#file-${card.id}`);
+  const stagedBar = cardEl.querySelector('.staged-attachments-bar');
+
+  btnAttach?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (chainIsBusy(card) || !cards.includes(card)) return;
+    fileInput?.click();
+  });
+
+  fileInput?.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    for (const file of files) {
+      const parsed = await extractDocumentFile(file);
+      card.stagedAttachments = (card.stagedAttachments || []).concat({
+        name: parsed.filename,
+        size: parsed.size,
+        extension: parsed.extension,
+        charCount: parsed.charCount,
+        lineCount: parsed.lineCount,
+        content: parsed.text,
+        preview: parsed.preview,
+      });
+    }
+    fileInput.value = '';
+    renderCards();
+    sessionController?.scheduleSave();
+  });
+
+  stagedBar?.addEventListener('click', (e) => {
+    const removeBtn = e.target.closest('[data-action="remove-attachment"]');
+    if (!removeBtn) return;
+    e.stopPropagation();
+    const index = parseInt(removeBtn.getAttribute('data-index'), 10);
+    if (!isNaN(index) && Array.isArray(card.stagedAttachments)) {
+      card.stagedAttachments.splice(index, 1);
+      renderCards();
+      sessionController?.scheduleSave();
+    }
+  });
+
+  // 卡片级文件拖拽支持
+  cardEl.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      e.stopPropagation();
+      cardEl.classList.add('card-drop-active');
+    }
+  });
+
+  cardEl.addEventListener('dragleave', (e) => {
+    if (e.target === cardEl || !cardEl.contains(e.relatedTarget)) {
+      cardEl.classList.remove('card-drop-active');
+    }
+  });
+
+  cardEl.addEventListener('drop', async (e) => {
+    if (e.dataTransfer?.files?.length) {
+      e.preventDefault();
+      e.stopPropagation();
+      cardEl.classList.remove('card-drop-active');
+      if (canvasDropIndicator) canvasDropIndicator.hidden = true;
+      clearTimeout(dragOverTimer);
+
+      for (const file of Array.from(e.dataTransfer.files)) {
+        const parsed = await extractDocumentFile(file);
+        card.stagedAttachments = (card.stagedAttachments || []).concat({
+          name: parsed.filename,
+          size: parsed.size,
+          extension: parsed.extension,
+          charCount: parsed.charCount,
+          lineCount: parsed.lineCount,
+          content: parsed.text,
+          preview: parsed.preview,
+        });
+      }
+      renderCards();
+      sessionController?.scheduleSave();
+    }
+  });
+
   // 1. 卡片拖拽移动
   header.addEventListener('mousedown', (e) => {
     if (isSpacePressed) return;
@@ -1093,11 +1222,14 @@ function bindCardEvents(cardEl, card) {
   const doSend = async () => {
     if (chainIsBusy(card) || !cards.includes(card)) return;
     const text = inputEl.value.trim();
-    if (!text) return;
+    const hasStaged = Array.isArray(card.stagedAttachments) && card.stagedAttachments.length > 0;
+    if (!text && !hasStaged) return;
+    const staged = hasStaged ? [...card.stagedAttachments] : [];
+    card.stagedAttachments = [];
     if (document.activeElement === btnSend) inputEl.focus({ preventScroll: true });
     inputEl.value = '';
     card.draft = '';
-    await sendCardPrompt(card, text);
+    await sendCardPrompt(card, text, { attachments: staged });
   };
 
   btnSend.addEventListener('click', doSend);

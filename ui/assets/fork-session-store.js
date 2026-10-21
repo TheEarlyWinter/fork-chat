@@ -239,6 +239,17 @@ export function normalizeForkSnapshot(input) {
       if (typeof rawMsg.modelRef === "string") {
         msg.modelRef = rawMsg.modelRef.slice(0, 200);
       }
+      if (Array.isArray(rawMsg.attachments)) {
+        msg.attachments = rawMsg.attachments.slice(0, 10).map(att => ({
+          name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
+          size: typeof att?.size === 'number' ? att.size : 0,
+          extension: typeof att?.extension === 'string' ? att.extension.slice(0, 50) : '',
+          charCount: typeof att?.charCount === 'number' ? att.charCount : 0,
+          lineCount: typeof att?.lineCount === 'number' ? att.lineCount : 0,
+          content: typeof att?.content === 'string' ? att.content.slice(0, 300000) : '',
+          preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
+        }));
+      }
 
       // 关键：streaming=true 或 status waiting/generating 统一转换为已中断终态
       const isInterrupted =
@@ -279,6 +290,17 @@ export function normalizeForkSnapshot(input) {
     if (rawCard.isMerge) normCard.isMerge = true;
     if (rawCard.isBattle) normCard.isBattle = true;
     if (rawCard.isDoc) normCard.isDoc = true;
+    if (Array.isArray(rawCard.stagedAttachments)) {
+      normCard.stagedAttachments = rawCard.stagedAttachments.slice(0, 10).map(att => ({
+        name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
+        size: typeof att?.size === 'number' ? att.size : 0,
+        extension: typeof att?.extension === 'string' ? att.extension.slice(0, 50) : '',
+        charCount: typeof att?.charCount === 'number' ? att.charCount : 0,
+        lineCount: typeof att?.lineCount === 'number' ? att.lineCount : 0,
+        content: typeof att?.content === 'string' ? att.content.slice(0, 300000) : '',
+        preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
+      }));
+    }
     if (typeof rawCard.docContent === 'string') {
       normCard.docContent = rawCard.docContent.slice(0, 500000);
     }
