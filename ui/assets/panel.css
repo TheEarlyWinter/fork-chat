@@ -240,6 +240,11 @@ html, body {
   user-select: text;
 }
 
+.chat-card.is-selected-card {
+  border-color: #18181b;
+  box-shadow: 0 0 0 1px #18181b, 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
 .chat-card:hover {
   border-color: #a1a1aa;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);

@@ -617,6 +617,156 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   await Promise.allSettled(sendPromises);
 }
 
+let selectedCardId = null;
+let isSpacePressed = false;
+
+function selectCard(cardId, focusInput = false) {
+  selectedCardId = cardId;
+  cards.forEach(c => {
+    const el = document.getElementById(`dom-${c.id}`);
+    if (el) {
+      if (c.id === cardId) el.classList.add('is-selected-card');
+      else el.classList.remove('is-selected-card');
+    }
+  });
+  if (cardId && focusInput) {
+    const inputEl = document.getElementById(`input-${cardId}`);
+    inputEl?.focus?.({ preventScroll: true });
+  }
+}
+
+function ensureCardInView(card) {
+  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
+  const vpWidth = vpRect.width || 1000;
+  const vpHeight = vpRect.height || 700;
+
+  const screenX = card.x * view.scale + view.x;
+  const screenY = card.y * view.scale + view.y;
+  const cardScreenWidth = (card.width || 340) * view.scale;
+  const cardScreenHeight = 360 * view.scale;
+
+  const margin = 60;
+  let adjust = false;
+  if (screenX < margin) {
+    view.x += (margin - screenX);
+    adjust = true;
+  } else if (screenX + cardScreenWidth > vpWidth - margin) {
+    view.x -= (screenX + cardScreenWidth - (vpWidth - margin));
+    adjust = true;
+  }
+  if (screenY < margin) {
+    view.y += (margin - screenY);
+    adjust = true;
+  } else if (screenY + cardScreenHeight > vpHeight - margin) {
+    view.y -= (screenY + cardScreenHeight - (vpHeight - margin));
+    adjust = true;
+  }
+  if (adjust) updateTransform();
+}
+
+function navigateCardFocus(direction) {
+  const current = cards.find(c => c.id === selectedCardId) || cards[0];
+  if (!current) return;
+
+  let target = null;
+  if (direction === 'ArrowRight') {
+    const children = cards.filter(c => c.parentId === current.id);
+    if (children.length > 0) target = children[0];
+  } else if (direction === 'ArrowLeft') {
+    if (current.parentId) {
+      target = cards.find(c => c.id === current.parentId);
+    }
+  } else if (direction === 'ArrowDown') {
+    if (current.parentId) {
+      const siblings = cards.filter(c => c.parentId === current.parentId);
+      const idx = siblings.findIndex(c => c.id === current.id);
+      if (idx !== -1 && idx < siblings.length - 1) target = siblings[idx + 1];
+    } else {
+      const roots = cards.filter(c => !c.parentId);
+      const idx = roots.findIndex(c => c.id === current.id);
+      if (idx !== -1 && idx < roots.length - 1) target = roots[idx + 1];
+    }
+  } else if (direction === 'ArrowUp') {
+    if (current.parentId) {
+      const siblings = cards.filter(c => c.parentId === current.parentId);
+      const idx = siblings.findIndex(c => c.id === current.id);
+      if (idx > 0) target = siblings[idx - 1];
+    } else {
+      const roots = cards.filter(c => !c.parentId);
+      const idx = roots.findIndex(c => c.id === current.id);
+      if (idx > 0) target = roots[idx - 1];
+    }
+  }
+
+  if (target) {
+    selectCard(target.id, false);
+    ensureCardInView(target);
+  }
+}
+
+function createBranchCard(card, { autoFocus = true } = {}) {
+  if (chainIsBusy(card) || !cards.includes(card)) return null;
+  const existingChildren = cards.filter(c => c.parentId === card.id);
+  const branchIndex = existingChildren.length + 1;
+  const newId = uniqueId('branch');
+
+  const lastMessage = card.messages.filter(message => !message.failed && !message.localOnly && (!message.status || message.status === 'completed')).at(-1);
+  const lastMsg = lastMessage ? outputFor(lastMessage).body.trim() || '父级卡片' : '父级卡片';
+  const snippet = lastMsg.length > 20 ? lastMsg.slice(0, 20) + '...' : lastMsg;
+
+  const targetX = card.x + card.width + 120;
+  const yPositions = calculateBranchYPositions(card, 1, targetX);
+
+  const newCard = {
+    id: newId,
+    parentId: card.id,
+    title: `追问 #${branchIndex} (${card.title.split(' ')[0]})`,
+    x: targetX,
+    y: yPositions[0],
+    width: 340,
+    messages: [
+      {
+        role: 'assistant',
+        localOnly: true,
+        text: `【承袭前置上下文】\n已从「${card.title}」成功拉出新分支。\n前置结论锚点：“${snippet}”\n你可以在此提出分支问题，绝不污染父卡片。`
+      }
+    ]
+  };
+
+  cards.push(newCard);
+  renderCards();
+  sessionController.scheduleSave();
+
+  selectCard(newCard.id, autoFocus);
+  view.x = -newCard.x + 300;
+  view.y = -newCard.y + 140;
+  updateTransform();
+
+  return newCard;
+}
+
+function closeCardHierarchy(card) {
+  if (!sessionController?.state.ready || sessionController.state.busy) return;
+  const idsToDelete = new Set([card.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    cards.forEach(c => {
+      if (c.parentId && idsToDelete.has(c.parentId) && !idsToDelete.has(c.id)) {
+        idsToDelete.add(c.id);
+        changed = true;
+      }
+    });
+  }
+  for (const id of idsToDelete) activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
+  cards = cards.filter(c => !idsToDelete.has(c.id));
+  if (selectedCardId && idsToDelete.has(selectedCardId)) {
+    selectedCardId = null;
+  }
+  renderCards();
+  sessionController.scheduleSave();
+}
+
 // 渲染所有卡片
 function renderCards(preserve = true) {
   // Never copy the previous session's DOM state into a newly loaded canvas.
@@ -652,6 +802,9 @@ function renderCards(preserve = true) {
     const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
     const busy = activeRequests.has(card.id);
     const chainBusy = chainIsBusy(card);
+    if (card.id === selectedCardId) {
+      cardEl.classList.add('is-selected-card');
+    }
     cardEl.innerHTML = `
       <div class="card-header" data-drag-handle="true">
         <div class="card-title-box">
@@ -728,6 +881,14 @@ function bindCardEvents(cardEl, card) {
       if (message.asidesOpen !== asides.open) { message.asidesOpen = asides.open; sessionController?.scheduleSave(); }
     });
   }
+  cardEl.addEventListener('mousedown', (e) => {
+    if (isSpacePressed) return;
+    selectCard(card.id, false);
+  });
+  inputEl.addEventListener('focus', () => {
+    selectCard(card.id, true);
+  });
+
   inputEl.value = card.draft || '';
   inputEl.addEventListener('input', () => { card.draft = inputEl.value; sessionController?.scheduleSave(); });
   btnCancel.addEventListener('click', () => {
@@ -753,6 +914,7 @@ function bindCardEvents(cardEl, card) {
 
   // 1. 卡片拖拽移动
   header.addEventListener('mousedown', (e) => {
+    if (isSpacePressed) return;
     e.stopPropagation();
     if (!sessionController?.state.ready || sessionController.state.busy) return;
     const dragGeneration = sessionController.generation;
@@ -795,74 +957,50 @@ function bindCardEvents(cardEl, card) {
 
   btnSend.addEventListener('click', doSend);
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') doSend();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      doSend();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      createBranchCard(card, { autoFocus: true });
+      return;
+    }
+    if (e.key === 'Escape') {
+      inputEl.blur();
+      return;
+    }
   });
 
   // 3. 点击从右侧开辟追问分支卡片
   btnBranch.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (chainIsBusy(card) || !cards.includes(card)) return;
-    const existingChildren = cards.filter(c => c.parentId === card.id);
-    const branchIndex = existingChildren.length + 1;
-    const newId = uniqueId('branch');
-
-    const lastMessage = card.messages.filter(message => !message.failed && !message.localOnly && (!message.status || message.status === 'completed')).at(-1);
-    const lastMsg = lastMessage ? outputFor(lastMessage).body.trim() || '父级卡片' : '父级卡片';
-    const snippet = lastMsg.length > 20 ? lastMsg.slice(0, 20) + '...' : lastMsg;
-
-    const newCard = {
-      id: newId,
-      parentId: card.id,
-      title: `追问 #${branchIndex} (${card.title.split(' ')[0]})`,
-      x: card.x + card.width + 120,
-      y: card.y + (existingChildren.length * 200),
-      width: 340,
-      messages: [
-        {
-          role: 'assistant',
-          localOnly: true,
-          text: `【承袭前置上下文】\n已从「${card.title}」成功拉出新分支。\n前置结论锚点：“${snippet}”\n你可以在此提出分支问题，绝不污染父卡片。`
-        }
-      ]
-    };
-
-    cards.push(newCard);
-    renderCards();
-    sessionController.scheduleSave();
-
-    // 平滑聚焦新卡片
-    view.x = -newCard.x + 300;
-    view.y = -newCard.y + 140;
-    updateTransform();
+    createBranchCard(card, { autoFocus: true });
   });
 
   // 4. 关闭卡片
   btnClose.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!sessionController?.state.ready || sessionController.state.busy) return;
-    const idsToDelete = new Set([card.id]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      cards.forEach(c => {
-        if (c.parentId && idsToDelete.has(c.parentId) && !idsToDelete.has(c.id)) {
-          idsToDelete.add(c.id);
-          changed = true;
-        }
-      });
-    }
-    for (const id of idsToDelete) activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
-    cards = cards.filter(c => !idsToDelete.has(c.id));
-    renderCards();
-    sessionController.scheduleSave();
+    closeCardHierarchy(card);
   });
 }
 
 // 画布视口拖拽平移 (Pan)
 viewport.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (isSpacePressed) {
+    view.isDragging = true;
+    view.dragStartX = e.clientX - view.x;
+    view.dragStartY = e.clientY - view.y;
+    viewport.classList.add('is-dragging-canvas');
+    e.preventDefault();
+    return;
+  }
   if (e.target.closest('.chat-card') || e.target.closest('.floating-zoom-bar') || e.target.closest('.canvas-header')) {
     return;
   }
+  selectCard(null);
   view.isDragging = true;
   view.dragStartX = e.clientX - view.x;
   view.dragStartY = e.clientY - view.y;
@@ -880,6 +1018,74 @@ window.addEventListener('mouseup', () => {
   if (view.isDragging) {
     view.isDragging = false;
     viewport.classList.remove('is-dragging-canvas');
+  }
+});
+
+// 全局键盘快捷键
+window.addEventListener('keydown', (e) => {
+  const isEditing = document.activeElement && (
+    document.activeElement.tagName === 'INPUT' ||
+    document.activeElement.tagName === 'TEXTAREA' ||
+    document.activeElement.isContentEditable
+  );
+
+  // 1. Space 抓手漫游模式
+  if (e.code === 'Space' && !isEditing) {
+    e.preventDefault();
+    if (!isSpacePressed) {
+      isSpacePressed = true;
+      viewport.classList.add('is-hand-tool');
+    }
+    return;
+  }
+
+  // 2. Tab 键快速开辟追问分支（非编辑状态下，对当前选中的卡片有效）
+  if (e.key === 'Tab' && !isEditing) {
+    const currentCard = cards.find(c => c.id === selectedCardId);
+    if (currentCard && !chainIsBusy(currentCard)) {
+      e.preventDefault();
+      createBranchCard(currentCard, { autoFocus: true });
+      return;
+    }
+  }
+
+  // 3. 方向键导航（非编辑状态）
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) && !isEditing) {
+    e.preventDefault();
+    navigateCardFocus(e.key);
+    return;
+  }
+
+  // 4. Escape 取消选中或关闭弹窗
+  if (e.key === 'Escape') {
+    if (battleDialog?.open) {
+      closeBattleDialog();
+      return;
+    }
+    if (isEditing) {
+      document.activeElement.blur();
+      return;
+    }
+    if (selectedCardId) {
+      selectCard(null);
+      return;
+    }
+  }
+
+  // 5. Delete / Backspace 关闭卡片（非编辑状态）
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && selectedCardId) {
+    const currentCard = cards.find(c => c.id === selectedCardId);
+    if (currentCard) {
+      e.preventDefault();
+      closeCardHierarchy(currentCard);
+    }
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') {
+    isSpacePressed = false;
+    viewport.classList.remove('is-hand-tool');
   }
 });
 
@@ -1157,5 +1363,11 @@ if (typeof window !== 'undefined') {
     runBattleBranches,
     calculateBranchYPositions,
     fitViewportToCluster,
+    selectCard,
+    createBranchCard,
+    closeCardHierarchy,
+    navigateCardFocus,
+    getSelectedCardId: () => selectedCardId,
+    getIsSpacePressed: () => isSpacePressed,
   };
 }
