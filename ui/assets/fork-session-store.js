@@ -115,6 +115,7 @@ export function normalizeForkSnapshot(input) {
     if (typeof input.agent.name === "string") normalizedAgent.name = input.agent.name.slice(0, 200);
     if (typeof input.agent.model === "string") normalizedAgent.model = input.agent.model.slice(0, 200);
     if (typeof input.agent.provider === "string") normalizedAgent.provider = input.agent.provider.slice(0, 200);
+    if (typeof input.agent.reasoningEffort === "string") normalizedAgent.reasoningEffort = input.agent.reasoningEffort.slice(0, 50);
   }
 
   // 3. 校验 cards 数组

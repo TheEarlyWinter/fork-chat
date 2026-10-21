@@ -24,6 +24,27 @@ const sessionContextMenu = document.getElementById('session-context-menu');
 const btnMenuRename = document.getElementById('session-menu-rename');
 const btnMenuDelete = document.getElementById('session-menu-delete');
 
+// 思考强度 DOM 元素引用
+const thinkingSectionEl = document.getElementById('thinking-level-section');
+const thinkingOptionsEl = document.getElementById('thinking-level-options');
+const thinkingBadgeEl = document.getElementById('thinking-level-current-badge');
+const thinkingHintEl = document.getElementById('thinking-level-hint');
+
+// 思考强度字典与状态
+const THINKING_LEVEL_LABELS = {
+  default: '默认',
+  off: '关闭',
+  minimal: '极低',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+  max: '极限',
+};
+
+let models = [];
+let currentReasoningEffort = localStorage.getItem('fork_chat_reasoning_effort') || 'default';
+
 // 助手状态
 let agents = [];
 let loadError = '';
@@ -74,6 +95,87 @@ function escapeHtml(str) {
 // -------------------------------------------------------------
 // 1. 助手列表管理
 // -------------------------------------------------------------
+
+function renderThinkingLevels() {
+  if (!thinkingSectionEl || !thinkingOptionsEl) return;
+
+  const current = agents.find(a => a.id === activeAgentId);
+  const matchedModel = models.find(m => current && (m.id === current.model || m.ref === `${current.provider}/${current.model}` || m.ref === current.model));
+
+  // 判定是否支持思考强度调整
+  const supportsReasoning = Boolean(current?.reasoning || matchedModel?.reasoning);
+  const rawLevels = (Array.isArray(current?.thinkingLevels) && current.thinkingLevels.length > 0)
+    ? current.thinkingLevels
+    : (Array.isArray(matchedModel?.thinkingLevels) ? matchedModel.thinkingLevels : []);
+
+  // 过滤出合法档位
+  const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim());
+
+  if (!supportsReasoning || availableLevels.length === 0) {
+    // 该模型不支持思考强度调整：优雅置灰
+    thinkingSectionEl.classList.add('is-disabled');
+    if (thinkingHintEl) {
+      thinkingHintEl.hidden = false;
+      thinkingHintEl.textContent = '当前模型不支持思考强度调整';
+    }
+    if (thinkingBadgeEl) {
+      thinkingBadgeEl.textContent = '不支持';
+    }
+
+    thinkingOptionsEl.innerHTML = '';
+    const defBtn = document.createElement('button');
+    defBtn.type = 'button';
+    defBtn.className = 'thinking-opt-btn active';
+    defBtn.disabled = true;
+    defBtn.textContent = '默认';
+    thinkingOptionsEl.appendChild(defBtn);
+    return;
+  }
+
+  // 支持思考强度的模型
+  thinkingSectionEl.classList.remove('is-disabled');
+  if (thinkingHintEl) thinkingHintEl.hidden = true;
+
+  // 选项集：始终包含“default”以及模型支持的所有档位
+  const options = ['default', ...availableLevels];
+
+  // 校验当前选中的档位是否在合法选项集中，若不在则安全回退到 default
+  if (!options.includes(currentReasoningEffort)) {
+    currentReasoningEffort = 'default';
+    try { localStorage.setItem('fork_chat_reasoning_effort', 'default'); } catch {}
+  }
+
+  if (thinkingBadgeEl) {
+    thinkingBadgeEl.textContent = THINKING_LEVEL_LABELS[currentReasoningEffort] || currentReasoningEffort;
+  }
+
+  thinkingOptionsEl.innerHTML = '';
+  options.forEach(opt => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    const isActive = opt === currentReasoningEffort;
+    btn.className = `thinking-opt-btn ${isActive ? 'active' : ''}`;
+    btn.textContent = THINKING_LEVEL_LABELS[opt] || opt;
+    btn.title = opt === 'default' ? '使用模型默认思考配置' : `设置思考强度为 ${opt}`;
+    btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    btn.setAttribute('role', 'radio');
+
+    btn.addEventListener('click', () => {
+      currentReasoningEffort = opt;
+      try { localStorage.setItem('fork_chat_reasoning_effort', opt); } catch {}
+      renderThinkingLevels();
+
+      // 广播思考强度变更事件给主画布，附带 targetCanvasId
+      channel.postMessage({
+        type: 'REASONING_EFFORT_CHANGED',
+        reasoningEffort: opt === 'default' ? null : opt,
+        targetCanvasId: boundCanvasId || undefined,
+      });
+    });
+
+    thinkingOptionsEl.appendChild(btn);
+  });
+}
 
 function renderAgentList() {
   if (loadError) {
@@ -127,10 +229,14 @@ function renderAgentList() {
       localStorage.setItem('fork_chat_active_agent_model', a.model || '');
       localStorage.setItem('fork_chat_active_agent_provider', a.provider || '');
       
-      // 广播助手变更事件给主画布，附带 targetCanvasId
+      // 联动重绘思考强度控制区
+      renderThinkingLevels();
+
+      // 广播助手变更事件给主画布，附带 targetCanvasId 与思考强度
       channel.postMessage({
         type: 'AGENT_CHANGED',
         agent: a,
+        reasoningEffort: currentReasoningEffort === 'default' ? null : currentReasoningEffort,
         targetCanvasId: boundCanvasId || undefined,
       });
 
@@ -161,12 +267,14 @@ async function loadAgents() {
     const data = await res.json();
     if (data.ok && Array.isArray(data.agents) && data.agents.length > 0) {
       agents = data.agents;
+      models = Array.isArray(data.models) ? data.models : [];
     } else {
       throw new Error(data.error || '未返回有效助手列表');
     }
   } catch (err) {
     agents = [];
     loadError = `助手列表加载失败：${err.message}；可点击刷新重试。`;
+    renderThinkingLevels();
     renderAgentList();
     return;
   }
@@ -188,11 +296,13 @@ async function loadAgents() {
       channel.postMessage({
         type: 'AGENT_CHANGED',
         agent: current,
+        reasoningEffort: currentReasoningEffort === 'default' ? null : currentReasoningEffort,
         targetCanvasId: boundCanvasId || undefined,
       });
     }
   }
 
+  renderThinkingLevels();
   renderAgentList();
 }
 
@@ -855,6 +965,11 @@ channel.addEventListener('message', (event) => {
         if (data.agent.provider) localStorage.setItem('fork_chat_active_agent_provider', data.agent.provider);
         renderAgentList();
       }
+      if (data.agent.reasoningEffort !== undefined) {
+        currentReasoningEffort = data.agent.reasoningEffort || 'default';
+        try { localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort); } catch {}
+      }
+      renderThinkingLevels();
     }
 
     renderSessionList();

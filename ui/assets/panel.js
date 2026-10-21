@@ -128,6 +128,14 @@ let currentAgent = {
   model: localStorage.getItem('fork_chat_active_agent_model') || 'gemini-3.8-flash-high',
   provider: localStorage.getItem('fork_chat_active_agent_provider') || 'gemini'
 };
+let currentReasoningEffort = (() => {
+  try {
+    const val = localStorage.getItem('fork_chat_reasoning_effort');
+    return val && val !== 'default' ? val : null;
+  } catch {
+    return null;
+  }
+})();
 
 function updateHeaderStatus() {
   if (activeAgentDisplay) {
@@ -141,6 +149,14 @@ bus.onmessage = (e) => {
   if (message?.targetCanvasId && message.targetCanvasId !== canvasId) return;
   if (message?.type === 'FORK_SESSION_HELLO') {
     publishSessionState(message.panelId);
+    return;
+  }
+  if (e.data?.type === 'REASONING_EFFORT_CHANGED') {
+    currentReasoningEffort = e.data.reasoningEffort || null;
+    try {
+      localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default');
+    } catch {}
+    sessionController?.scheduleSave();
     return;
   }
   if (message?.type === 'FORK_SESSION_COMMAND') {
@@ -157,6 +173,10 @@ bus.onmessage = (e) => {
   if (e.data?.type === 'AGENT_CHANGED' && e.data.agent) {
     if (sessionController?.state.busy || deleteIntent) { publishSessionState(); return; }
     currentAgent = { ...currentAgent, ...e.data.agent };
+    if (e.data.reasoningEffort !== undefined) {
+      currentReasoningEffort = e.data.reasoningEffort || null;
+      try { localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default'); } catch {}
+    }
     for (const [key, value] of Object.entries({ id: currentAgent.id, name: currentAgent.name, model: currentAgent.model, provider: currentAgent.provider })) {
       try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch {}
     }
@@ -424,6 +444,7 @@ function bindCardEvents(cardEl, card) {
         requestId, cardId: card.id, agentId: agent.id,
         modelRef: agent.provider && agent.model ? `${agent.provider}/${agent.model}` : agent.model,
         messages: contextMessages,
+        ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
       }, {
         signal: active.controller.signal,
         onWaiting() { if (sessionController.generation === requestGeneration) { asstMsg.waitingLong = true; paintMessage(asstMsg); } },
@@ -434,7 +455,8 @@ function bindCardEvents(cardEl, card) {
         onEvent(event) {
           if (sessionController.generation !== requestGeneration || activeRequests.get(card.id) !== active || !cards.includes(card)) return;
           if (event.type === 'start') {
-            asstMsg.modelRef = `${event.provider}/${event.model}${event.reasoningEffort === 'medium' ? ' · 推理 medium' : ''}`;
+            const effortTag = event.reasoningEffort ? ` · 思考 ${event.reasoningEffort}` : '';
+            asstMsg.modelRef = `${event.provider}/${event.model}${effortTag}`;
           }
           if (event.type === 'text-delta') { asstMsg.text += event.delta; if (event.delta) asstMsg.status = 'generating'; }
           if (['done', 'error', 'cancelled'].includes(event.type)) active.terminalSeen = true;
@@ -628,7 +650,14 @@ function escapeHtml(str) {
 }
 
 function initialSnapshot() {
-  return { cards: initialCards(), view: { x: 60, y: 40, scale: 1 }, agent: { ...currentAgent } };
+  return {
+    cards: initialCards(),
+    view: { x: 60, y: 40, scale: 1 },
+    agent: {
+      ...currentAgent,
+      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
+    },
+  };
 }
 function captureSnapshot() {
   for (const card of cards) {
@@ -643,12 +672,23 @@ function captureSnapshot() {
     }
   }
   const { id, name, model, provider } = currentAgent;
-  return JSON.parse(JSON.stringify({ cards, view: { x: view.x, y: view.y, scale: view.scale }, agent: { id, name, model, provider } }));
+  return JSON.parse(JSON.stringify({
+    cards,
+    view: { x: view.x, y: view.y, scale: view.scale },
+    agent: {
+      id, name, model, provider,
+      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
+    },
+  }));
 }
 function applySnapshot(snapshot) {
   cards = snapshot.cards;
   Object.assign(view, snapshot.view, { isDragging: false });
   currentAgent = { ...currentAgent, ...snapshot.agent };
+  currentReasoningEffort = snapshot.agent?.reasoningEffort || null;
+  try {
+    localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default');
+  } catch {}
   for (const [key, value] of Object.entries({ id: currentAgent.id, name: currentAgent.name, model: currentAgent.model, provider: currentAgent.provider })) {
     try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch { /* Host storage is authoritative; this is only a legacy UI hint. */ }
   }
@@ -666,8 +706,21 @@ function cancelSessionRequests(reason) {
 function publishSessionState(targetPanelId) {
   if (!sessionController) return;
   const state = sessionController.state;
-  bus.postMessage({ type: 'FORK_SESSION_STATE', canvasId, targetPanelId, activeId: state.activeId,
-    ready: state.ready, busy: state.busy || Boolean(deleteIntent), saving: state.saving, dirty: state.dirty, error: state.error, agent: currentAgent });
+  bus.postMessage({
+    type: 'FORK_SESSION_STATE',
+    canvasId,
+    targetPanelId,
+    activeId: state.activeId,
+    ready: state.ready,
+    busy: state.busy || Boolean(deleteIntent),
+    saving: state.saving,
+    dirty: state.dirty,
+    error: state.error,
+    agent: {
+      ...currentAgent,
+      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
+    },
+  });
 }
 function replySessionCommand(message, result) {
   if (!message?.requestId || !message?.panelId) return;

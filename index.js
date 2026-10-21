@@ -249,11 +249,42 @@ export default defineApp(async (sdk) => {
   // 注册 HTTP API 路由：提供模型池与助手列表查询、流式推理接口与取消接口
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
-      // 1. 获取系统助手列表接口 (包含人格与绑定模型)
+      // 1. 获取系统助手列表接口 (包含人格与绑定模型及思考能力契约)
       app.get("/api/agents", async (c) => {
         try {
           const agents = await listAllAgents();
-          return c.json({ ok: true, agents });
+          let models = [];
+          if (sdk.models?.list) {
+            try {
+              const res = await sdk.models.list();
+              const list = Array.isArray(res?.models) ? res.models : (Array.isArray(res) ? res : []);
+              models = list.map(m => {
+                const provider = m.provider || m.providerId || "host";
+                const id = m.id || m.modelId || m.model || "";
+                const ref = m.ref || (provider && id ? `${provider}/${id}` : id);
+                return {
+                  ref,
+                  provider,
+                  id,
+                  name: m.name || m.displayName || id,
+                  isDefault: Boolean(m.isCurrent || m.isDefault),
+                  reasoning: Boolean(m.reasoning),
+                  thinkingLevels: Array.isArray(m.thinkingLevels) ? m.thinkingLevels : [],
+                  defaultThinkingLevel: typeof m.defaultThinkingLevel === "string" ? m.defaultThinkingLevel : null,
+                };
+              });
+            } catch {}
+          }
+          const enrichedAgents = agents.map(a => {
+            const matchedModel = models.find(m => m.id === a.model || m.ref === `${a.provider}/${a.model}` || m.ref === a.model);
+            return {
+              ...a,
+              reasoning: matchedModel ? matchedModel.reasoning : Boolean(a.reasoning),
+              thinkingLevels: matchedModel ? matchedModel.thinkingLevels : (Array.isArray(a.thinkingLevels) ? a.thinkingLevels : []),
+              defaultThinkingLevel: matchedModel ? matchedModel.defaultThinkingLevel : (a.defaultThinkingLevel || null),
+            };
+          });
+          return c.json({ ok: true, agents: enrichedAgents, models });
         } catch (err) {
           return c.json({ ok: false, error: String(err) }, 500);
         }
@@ -275,6 +306,9 @@ export default defineApp(async (sdk) => {
                 id,
                 name: m.name || m.displayName || id,
                 isDefault: Boolean(m.isCurrent || m.isDefault),
+                reasoning: Boolean(m.reasoning),
+                thinkingLevels: Array.isArray(m.thinkingLevels) ? m.thinkingLevels : [],
+                defaultThinkingLevel: typeof m.defaultThinkingLevel === "string" ? m.defaultThinkingLevel : null,
               };
             });
             return c.json({ ok: true, models });
