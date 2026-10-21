@@ -157,7 +157,11 @@ bus.onmessage = (e) => {
   if (e.data?.type === 'AGENT_CHANGED' && e.data.agent) {
     if (sessionController?.state.busy || deleteIntent) { publishSessionState(); return; }
     currentAgent = { ...currentAgent, ...e.data.agent };
+    for (const [key, value] of Object.entries({ id: currentAgent.id, name: currentAgent.name, model: currentAgent.model, provider: currentAgent.provider })) {
+      try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch {}
+    }
     updateHeaderStatus();
+    renderCards();
     sessionController?.scheduleSave();
   } else if (e.data?.type === 'MODEL_CHANGED' && e.data.model) {
     updateHeaderStatus();
@@ -405,7 +409,7 @@ function bindCardEvents(cardEl, card) {
     const requestGeneration = sessionController.generation;
     const agent = { ...currentAgent };
     const asstMsg = {
-      role: 'assistant', agentId: agent.id, agentName: agent.name,
+      role: 'assistant', agentId: agent.id, agentName: agent.name || 'Assistant',
       requestId, text: '', status: 'waiting', streaming: true,
     };
     const active = { requestId, controller: new AbortController(), message: asstMsg, terminalSeen: false };
