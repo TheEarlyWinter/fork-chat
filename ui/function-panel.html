@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>模型列表 · 分叉对话</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-hover: #fafafa;
+      --bg-subtle: #f4f4f5;
+      --border: #e4e4e7;
+      --border-dark: #18181b;
+      --text: #18181b;
+      --text-muted: #71717a;
+      --text-dim: #a1a1aa;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 12px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      user-select: none;
+    }
+    .mono { font-family: var(--mono); }
+    .panel-container {
+      padding: 14px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 100%;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title-box {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .panel-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-muted);
+    }
+    .btn-refresh {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-refresh:hover {
+      color: var(--text);
+      border-color: var(--border-dark);
+    }
+
+    /* 搜索栏 */
+    .search-box {
+      width: 100%;
+    }
+    .search-input {
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 11px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      outline: none;
+      background: #ffffff;
+      font-family: inherit;
+    }
+    .search-input:focus {
+      border-color: var(--border-dark);
+    }
+
+    /* 模型列表 */
+    .model-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+    }
+    .model-card {
+      padding: 10px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .model-card:hover {
+      border-color: #a1a1aa;
+      background: var(--bg-hover);
+    }
+    .model-card.active {
+      border-color: var(--border-dark);
+      background: #ffffff;
+      box-shadow: 0 0 0 1px var(--border-dark);
+    }
+    .model-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .model-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dot-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-dim);
+    }
+    .model-card.active .dot-indicator {
+      background: var(--border-dark);
+    }
+    .active-tag {
+      font-size: 9px;
+      font-weight: 500;
+      padding: 1px 5px;
+      background: var(--border-dark);
+      color: #ffffff;
+      border-radius: 2px;
+    }
+    .model-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .model-provider-badge {
+      text-transform: uppercase;
+      font-size: 9px;
+      font-weight: 600;
+      padding: 1px 4px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+
+    .empty-state {
+      padding: 24px 12px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel-container">
+    <div class="panel-header">
+      <div class="panel-title-box">
+        <span class="panel-title">推理模型池</span>
+        <span class="panel-badge mono" id="model-count">0</span>
+      </div>
+      <button class="btn-refresh" id="btn-refresh" type="button">刷新</button>
+    </div>
+
+    <div class="search-box">
+      <input type="text" class="search-input" id="search-input" placeholder="过滤模型名称或厂商...">
+    </div>
+
+    <div class="model-list" id="model-list">
+      <div class="empty-state">正在检索宿主接入的模型清单...</div>
+    </div>
+  </div>
+
+  <script type="module" src="./assets/function-panel.js"></script>
+</body>
+</html>

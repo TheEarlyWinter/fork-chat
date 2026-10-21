@@ -1,0 +1,449 @@
+/* 纯白极简对话画布规范 - Canvas Conversation */
+:root {
+  --bg-app: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-header: #fafafa;
+  --bg-bubble-user: #f4f4f5;
+  --bg-bubble-asst: #ffffff;
+  --border-subtle: #e4e4e7;
+  --border-dark: #18181b;
+  --text-main: #18181b;
+  --text-sub: #71717a;
+  --text-muted: #a1a1aa;
+  --line-color: #18181b;
+  --line-subtle: #d4d4d8;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.canvas-app {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+/* 顶部极简控制条 */
+.canvas-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  height: 48px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--border-subtle);
+  z-index: 10;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  background-color: var(--bg-bubble-user);
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+  color: var(--text-sub);
+}
+
+.brand-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.meta-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-sub);
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background-color: var(--bg-card-header);
+}
+
+.header-center {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 按钮规范 */
+.btn {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.btn-primary {
+  background-color: #18181b;
+  color: #ffffff;
+  border: 1px solid #18181b;
+}
+
+.btn-primary:hover {
+  background-color: #27272a;
+}
+
+.btn-outline {
+  background-color: #ffffff;
+  color: #18181b;
+  border: 1px solid var(--border-subtle);
+}
+
+.btn-outline:hover {
+  background-color: var(--bg-card-header);
+  border-color: #d4d4d8;
+}
+
+/* 主画布视口 */
+.canvas-viewport {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  height: calc(100% - 48px);
+  overflow: hidden;
+  cursor: grab;
+  background-color: #ffffff;
+  background-image: radial-gradient(circle, #e4e4e7 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.canvas-viewport.is-dragging-canvas {
+  cursor: grabbing;
+}
+
+.canvas-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0;
+}
+
+/* SVG 连线层 */
+.connectors-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 10000px;
+  height: 10000px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 卡片挂载层 */
+.cards-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 10000px;
+  height: 10000px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* 对话卡片 (Chat Node Card) */
+.chat-card {
+  position: absolute;
+  width: 340px;
+  background-color: #ffffff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  user-select: text;
+}
+
+.chat-card:hover {
+  border-color: #a1a1aa;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);
+}
+
+.chat-card.is-active {
+  border-color: #18181b;
+  box-shadow: 0 0 0 1px #18181b, 0 6px 20px rgba(0, 0, 0, 0.09);
+}
+
+/* 卡片头部 */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background-color: var(--bg-card-header);
+  border-bottom: 1px solid var(--border-subtle);
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+  cursor: grab;
+  user-select: none;
+}
+
+.card-header:active {
+  cursor: grabbing;
+}
+
+.card-title-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #18181b;
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.card-origin-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.card-close-btn {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.card-close-btn:hover {
+  color: var(--text-main);
+}
+
+/* 卡片内部对话气泡流 */
+.card-body {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.msg-role {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.msg-bubble {
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.msg-user .msg-bubble {
+  background-color: var(--bg-bubble-user);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+}
+
+.msg-asst .msg-bubble {
+  background-color: #ffffff;
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+}
+
+/* 卡片底部输入区 */
+.card-footer {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+  background-color: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom-left-radius: 5px;
+  border-bottom-right-radius: 5px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.card-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
+  background-color: #ffffff;
+}
+
+.card-input:focus {
+  border-color: var(--border-dark);
+}
+
+.card-send-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  background-color: #18181b;
+  color: #ffffff;
+  border: 1px solid #18181b;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.card-send-btn:hover {
+  background-color: #27272a;
+}
+
+/* 核心锚点：右侧追问拉出按钮 */
+.branch-anchor-btn {
+  position: absolute;
+  right: -14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  border: 1px solid var(--border-dark);
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  font-size: 13px;
+  font-weight: 600;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+  z-index: 5;
+  user-select: none;
+}
+
+.branch-anchor-btn:hover {
+  background-color: #18181b;
+  color: #ffffff;
+  transform: translateY(-50%) scale(1.1);
+}
+
+.branch-tooltip {
+  position: absolute;
+  left: 32px;
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  background-color: #18181b;
+  color: #ffffff;
+  font-size: 10px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.branch-anchor-btn:hover .branch-tooltip {
+  opacity: 1;
+}
+
+/* 视口浮动缩放条 */
+.floating-zoom-bar {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background-color: #ffffff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  z-index: 10;
+}
+
+.zoom-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main);
+  border-radius: 50%;
+}
+
+.zoom-btn:hover {
+  background-color: var(--bg-bubble-user);
+}
+
+.zoom-level {
+  font-size: 11px;
+  color: var(--text-sub);
+  min-width: 36px;
+  text-align: center;
+}

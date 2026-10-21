@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>分叉对话 - Fork Chat</title>
+  <link rel="stylesheet" href="./assets/panel.css">
+</head>
+<body>
+  <div class="canvas-app">
+    <!-- 顶部极简控制条 -->
+    <header class="canvas-header">
+      <div class="header-left">
+        <span class="brand-tag">FORK CHAT / NON-LINEAR</span>
+        <h1 class="brand-title">分叉对话</h1>
+        <span class="meta-badge" id="badge-stats">1 卡片 · 0 追问分支</span>
+      </div>
+      <div class="header-center">
+        <span class="hint-text" id="active-model-display">当前模型: 正在连接...</span>
+      </div>
+      <div class="header-right">
+        <button class="btn btn-outline" id="btn-reset-view">居中视野</button>
+        <button class="btn btn-primary" id="btn-new-root">+ 新对话卡片</button>
+      </div>
+    </header>
+
+    <!-- 主视口：无限画布层 -->
+    <main class="canvas-viewport" id="viewport">
+      <!-- 变换容器（平移与缩放） -->
+      <div class="canvas-surface" id="surface">
+        <!-- SVG 贝塞尔曲线连线层 -->
+        <svg class="connectors-layer" id="connectors-svg"></svg>
+        <!-- 卡片实体挂载层 -->
+        <div class="cards-layer" id="cards-layer"></div>
+      </div>
+
+      <!-- 视口底部浮动缩放微件 -->
+      <div class="floating-zoom-bar">
+        <button class="zoom-btn" id="btn-zoom-out">-</button>
+        <span class="zoom-level mono" id="zoom-text">100%</span>
+        <button class="zoom-btn" id="btn-zoom-in">+</button>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="./assets/panel.js"></script>
+</body>
+</html>

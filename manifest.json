@@ -1,0 +1,55 @@
+{
+  "manifestVersion": 2,
+  "id": "timeline-reverser",
+  "name": "分叉对话",
+  "version": "1.1.0",
+  "minAppVersion": "0.1050.9",
+  "description": "打破线性聊天。树状多分支对话与模型推导工作台，支持向右分叉追问、独立回溯与真实模型流式推导。",
+  "entry": "index.js",
+  "icon": "assets/icon.png",
+  "capabilities": [
+    "app/models.infer",
+    "app/tools.expose-to-model",
+    "app/sessions.read",
+    "app/input.status",
+    "app/ui.clipboard-write"
+  ],
+  "contributes": {
+    "cards": [
+      {
+        "id": "timeline-compass",
+        "title": "分叉对话",
+        "description": "树状多分支对话与思维推导工作台",
+        "route": "/panel.html",
+        "realization": "page",
+        "siteNavEntry": true,
+        "fpFullPanel": true,
+        "face": {
+          "image": "assets/cover.png"
+        },
+        "functionPanel": {
+          "id": "fork-model-panel",
+          "label": "模型列表",
+          "route": "/function-panel.html"
+        }
+      }
+    ],
+    "ui": {
+      "inputStatus": [
+        {
+          "id": "worldline-status",
+          "title": "分叉分支状态",
+          "text": "分叉分支: 主干 α"
+        }
+      ],
+      "messageActions": [
+        {
+          "id": "fork-action",
+          "title": "分叉独立分支",
+          "messages": "all",
+          "toolName": "timeline_fork_universe"
+        }
+      ]
+    }
+  }
+}
