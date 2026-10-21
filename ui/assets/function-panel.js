@@ -1038,6 +1038,101 @@ sessionStore.watch(() => {
   loadSessions();
 });
 
+// ---- 云端解析设置（App 自管） ----
+const parserEls = {
+  state: document.getElementById('parser-state'),
+  enabled: document.getElementById('parser-enabled'),
+  token: document.getElementById('parser-token'),
+  tokenNote: document.getElementById('parser-token-note'),
+  model: document.getElementById('parser-model'),
+  language: document.getElementById('parser-language'),
+  formula: document.getElementById('parser-formula'),
+  table: document.getElementById('parser-table'),
+  ocr: document.getElementById('parser-ocr'),
+  timeout: document.getElementById('parser-timeout'),
+  save: document.getElementById('btn-parser-save'),
+  status: document.getElementById('parser-status'),
+};
+
+function setParserStatus(text, tone = '') {
+  if (!parserEls.status) return;
+  parserEls.status.textContent = text;
+  parserEls.status.className = `parser-status${tone ? ` is-${tone}` : ''}`;
+}
+
+function setParserBadge(enabled, ready) {
+  if (!parserEls.state) return;
+  parserEls.state.textContent = !enabled ? '关' : ready ? '就绪' : '缺 Token';
+}
+
+async function loadParserSettings() {
+  if (!parserEls.enabled) return;
+  try {
+    const res = await requestHost(hana, '/api/mineru/settings');
+    const data = await res.json();
+    parserEls.enabled.checked = Boolean(data.enabled);
+    parserEls.model.value = data.modelVersion || 'vlm';
+    parserEls.language.value = data.language || 'ch';
+    parserEls.formula.checked = data.enableFormula !== false;
+    parserEls.table.checked = data.enableTable !== false;
+    parserEls.ocr.checked = Boolean(data.isOcr);
+    parserEls.timeout.value = data.timeoutSeconds || 600;
+    parserEls.token.value = '';
+    parserEls.token.placeholder = data.hasToken ? '留空则不修改' : '在 mineru.net 个人中心申请';
+    parserEls.tokenNote.textContent = data.hasToken ? `已配置 ${data.tokenHint || ''}`.trim() : '未配置';
+    setParserBadge(data.enabled, data.ready);
+
+    if (!data.networkAvailable) {
+      setParserStatus('宿主网络出口不可用', 'error');
+    } else if (data.ready) {
+      setParserStatus('本地读不出时会自动升级到云端');
+    } else if (data.enabled) {
+      setParserStatus('已启用，还缺 API Token', 'error');
+    } else {
+      setParserStatus('未启用，所有解析都在本机完成');
+    }
+  } catch (err) {
+    setParserStatus(`读取失败：${err.message || String(err)}`, 'error');
+  }
+}
+
+async function saveParserSettings() {
+  if (!parserEls.enabled) return;
+  const token = parserEls.token.value.trim();
+  const payload = {
+    enabled: parserEls.enabled.checked,
+    modelVersion: parserEls.model.value,
+    language: parserEls.language.value,
+    enableFormula: parserEls.formula.checked,
+    enableTable: parserEls.table.checked,
+    isOcr: parserEls.ocr.checked,
+    timeoutSeconds: Number(parserEls.timeout.value) || 600,
+  };
+  if (token) payload.token = token;
+  setParserStatus('正在保存…');
+  try {
+    const res = await requestHost(hana, '/api/mineru/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    parserEls.token.value = '';
+    parserEls.token.placeholder = data.hasToken ? '留空则不修改' : '在 mineru.net 个人中心申请';
+    parserEls.tokenNote.textContent = data.hasToken ? `已配置 ${data.tokenHint || ''}`.trim() : '未配置';
+    setParserBadge(data.enabled, data.ready);
+    setParserStatus(data.ready ? '已保存 · 云端解析就绪' : data.enabled ? '已保存 · 还缺 Token' : '已保存 · 已关闭', 'ok');
+  } catch (err) {
+    setParserStatus(`保存失败：${err.message || String(err)}`, 'error');
+  }
+}
+
+parserEls.save?.addEventListener('click', saveParserSettings);
+// 展开时才去读，避免每次开侧边栏都多一次请求
+document.getElementById('parser-group')?.addEventListener('toggle', (event) => {
+  if (event.target.open) loadParserSettings();
+});
+
 // 初始化
 hana.ready();
 loadAgents();

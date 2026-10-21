@@ -1,7 +1,9 @@
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { createAgentDirectory } from "./lib/agents.js";
 import { createChatService } from "./lib/chat.js";
-import { parseDocument } from "./lib/document-parser.js";
+import { parseDocumentSmart } from "./lib/parse-router.js";
+import { resolveMineruOptions } from "./lib/mineru-parse.js";
+import { createAppSettings } from "./lib/app-settings.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -247,6 +249,116 @@ export default defineApp(async (sdk) => {
     timeoutMs: 120000,
   });
 
+  /** App 自管的设置（云端解析的 Token 与开关），启动时读一次，之后同步取 */
+  const appSettings = createAppSettings({ dataDir, logger: sdk.logger });
+  await appSettings.load();
+  const getConfig = (key) => appSettings.get(key);
+  const setConfig = (key, value) => appSettings.set(key, value);
+  /** 宿主网络出口：manifest 没声明 network 时这里会是 null，云端解析自动降级 */
+  const hostFetch = sdk.network?.fetch ? (input, init) => sdk.network.fetch(input, init) : null;
+
+  /** token 脱敏：只露头尾，够用户认出是哪一把 */
+  const maskToken = (token) => {
+    const value = String(token || "");
+    if (value.length <= 12) return value ? "****" : "";
+    return `${value.slice(0, 6)}…${value.slice(-4)}`;
+  };
+
+  // 工具：统一文档解析入口。本地优先，读不动才考虑上云（mode 可覆盖这一判断）
+  if (sdk.tools?.register) {
+    await sdk.tools.register({
+      name: "document_parse",
+      description: [
+        "读取一份文档（PDF/DOCX/MD/TXT）并返回其文字内容。",
+        "默认 mode=auto：先用本地引擎快速解析，只有在读不出内容（扫描件、字体缺失）时才升级到云端深度解析。",
+        "需要时可直接指定 mode=cloud（扫描件、图文混排、公式表格密集的 PDF）或 mode=local（不允许上传文件的场景）。",
+        "返回结果里的 engine 字段会告诉你实际用了哪条路。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          filename: { type: "string", description: "展示用文件名，需带扩展名，例如 论文.pdf" },
+          path: {
+            type: "string",
+            description: "文档在 App 数据目录内的相对路径，例如 uploads/1699.pdf。与 contentBase64 二选一。",
+          },
+          contentBase64: { type: "string", description: "文档的 Base64 内容。文件较大时优先用 path。" },
+          mode: {
+            type: "string",
+            enum: ["auto", "local", "cloud"],
+            description: "auto=本地优先按需升级（默认）；local=只用本地；cloud=直接云端解析（会消耗额度并上传文件）",
+          },
+          maxChars: { type: "number", description: "返回文本的字符上限，默认 40000" },
+        },
+        required: ["filename"],
+      },
+      execute: async (args) => {
+        const payload = args || {};
+        const maxChars = Number.isFinite(payload.maxChars) ? Math.max(1000, Math.min(200000, payload.maxChars)) : 40000;
+        try {
+          let contentBase64 = typeof payload.contentBase64 === "string" ? payload.contentBase64 : undefined;
+          if (!contentBase64 && payload.path) {
+            // 只允许读 App 数据目录内的文件，防止顺着手滑读穿到别处
+            const root = path.resolve(dataDir);
+            const abs = path.resolve(root, String(payload.path));
+            if (!abs.startsWith(root + path.sep)) {
+              return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "只能读取 App 数据目录内的文件" }) }] };
+            }
+            contentBase64 = (await fs.readFile(abs)).toString("base64");
+          }
+          if (!contentBase64) {
+            return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "缺少文件内容（需要 path 或 contentBase64）" }) }] };
+          }
+          const result = await parseDocumentSmart({
+            filename: payload.filename,
+            contentBase64,
+            mode: payload.mode,
+            getConfig,
+            fetchFn: hostFetch,
+            dataDir,
+            logger: sdk.logger,
+          });
+          const truncated = result.text.length > maxChars ? `${result.text.slice(0, maxChars)}\n\n…（已截断，原文 ${result.charCount} 字）` : result.text;
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    engine: result.engine,
+                    engineLabel: result.engineLabel,
+                    filename: result.filename,
+                    charCount: result.charCount,
+                    pageCount: result.pageCount,
+                    escalatedFrom: result.escalatedFrom || null,
+                    cloudSkipped: result.quality?.cloudSkipped || null,
+                    cloudFailed: result.quality?.cloudFailed || null,
+                    quality: result.quality?.readable ? "readable" : result.quality?.reasons,
+                  },
+                  null,
+                  2,
+                ) + `\n\n---\n\n${truncated}`,
+              },
+            ],
+          };
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ok: false, error: err?.message || String(err), code: err?.code || null }) }],
+          };
+        }
+      },
+    });
+  }
+
+  // 启动自检：云端解析的接线是否到位，看日志就知道，不用猜
+  {
+    const mu = resolveMineruOptions(getConfig);
+    await sdk.logger.info(
+      `云端解析：开关 ${mu.enabled ? "开" : "关"} · Token ${mu.token ? "已配置" : "未配置"} · 网络出口 ${hostFetch ? "可用" : "不可用"}`,
+    );
+  }
+
   // 注册 HTTP API 路由：提供模型池与助手列表查询、流式推理接口与取消接口
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
@@ -326,12 +438,69 @@ export default defineApp(async (sdk) => {
       // 4. 取消流式推理接口
       app.post("/api/chat/cancel", (c) => chatService.handleCancel(c));
 
-      // 5. 统一文档资料解析接口 (MD/TXT/Word/PDF)
+      // 5. 统一文档资料解析接口 (MD/TXT/Word/PDF)：本地优先，可选云端
       app.post("/api/document/extract", async (c) => {
         try {
           const body = await c.req.json();
-          const result = await parseDocument(body);
+          const result = await parseDocumentSmart({
+            filename: body.filename,
+            text: body.text,
+            contentBase64: body.contentBase64,
+            mode: body.mode,
+            getConfig,
+            fetchFn: hostFetch,
+            dataDir,
+            logger: sdk.logger,
+          });
           return c.json(result);
+        } catch (err) {
+          return c.json({ ok: false, error: err.message || String(err), code: err.code || null }, 400);
+        }
+      });
+
+      // 5b. 云端解析设置：读（token 脱敏）与写
+      app.get("/api/mineru/settings", (c) => {
+        const options = resolveMineruOptions(getConfig);
+        return c.json({
+          ok: true,
+          enabled: options.enabled,
+          ready: options.enabled && Boolean(options.token),
+          hasToken: Boolean(options.token),
+          tokenHint: maskToken(options.token),
+          modelVersion: options.modelVersion,
+          language: options.language,
+          enableFormula: options.enableFormula,
+          enableTable: options.enableTable,
+          isOcr: options.isOcr,
+          timeoutSeconds: options.timeoutSeconds,
+          networkAvailable: Boolean(hostFetch),
+        });
+      });
+
+      app.post("/api/mineru/settings", async (c) => {
+        try {
+          const body = await c.req.json();
+          if (typeof body.enabled === "boolean") setConfig("mineruEnabled", body.enabled);
+          // 只有传了非空字符串才覆盖 token：留空表示“别动我原来那把”
+          if (typeof body.token === "string" && body.token.trim()) {
+            setConfig("mineruApiToken", body.token.trim());
+          }
+          if (body.clearToken === true) setConfig("mineruApiToken", "");
+          if (typeof body.modelVersion === "string") setConfig("mineruModelVersion", body.modelVersion);
+          if (typeof body.language === "string") setConfig("mineruLanguage", body.language);
+          if (typeof body.enableFormula === "boolean") setConfig("mineruEnableFormula", body.enableFormula);
+          if (typeof body.enableTable === "boolean") setConfig("mineruEnableTable", body.enableTable);
+          if (typeof body.isOcr === "boolean") setConfig("mineruIsOcr", body.isOcr);
+          if (Number.isFinite(body.timeoutSeconds)) setConfig("mineruTimeoutSeconds", body.timeoutSeconds);
+
+          const options = resolveMineruOptions(getConfig);
+          return c.json({
+            ok: true,
+            enabled: options.enabled,
+            ready: options.enabled && Boolean(options.token),
+            hasToken: Boolean(options.token),
+            tokenHint: maskToken(options.token),
+          });
         } catch (err) {
           return c.json({ ok: false, error: err.message || String(err) }, 400);
         }
