@@ -1134,6 +1134,10 @@ function bindCardEvents(cardEl, card) {
     if (files.length === 0) return;
     for (const file of files) {
       const parsed = await extractDocumentFile(file);
+      if (!parsed.ok) {
+        flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
+        continue;
+      }
       card.stagedAttachments = (card.stagedAttachments || []).concat({
         name: parsed.filename,
         size: parsed.size,
@@ -1186,6 +1190,10 @@ function bindCardEvents(cardEl, card) {
 
       for (const file of Array.from(e.dataTransfer.files)) {
         const parsed = await extractDocumentFile(file);
+        if (!parsed.ok) {
+          flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
+          continue;
+        }
         card.stagedAttachments = (card.stagedAttachments || []).concat({
           name: parsed.filename,
           size: parsed.size,
@@ -1680,16 +1688,70 @@ async function extractDocumentFile(file) {
       : `正在解析 ${name}…`;
   }
   try {
-    let contentBase64 = '';
-    if (typeof file.arrayBuffer === 'function') {
-      const arrayBuffer = await file.arrayBuffer();
-      contentBase64 = bufferToBase64(arrayBuffer);
+    // 宿主单次 RPC 上限 32 MiB，base64 再胀三分之一。超过 16 MB 就分块送，
+    // 否则 26 MB 的扫描件根本到不了解析器就会被宿主拒收。
+    const CHUNK_RAW_BYTES = 6 * 1024 * 1024;
+    const CHUNK_THRESHOLD = 16 * 1024 * 1024;
+    let requestBody = { filename: name };
+    window.__forkChatLastStage = '开始';
+
+    if (!Number.isFinite(file.size) || file.size > CHUNK_THRESHOLD) {
+      const total = Math.ceil(file.size / CHUNK_RAW_BYTES);
+      let uploadId = null;
+      let uploaded = null;
+      for (let i = 0; i < total; i += 1) {
+        const slice = file.slice(i * CHUNK_RAW_BYTES, (i + 1) * CHUNK_RAW_BYTES);
+        const chunkBase64 = bufferToBase64(await slice.arrayBuffer());
+        if (badgeStats) {
+          badgeStats.textContent = `正在上传 ${name}… ${i + 1}/${total}`;
+        }
+        const chunkRes = await requestHost(hana, '/api/document/upload', {
+          method: 'POST',
+          body: JSON.stringify({ uploadId, filename: name, index: i, total, size: file.size, chunk: chunkBase64 }),
+        });
+        const chunkData = await chunkRes.json();
+        if (!chunkData.ok) throw new Error(chunkData.error || '分块上传失败');
+        uploadId = chunkData.uploadId;
+        if (chunkData.done) uploaded = chunkData;
+      }
+      if (!uploaded?.uploadId) throw new Error('分块上传未完成');
+      requestBody = { filename: name, uploadId: uploaded.uploadId };
+      if (badgeStats) badgeStats.textContent = `正在解析 ${name}…`;
+    } else {
+      let contentBase64 = '';
+      if (typeof file.arrayBuffer === 'function') {
+        contentBase64 = bufferToBase64(await file.arrayBuffer());
+      }
+      requestBody = { filename: name, contentBase64 };
     }
-    const res = await requestHost(hana, '/api/document/extract', {
+
+    // 长解析拆成「发起 + 轮询」：单次请求都在秒级完成，不再赌链路耐心
+    window.__forkChatLastStage = '发起解析';
+    const startRes = await requestHost(hana, '/api/document/parse', {
       method: 'POST',
-      body: JSON.stringify({ filename: name, contentBase64 }),
+      body: JSON.stringify(requestBody),
     });
-    const data = await res.json();
+    const startData = await startRes.json();
+    if (!startData.ok || !startData.jobId) throw new Error(startData.error || '无法启动解析任务');
+
+    let data = null;
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      window.__forkChatLastStage = '轮询解析进度';
+      const statusRes = await requestHost(hana, `/api/document/parse/${encodeURIComponent(startData.jobId)}`);
+      const status = await statusRes.json();
+      if (!status.ok) throw new Error(status.error || '解析状态查询失败');
+      if (status.status === 'done') {
+        data = status.result;
+        break;
+      }
+      if (status.status === 'error') throw new Error(status.error || '解析失败');
+      if (badgeStats && status.stage) {
+        badgeStats.textContent = `正在解析 ${name}…（${status.stage} · ${Math.round((status.elapsedMs || 0) / 1000)}s）`;
+      }
+    }
+    if (!data) throw new Error('解析超时（超过 5 分钟）');
 
     if (data && data.ok) {
       return {
@@ -1700,24 +1762,59 @@ async function extractDocumentFile(file) {
     // 解析失败时把原因说清楚（扫描件、字体映射、文件损坏各有各的说法）
     throw new Error(data?.error || '文档解析服务返回异常');
   } catch (err) {
+    const stage = window.__forkChatLastStage || '未知';
+    // 界面里的报错在宿主日志里看不到，先上报一份，排查时才有凭据
+    try {
+      void requestHost(hana, '/api/document/client-error', {
+        method: 'POST',
+        body: JSON.stringify({ stage, message: `${err.message || String(err)} | size=${file.size}` }),
+      }).catch(() => {});
+    } catch {}
+    // 解析失败就是失败：不再伪装成一份空资料存进会话。
+    // ok:false 让调用方原地报错，而不是把失败持久化成看似可用的卡片。
     return {
-      ok: true,
+      ok: false,
       filename: name,
       extension: ext,
       size: file.size || 0,
       charCount: 0,
       lineCount: 0,
-      text: `[解析提示] 无法完全提取 ${name} 的文本内容: ${err.message || String(err)}`,
-      preview: `文档解析遇到异常: ${err.message || String(err)}`,
+      stage,
+      error: err.message || String(err),
     };
   } finally {
     if (badgeStats && idleBadge) badgeStats.textContent = idleBadge;
   }
 }
 
+// 解析失败时原地报一声，比默默生成一张空白的资料卡诚实
+function flashMessage(text) {
+  let el = document.getElementById('fork-flash');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'fork-flash';
+    el.style.cssText = [
+      'position:fixed', 'left:50%', 'bottom:60px', 'transform:translateX(-50%)',
+      'max-width:min(560px, 78vw)', 'padding:11px 17px', 'border-radius:6px',
+      'font-size:12.5px', 'line-height:1.75', 'z-index:9999', 'pointer-events:none',
+      'transition:opacity .35s', 'background:#40221f', 'color:#f6ece9',
+      'border:1px solid #6b3a34', 'font-family:inherit', 'box-shadow:0 6px 20px rgba(0,0,0,.22)',
+    ].join(';');
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(flashMessage._timer);
+  flashMessage._timer = setTimeout(() => { el.style.opacity = '0'; }, 4600);
+}
+
 async function createDocumentCard(file, targetCoord = null) {
   if (!sessionController?.state.ready || sessionController.state.busy || !file) return null;
   const result = await extractDocumentFile(file);
+  if (!result.ok) {
+    flashMessage(`《${result.filename}》没读出来（${result.stage || '未知'}阶段）：${result.error}`);
+    return null;
+  }
   const rootCount = cards.filter(c => !c.parentId).length + 1;
   const x = targetCoord ? targetCoord.x : (80 + (rootCount - 1) * 40);
   const y = targetCoord ? targetCoord.y : (100 + (rootCount - 1) * 60);
