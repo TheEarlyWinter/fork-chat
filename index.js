@@ -788,4 +788,20 @@ export default defineApp(async (sdk) => {
 
   await sdk.logger.info("分叉对话 (Fork Chat) 核心服务就绪。");
 
+  // 运行时自检：不起任何外部请求，只确认助手能拉起、回环端口能通。
+  // 权限没批时这一行会写清楚原因，不用等到用户拖大文件才发现。
+  void (async () => {
+    try {
+      const info = await ensureParserRuntime();
+      const ready = await waitParserReady(info, 10000);
+      const health = await sdk.runtime.fetch(info.runtimeId, "/health", { timeoutMs: 5000 });
+      const data = await health.json().catch(() => ({}));
+      void sdk.logger.info(
+        `[parser-runtime] 自检通过 · ${info.runtimeId} · ${ready.profile}/${ready.network} · health=${data.ok === true}`,
+      );
+    } catch (err) {
+      void sdk.logger.warn(`[parser-runtime] 自检未通过 · ${err?.message || String(err)}（大文件云端解析暂不可用）`);
+    }
+  })();
+
 });
