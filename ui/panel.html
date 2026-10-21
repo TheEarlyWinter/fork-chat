@@ -19,9 +19,11 @@
         <span class="hint-text" id="active-agent-display">当前助手: 正在连接...</span>
       </div>
       <div class="header-right">
+        <button class="btn btn-outline" id="btn-import-doc" title="导入本地文档/资料生成独立卡片">+ 导入资料</button>
         <button class="btn btn-outline" id="btn-auto-tidy" title="自动整理树状排版 (Shift+A)">整理</button>
         <button class="btn btn-outline" id="btn-reset-view">居中视野</button>
         <button class="btn btn-primary" id="btn-new-root">+ 新对话卡片</button>
+        <input type="file" id="global-doc-input" style="display: none;" accept=".md,.markdown,.txt,.docx,.pdf,.json,.csv,.py,.js,.ts,.html,.css,.yml,.yaml,.xml,.sh,.sql">
       </div>
     </header>
 
@@ -53,6 +55,14 @@
         <span class="merge-count-text" id="merge-count-text">已选 2 个分支</span>
         <button class="btn btn-primary" id="btn-merge-submit">合并总结 ▾</button>
         <button class="btn btn-outline" id="btn-merge-cancel">取消</button>
+      </div>
+
+      <!-- 画布文件拖拽释放指示区 -->
+      <div class="canvas-drop-indicator" id="canvas-drop-indicator" hidden>
+        <div class="drop-indicator-box">
+          <span class="drop-title">释放以导入文档资料</span>
+          <span class="drop-sub">支持 MD / Word (.docx) / PDF / 代码与纯文本，生成资料源根卡片</span>
+        </div>
       </div>
     </main>
   </div>

@@ -49,8 +49,14 @@ function messageMarkup(message) {
   const output = outputFor(message);
   const replyId = message.requestId ? `id="reply-${message.requestId}"` : '';
   const bubble = `<div class="msg-bubble" ${replyId} ${output.body.trim() ? '' : 'hidden'}>${escapeHtml(output.body)}</div>`;
-  if (!message.requestId || message.role !== 'assistant') return bubble;
-  return `${bubble}
+  const docPreviewHtml = message.docPreview ? `
+    <details class="doc-content-preview">
+      <summary>查看文档内容提取预览 (${message.docMeta?.lineCount || 0} 行 · ${message.docMeta?.charCount || 0} 字)</summary>
+      <pre class="doc-content-body">${escapeHtml(message.docPreview)}</pre>
+    </details>
+  ` : '';
+  if (!message.requestId || message.role !== 'assistant') return `${bubble}${docPreviewHtml}`;
+  return `${bubble}${docPreviewHtml}
     <details class="assistant-asides" id="asides-${message.requestId}" ${message.asidesOpen ? 'open' : ''} ${output.blocks.length ? '' : 'hidden'}>
       <summary id="asides-toggle-${message.requestId}">心境 / 沉思</summary>
       <div class="assistant-asides-text" id="asides-text-${message.requestId}">${escapeHtml(asidesText(output, message))}</div>
@@ -111,6 +117,9 @@ const btnZoomOut = document.getElementById('btn-zoom-out');
 const btnResetView = document.getElementById('btn-reset-view');
 const btnAutoTidy = document.getElementById('btn-auto-tidy');
 const btnNewRoot = document.getElementById('btn-new-root');
+const btnImportDoc = document.getElementById('btn-import-doc');
+const globalDocInput = document.getElementById('global-doc-input');
+const canvasDropIndicator = document.getElementById('canvas-drop-indicator');
 const sessionStatusEl = document.getElementById('session-status');
 const btnRetrySave = document.getElementById('btn-retry-save');
 const btnSaveCopy = document.getElementById('btn-save-copy');
@@ -331,6 +340,16 @@ function buildChainContext(targetCard) {
   }
   const msgs = [];
   chain.forEach(c => {
+    if (c.isDoc && c.docContent) {
+      msgs.push({
+        role: 'user',
+        content: `【前置参考资料：《${c.title}》】\n${c.docContent}`,
+      });
+      msgs.push({
+        role: 'assistant',
+        content: `已阅读并完全解析前置资料《${c.title}》。将以此文档为事实基座回答后续分析推导。`,
+      });
+    }
     c.messages.forEach(m => {
       if (!m.text || m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
       msgs.push({
@@ -824,10 +843,19 @@ function createBranchCard(card, { autoFocus = true } = {}) {
   const targetX = card.x + card.width + 120;
   const yPositions = calculateBranchYPositions(card, 1, targetX);
 
+  const isDocParent = Boolean(card.isDoc);
+  const branchTitle = isDocParent
+    ? `分析 #${branchIndex} (${card.title.slice(0, 10)})`
+    : `追问 #${branchIndex} (${card.title.split(' ')[0]})`;
+
+  const initText = isDocParent
+    ? `【承袭前置资料】\n已承袭《${card.title}》（${formatFileSize(card.docMeta?.size || 0)}）作为推导背景。\n你可以在此提出专项分析问题，绝不污染源文档。`
+    : `【承袭前置上下文】\n已从「${card.title}」成功拉出新分支。\n前置结论锚点：“${snippet}”\n你可以在此提出分支问题，绝不污染父卡片。`;
+
   const newCard = {
     id: newId,
     parentId: card.id,
-    title: `追问 #${branchIndex} (${card.title.split(' ')[0]})`,
+    title: branchTitle,
     x: targetX,
     y: yPositions[0],
     width: 340,
@@ -835,7 +863,7 @@ function createBranchCard(card, { autoFocus = true } = {}) {
       {
         role: 'assistant',
         localOnly: true,
-        text: `【承袭前置上下文】\n已从「${card.title}」成功拉出新分支。\n前置结论锚点：“${snippet}”\n你可以在此提出分支问题，绝不污染父卡片。`
+        text: initText,
       }
     ]
   };
@@ -908,6 +936,7 @@ function renderCards(preserve = true) {
     const isBranch = Boolean(card.parentId || (Array.isArray(card.parentIds) && card.parentIds.length > 0));
     const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
     const isMerge = Boolean(card.isMerge || card.title?.startsWith('合并总结'));
+    const isDoc = Boolean(card.isDoc);
     const busy = activeRequests.has(card.id);
     const chainBusy = chainIsBusy(card);
     if (multiSelectedCardIds.has(card.id)) {
@@ -918,9 +947,9 @@ function renderCards(preserve = true) {
     cardEl.innerHTML = `
       <div class="card-header" data-drag-handle="true">
         <div class="card-title-box">
-          <div class="card-dot" style="${isMerge ? 'background-color: #18181b; border-radius: 2px;' : (isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : ''))}"></div>
+          <div class="card-dot" style="${isDoc ? 'background-color: #18181b; border-radius: 1px;' : (isMerge ? 'background-color: #18181b; border-radius: 2px;' : (isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : '')))}"></div>
           <span class="card-title">${escapeHtml(card.title)}</span>
-          ${isMerge ? '<span class="card-origin-tag tag-merge">[合并总结]</span>' : (isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : ''))}
+          ${isDoc ? '<span class="card-origin-tag tag-doc">[资料源]</span>' : (isMerge ? '<span class="card-origin-tag tag-merge">[合并总结]</span>' : (isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : '')))}
         </div>
         <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
       </div>
@@ -936,7 +965,7 @@ function renderCards(preserve = true) {
       </div>
 
       <div class="card-footer">
-        <input type="text" class="card-input" placeholder="输入对话或追问..." id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
+        <input type="text" class="card-input" placeholder="${isDoc ? '输入关于此文档的问题...' : '输入对话或追问...'}" id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
         <button class="card-send-btn" data-action="send" ${chainBusy ? 'disabled' : ''}>发送</button>
         <button class="card-send-btn btn-card-battle" data-action="battle" ${chainBusy ? 'disabled' : ''} title="多模型横向推导 / 对抗">对比 ▾</button>
         <button class="card-send-btn" data-action="cancel" ${busy ? '' : 'hidden'}>取消</button>
@@ -944,9 +973,9 @@ function renderCards(preserve = true) {
 
       <!-- 右侧连线追问与对比锚点组 -->
       <div class="branch-anchors-group">
-        <div class="branch-anchor-btn" data-action="branch" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '从这里开辟追问分支'}">
+        <div class="branch-anchor-btn" data-action="branch" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : (isDoc ? '从此资料开辟分析' : '从这里开辟追问分支')}">
           +
-          <div class="branch-tooltip">从此拉出追问</div>
+          <div class="branch-tooltip">${isDoc ? '从此资料开辟分析' : '从此拉出追问'}</div>
         </div>
         <div class="branch-anchor-btn btn-anchor-battle" data-action="branch-battle" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '多模型横向对比分支'}">
           ⑂
@@ -1355,6 +1384,194 @@ btnNewRoot.addEventListener('click', () => {
   sessionController.scheduleSave();
 });
 
+function bufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < len; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, len)));
+  }
+  return btoa(binary);
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+async function extractDocumentFile(file) {
+  const name = file.name || '未知文件';
+  const ext = (name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '');
+  const textExtensions = new Set([
+    '.md', '.markdown', '.txt', '.json', '.csv', '.tsv',
+    '.js', '.ts', '.jsx', '.tsx', '.py', '.c', '.cpp',
+    '.h', '.hpp', '.java', '.go', '.rs', '.html', '.css',
+    '.sh', '.bash', '.sql', '.yaml', '.yml', '.xml', '.ini',
+  ]);
+
+  // 1. 文本类文件：浏览器原生秒级读取，零网络开销
+  if (textExtensions.has(ext)) {
+    const text = typeof file.text === 'function' ? await file.text() : '';
+    const charCount = text.length;
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    const lineCount = lines.length;
+    const preview = text.slice(0, 1500) + (charCount > 1500 ? '\n\n... (文档较长，完整内容已完全载入上下文)' : '');
+    return {
+      ok: true,
+      filename: name,
+      extension: ext,
+      size: file.size || text.length,
+      charCount,
+      lineCount,
+      text,
+      preview,
+    };
+  }
+
+  // 2. Word (.docx) 与 PDF 等复杂格式：调用后端解析服务
+  try {
+    let contentBase64 = '';
+    if (typeof file.arrayBuffer === 'function') {
+      const arrayBuffer = await file.arrayBuffer();
+      contentBase64 = bufferToBase64(arrayBuffer);
+    }
+    const res = await requestHost(hana, '/api/document/extract', {
+      method: 'POST',
+      body: JSON.stringify({ filename: name, contentBase64 }),
+    });
+    const data = await res.json();
+    if (data && data.ok) {
+      return {
+        ...data,
+        size: file.size || data.charCount,
+      };
+    }
+    throw new Error(data?.error || '文档解析服务返回异常');
+  } catch (err) {
+    return {
+      ok: true,
+      filename: name,
+      extension: ext,
+      size: file.size || 0,
+      charCount: 0,
+      lineCount: 0,
+      text: `[解析提示] 无法完全提取 ${name} 的文本内容: ${err.message || String(err)}`,
+      preview: `文档解析遇到异常: ${err.message || String(err)}`,
+    };
+  }
+}
+
+async function createDocumentCard(file, targetCoord = null) {
+  if (!sessionController?.state.ready || sessionController.state.busy || !file) return null;
+  const result = await extractDocumentFile(file);
+  const rootCount = cards.filter(c => !c.parentId).length + 1;
+  const x = targetCoord ? targetCoord.x : (80 + (rootCount - 1) * 40);
+  const y = targetCoord ? targetCoord.y : (100 + (rootCount - 1) * 60);
+
+  const newCard = {
+    id: uniqueId('doc'),
+    parentId: null,
+    title: result.filename,
+    isDoc: true,
+    docContent: result.text,
+    docMeta: {
+      name: result.filename,
+      size: result.size,
+      extension: result.extension,
+      charCount: result.charCount,
+      lineCount: result.lineCount,
+    },
+    x,
+    y,
+    width: 360,
+    messages: [
+      {
+        role: 'assistant',
+        localOnly: true,
+        text: `【资料源就绪】已成功解析《${result.filename}》（${formatFileSize(result.size)} · ${result.charCount} 字）。\n\n点击卡片右侧 [+] 追问 或 [⑂ 对比]，即可以此文档为基座开辟分析分支。`,
+        docPreview: result.preview,
+        docMeta: {
+          name: result.filename,
+          size: result.size,
+          lineCount: result.lineCount,
+          charCount: result.charCount,
+        },
+      }
+    ],
+  };
+
+  cards.push(newCard);
+  renderCards();
+  sessionController?.scheduleSave();
+  selectCard(newCard.id, false);
+  return newCard;
+}
+
+btnImportDoc?.addEventListener('click', () => {
+  globalDocInput?.click();
+});
+
+globalDocInput?.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length === 0) return;
+  for (const file of files) {
+    await createDocumentCard(file);
+  }
+  globalDocInput.value = '';
+});
+
+// 画布全局拖拽释放文档
+let dragOverTimer = null;
+viewport?.addEventListener('dragenter', (e) => {
+  if (e.dataTransfer?.types?.includes('Files')) {
+    e.preventDefault();
+    if (canvasDropIndicator) canvasDropIndicator.hidden = false;
+  }
+});
+
+viewport?.addEventListener('dragover', (e) => {
+  if (e.dataTransfer?.types?.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (canvasDropIndicator) canvasDropIndicator.hidden = false;
+    clearTimeout(dragOverTimer);
+    dragOverTimer = setTimeout(() => {
+      if (canvasDropIndicator) canvasDropIndicator.hidden = true;
+    }, 400);
+  }
+});
+
+viewport?.addEventListener('dragleave', (e) => {
+  if (e.target === viewport || e.target === canvasDropIndicator) {
+    if (canvasDropIndicator) canvasDropIndicator.hidden = true;
+  }
+});
+
+viewport?.addEventListener('drop', async (e) => {
+  if (e.dataTransfer?.files?.length) {
+    e.preventDefault();
+    if (canvasDropIndicator) canvasDropIndicator.hidden = true;
+    clearTimeout(dragOverTimer);
+    const files = Array.from(e.dataTransfer.files);
+    const rect = viewport.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const canvasX = Math.round((mouseX - view.x) / view.scale);
+    const canvasY = Math.round((mouseY - view.y) / view.scale);
+
+    for (let i = 0; i < files.length; i++) {
+      const coord = {
+        x: canvasX + i * 40,
+        y: canvasY + i * 60,
+      };
+      await createDocumentCard(files[i], coord);
+    }
+  }
+});
+
 function escapeHtml(str) {
   return String(str || '')
     .replace(/&/g, '&amp;')
@@ -1597,5 +1814,8 @@ if (typeof window !== 'undefined') {
     getMultiSelectedCardIds: () => multiSelectedCardIds,
     synthesizeMergePrompt,
     createMergeCardFromSelected,
+    formatFileSize,
+    extractDocumentFile,
+    createDocumentCard,
   };
 }

@@ -1,6 +1,7 @@
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { createAgentDirectory } from "./lib/agents.js";
 import { createChatService } from "./lib/chat.js";
+import { parseDocument } from "./lib/document-parser.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -324,6 +325,17 @@ export default defineApp(async (sdk) => {
 
       // 4. 取消流式推理接口
       app.post("/api/chat/cancel", (c) => chatService.handleCancel(c));
+
+      // 5. 统一文档资料解析接口 (MD/TXT/Word/PDF)
+      app.post("/api/document/extract", async (c) => {
+        try {
+          const body = await c.req.json();
+          const result = await parseDocument(body);
+          return c.json(result);
+        } catch (err) {
+          return c.json({ ok: false, error: err.message || String(err) }, 400);
+        }
+      });
     });
   }
 

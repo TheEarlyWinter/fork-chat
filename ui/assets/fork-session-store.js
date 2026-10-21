@@ -278,6 +278,19 @@ export function normalizeForkSnapshot(input) {
     if (requestId) normCard.requestId = requestId;
     if (rawCard.isMerge) normCard.isMerge = true;
     if (rawCard.isBattle) normCard.isBattle = true;
+    if (rawCard.isDoc) normCard.isDoc = true;
+    if (typeof rawCard.docContent === 'string') {
+      normCard.docContent = rawCard.docContent.slice(0, 500000);
+    }
+    if (rawCard.docMeta && typeof rawCard.docMeta === 'object') {
+      normCard.docMeta = {
+        name: typeof rawCard.docMeta.name === 'string' ? rawCard.docMeta.name.slice(0, 200) : '',
+        size: typeof rawCard.docMeta.size === 'number' ? rawCard.docMeta.size : 0,
+        type: typeof rawCard.docMeta.type === 'string' ? rawCard.docMeta.type.slice(0, 50) : '',
+        charCount: typeof rawCard.docMeta.charCount === 'number' ? rawCard.docMeta.charCount : 0,
+        lineCount: typeof rawCard.docMeta.lineCount === 'number' ? rawCard.docMeta.lineCount : 0,
+      };
+    }
     if (Array.isArray(rawCard.parentIds)) {
       const validParentIds = [];
       for (const pid of rawCard.parentIds) {
