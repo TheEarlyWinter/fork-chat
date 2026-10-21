@@ -272,7 +272,8 @@ await ctx.bus.request("session:delete", { sessionId });
 
 - **引擎选型**：`lib/vendor/unpdf/` 随包携带（2.6 MB，MIT + pdf.js Apache-2.0），不走 node_modules，不 spawn 子进程，不需要 `app/process.spawn`。中文 CID / CMap / ToUnicode 由 pdf.js 内部处理，这是它能读中文的唯一原因。
 - **失败分类**：低于 200 字符时回头翻前几页的绘制指令。有画字却读不出字 → `font_mapping`（编码问题）；连画字都没有 → `no_text_layer`（扫描件，需 OCR）。两种说法分开给用户，不再混成一句"读不出来"。
-- **权限回收**：`manifest.json` 已移除 `app/resources.read`、`app/sessions.manage`、`app/session.start-turn`、`app/session.stage-file`、`app/session.switch-model`。`lib/host-parse.js` 与它的测试保留但不再接线，将来要用需要重新声明权限。
+- **权限回收**：`manifest.json` 已移除 `app/resources.read`、`app/sessions.manage`、`app/session.start-turn`、`app/session.stage-file`、`app/session.switch-model`。`lib/host-parse.js` 与其测试已删除（需要时可按本节前面的链路说明重建，权限得重新声明）。
+- **体积**：`lib/vendor/unpdf` 只留运行必需的 5 个文件（`dist/index.mjs`、`dist/pdfjs.mjs`、`package.json`、两份 LICENSE），共 1.7 MB。`package.json` **不能删**：pdf.js 模块靠 Node 的包自引用机制（`import "unpdf/pdfjs"`）解析到 `dist/pdfjs.mjs`，删了它整条链就断。类型声明（`.d.ts` 等 155 个文件）与 `index.cjs` 已清掉。
 - **Buffer 陷阱**：pdf.js 按构造器严格校验，`Buffer` 会被拒（`Please provide binary data as Uint8Array, rather than Buffer`）。必须 `new Uint8Array(buffer)` 转成裸类型。
 
 ### 实测（同一批样本，引擎替换前后对比）

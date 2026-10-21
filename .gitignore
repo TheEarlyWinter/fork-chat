@@ -15,6 +15,10 @@ node_modules/
 .cache/
 dist/
 build/
+# 第三方运行时依赖（lib/vendor）里也有 dist/，不能被上面的规则吃掉，
+# 否则仓库 clone 下来会缺核心代码、直接跑不起来。改这条规则前先想清楚。
+!lib/vendor/**/dist/
+!lib/vendor/**/dist/**
 
 # Internal development and test suites
 tests/
