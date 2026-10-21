@@ -1,5 +1,5 @@
 import { hana } from './sdk.js';
-import { safeDetail } from './host-api.js';
+import { safeDetail, requestHost } from './host-api.js';
 import { runChat, ChatError } from './chat-client.js';
 import { parseAssistantOutput } from './assistant-output.js';
 import { createForkSessionStore } from './fork-session-store.js';
@@ -245,6 +245,171 @@ function renderConnectors() {
   });
 }
 
+// 读取指定助手独立配置的思考深度
+function getAgentReasoningEffort(agentId) {
+  if (!agentId) return null;
+  try {
+    const val = localStorage.getItem(`fork_chat_agent_effort_${agentId}`);
+    return val && val !== 'default' ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+// 缓存系统可用助手列表
+let cachedAgents = [];
+let agentsLoadingPromise = null;
+async function loadAvailableAgents() {
+  if (cachedAgents.length > 0) return cachedAgents;
+  if (agentsLoadingPromise) return agentsLoadingPromise;
+  agentsLoadingPromise = (async () => {
+    try {
+      const res = await requestHost(hana, '/api/agents');
+      const data = await res.json();
+      if (Array.isArray(data?.agents)) {
+        cachedAgents = data.agents;
+      }
+    } catch {
+      cachedAgents = [currentAgent];
+    } finally {
+      agentsLoadingPromise = null;
+    }
+    return cachedAgents;
+  })();
+  return agentsLoadingPromise;
+}
+
+// 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
+function buildChainContext(targetCard) {
+  const chain = [];
+  let curr = targetCard;
+  const seen = new Set();
+  while (curr && !seen.has(curr.id)) {
+    seen.add(curr.id);
+    chain.unshift(curr);
+    curr = cards.find(c => c.id === curr.parentId);
+  }
+  const msgs = [];
+  chain.forEach(c => {
+    c.messages.forEach(m => {
+      if (!m.text || m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
+      msgs.push({
+        role: m.role,
+        content: outputFor(m).body,
+      });
+    });
+  });
+  return msgs;
+}
+
+// 通用卡片流式推导发送引擎（支持单卡发送与多模型横向并发推导）
+async function sendCardPrompt(card, text, options = {}) {
+  if (chainIsBusy(card) || !cards.includes(card)) return;
+  const trimmed = typeof text === 'string' ? text.trim() : '';
+  if (!trimmed) return;
+
+  card.messages.push({ role: 'user', text: trimmed });
+
+  // 祖先链路完整上下文
+  const contextMessages = buildChainContext(card);
+
+  // 新增 assistant 占位消息并进入流式态
+  const requestId = uniqueId('req');
+  const requestGeneration = sessionController.generation;
+  const targetAgent = options.agent ? { ...options.agent } : { ...currentAgent };
+  const targetEffort = options.reasoningEffort !== undefined
+    ? options.reasoningEffort
+    : (getAgentReasoningEffort(targetAgent.id) || currentReasoningEffort || null);
+
+  const asstMsg = {
+    role: 'assistant',
+    agentId: targetAgent.id,
+    agentName: targetAgent.name || 'Assistant',
+    requestId,
+    text: '',
+    status: 'waiting',
+    streaming: true,
+  };
+  const active = { requestId, controller: new AbortController(), message: asstMsg, terminalSeen: false };
+  activeRequests.set(card.id, active);
+  card.messages.push(asstMsg);
+  card.scrollToEnd = true;
+  renderCards();
+  sessionController.scheduleSave();
+
+  try {
+    const result = await runChat(hana, {
+      requestId,
+      cardId: card.id,
+      agentId: targetAgent.id,
+      modelRef: targetAgent.provider && targetAgent.model ? `${targetAgent.provider}/${targetAgent.model}` : targetAgent.model,
+      messages: contextMessages,
+      ...(targetEffort && targetEffort !== 'default' ? { reasoningEffort: targetEffort } : {}),
+    }, {
+      signal: active.controller.signal,
+      onWaiting() {
+        if (sessionController.generation === requestGeneration) {
+          asstMsg.waitingLong = true;
+          paintMessage(asstMsg);
+        }
+      },
+      onCancelResult(confirmed, detail) {
+        if (sessionController.generation !== requestGeneration) return;
+        asstMsg.cancelConfirmed = confirmed;
+        asstMsg.cancelError = detail;
+        paintMessage(asstMsg);
+      },
+      onEvent(event) {
+        if (sessionController.generation !== requestGeneration || activeRequests.get(card.id) !== active || !cards.includes(card)) return;
+        if (event.type === 'start') {
+          const effortTag = event.reasoningEffort ? ` · 思考 ${event.reasoningEffort}` : '';
+          asstMsg.modelRef = `${event.provider}/${event.model}${effortTag}`;
+        }
+        if (event.type === 'text-delta') {
+          asstMsg.text += event.delta;
+          if (event.delta) asstMsg.status = 'generating';
+        }
+        if (['done', 'error', 'cancelled'].includes(event.type)) active.terminalSeen = true;
+        paintMessage(asstMsg);
+        sessionController.scheduleSave();
+        const body = document.getElementById(`body-${card.id}`);
+        if (body) body.scrollTop = body.scrollHeight;
+      },
+    });
+    if (sessionController.generation !== requestGeneration) return;
+    asstMsg.text = result.text;
+    if (!parseAssistantOutput(result.text).body.trim()) {
+      throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
+    }
+    asstMsg.status = 'completed';
+  } catch (error) {
+    if (sessionController.generation !== requestGeneration) return;
+    const parsed = parseAssistantOutput(asstMsg.text || '');
+    const isHostConverterError = (error.message && error.message.includes('The model provider could not complete the request'))
+      || error.code === 'APP_MODEL_PROVIDER_ERROR';
+
+    // 关键容错：若上游已成功吐出有效正文，但在终态由于宿主校验空思考签名报错，
+    // 平滑判定为已完成，允许继续正常分支追问，绝不把可用回答直接作废！
+    if (parsed.body.trim() && isHostConverterError && error.code !== 'REQUEST_CANCELLED') {
+      asstMsg.failed = false;
+      asstMsg.status = 'completed';
+      asstMsg.error = '';
+    } else {
+      asstMsg.failed = true;
+      asstMsg.status = error.code === 'REQUEST_CANCELLED' ? 'cancelled' : 'failed';
+      asstMsg.error = safeDetail(`${error.code || 'REQUEST_FAILED'}: ${error.message}`);
+    }
+  } finally {
+    asstMsg.streaming = false;
+    if (activeRequests.get(card.id) === active) activeRequests.delete(card.id);
+    if (sessionController.generation === requestGeneration && cards.includes(card)) {
+      card.scrollToEnd = true;
+      renderCards();
+      sessionController.scheduleSave();
+    }
+  }
+}
+
 // 渲染所有卡片
 function renderCards(preserve = true) {
   // Never copy the previous session's DOM state into a newly loaded canvas.
@@ -389,27 +554,6 @@ function bindCardEvents(cardEl, card) {
     window.addEventListener('mouseup', onMouseUp);
   });
 
-  // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
-  function buildChainContext(targetCard) {
-    const chain = [];
-    let curr = targetCard;
-    while (curr) {
-      chain.unshift(curr);
-      curr = cards.find(c => c.id === curr.parentId);
-    }
-    const msgs = [];
-    chain.forEach(c => {
-      c.messages.forEach(m => {
-        if (!m.text || m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
-        msgs.push({
-          role: m.role,
-          content: outputFor(m).body
-        });
-      });
-    });
-    return msgs;
-  }
-
   // 2. 发送消息并执行打字机流式推理
   const doSend = async () => {
     if (chainIsBusy(card) || !cards.includes(card)) return;
@@ -418,84 +562,7 @@ function bindCardEvents(cardEl, card) {
     if (document.activeElement === btnSend) inputEl.focus({ preventScroll: true });
     inputEl.value = '';
     card.draft = '';
-
-    card.messages.push({ role: 'user', text });
-    
-    // 祖先链路完整上下文
-    const contextMessages = buildChainContext(card);
-
-    // 新增 assistant 占位消息并进入流式态
-    const requestId = uniqueId('req');
-    const requestGeneration = sessionController.generation;
-    const agent = { ...currentAgent };
-    const asstMsg = {
-      role: 'assistant', agentId: agent.id, agentName: agent.name || 'Assistant',
-      requestId, text: '', status: 'waiting', streaming: true,
-    };
-    const active = { requestId, controller: new AbortController(), message: asstMsg, terminalSeen: false };
-    activeRequests.set(card.id, active);
-    card.messages.push(asstMsg);
-    card.scrollToEnd = true;
-    renderCards();
-    sessionController.scheduleSave();
-
-    try {
-      const result = await runChat(hana, {
-        requestId, cardId: card.id, agentId: agent.id,
-        modelRef: agent.provider && agent.model ? `${agent.provider}/${agent.model}` : agent.model,
-        messages: contextMessages,
-        ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
-      }, {
-        signal: active.controller.signal,
-        onWaiting() { if (sessionController.generation === requestGeneration) { asstMsg.waitingLong = true; paintMessage(asstMsg); } },
-        onCancelResult(confirmed, detail) {
-          if (sessionController.generation !== requestGeneration) return;
-          asstMsg.cancelConfirmed = confirmed; asstMsg.cancelError = detail; paintMessage(asstMsg);
-        },
-        onEvent(event) {
-          if (sessionController.generation !== requestGeneration || activeRequests.get(card.id) !== active || !cards.includes(card)) return;
-          if (event.type === 'start') {
-            const effortTag = event.reasoningEffort ? ` · 思考 ${event.reasoningEffort}` : '';
-            asstMsg.modelRef = `${event.provider}/${event.model}${effortTag}`;
-          }
-          if (event.type === 'text-delta') { asstMsg.text += event.delta; if (event.delta) asstMsg.status = 'generating'; }
-          if (['done', 'error', 'cancelled'].includes(event.type)) active.terminalSeen = true;
-          paintMessage(asstMsg);
-          sessionController.scheduleSave();
-          const body = document.getElementById(`body-${card.id}`);
-          if (body) body.scrollTop = body.scrollHeight;
-        },
-      });
-      if (sessionController.generation !== requestGeneration) return;
-      asstMsg.text = result.text;
-      if (!parseAssistantOutput(result.text).body.trim()) {
-        throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
-      }
-      asstMsg.status = 'completed';
-    } catch (error) {
-      if (sessionController.generation !== requestGeneration) return;
-      const parsed = parseAssistantOutput(asstMsg.text || '');
-      const isHostConverterError = (error.message && error.message.includes('The model provider could not complete the request'))
-        || error.code === 'APP_MODEL_PROVIDER_ERROR';
-
-      // 关键容错：若上游已成功吐出有效正文，但在终态由于宿主校验空思考签名报错，
-      // 平滑判定为已完成，允许继续正常分支追问，绝不把可用回答直接作废！
-      if (parsed.body.trim() && isHostConverterError && error.code !== 'REQUEST_CANCELLED') {
-        asstMsg.failed = false;
-        asstMsg.status = 'completed';
-        asstMsg.error = '';
-      } else {
-        asstMsg.failed = true;
-        asstMsg.status = error.code === 'REQUEST_CANCELLED' ? 'cancelled' : 'failed';
-        asstMsg.error = safeDetail(`${error.code || 'REQUEST_FAILED'}: ${error.message}`);
-      }
-    } finally {
-      asstMsg.streaming = false;
-      if (activeRequests.get(card.id) === active) activeRequests.delete(card.id);
-      if (sessionController.generation === requestGeneration && cards.includes(card)) {
-        card.scrollToEnd = true; renderCards(); sessionController.scheduleSave();
-      }
-    }
+    await sendCardPrompt(card, text);
   };
 
   btnSend.addEventListener('click', doSend);
@@ -820,3 +887,13 @@ window.addEventListener('pagehide', () => {
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
+
+if (typeof window !== 'undefined') {
+  window.__forkChat = {
+    sendCardPrompt,
+    buildChainContext,
+    loadAvailableAgents,
+    getAvailableAgents: () => cachedAgents,
+    getCards: () => cards,
+  };
+}
