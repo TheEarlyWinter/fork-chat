@@ -54,12 +54,29 @@ export async function createParserService({ dataDir, authToken, generation = 'te
       const result = await parseFn({
         buffer: null, fileName: job.filename, fileSize: job.file.size, options: job.options, signal,
         fetchFn: (input, init = {}) => checkedFetch(input, { ...init, signal }),
-        createBody: () => {
+        createBody: async () => {
           signal.throwIfAborted();
-          const stream = job.file.handle.createReadStream({ start: 0, autoClose: false });
-          job.streams.add(stream);
-          stream.once('close', () => job.streams.delete(stream));
-          return stream;
+          // Never hand the job's checked descriptor to an outbound stream. A
+          // fetch implementation is allowed to destroy its request body, and
+          // Node closes the underlying FileHandle when that happens even when
+          // the stream was created with autoClose:false. Reopening through the
+          // already checked upload path gives every attempt its own descriptor,
+          // so an OCR retry cannot inherit fd=-1 from the first upload.
+          const bodyFile = await openCheckedFile(uploadsRoot, job.file.filePath, MAX_FILE);
+          try {
+            const originalStat = await job.file.handle.stat();
+            const bodyStat = await bodyFile.handle.stat();
+            if (originalStat.dev !== bodyStat.dev || originalStat.ino !== bodyStat.ino) {
+              throw new Error('上传文件在解析过程中被替换');
+            }
+            const stream = bodyFile.handle.createReadStream({ start: 0, autoClose: true });
+            job.streams.add(stream);
+            stream.once('close', () => job.streams.delete(stream));
+            return stream;
+          } catch (error) {
+            await bodyFile.handle.close().catch(() => {});
+            throw error;
+          }
         },
         onProgress(stage) { if (job.status === 'running') job.stage = String(stage).slice(0, 80); },
       });

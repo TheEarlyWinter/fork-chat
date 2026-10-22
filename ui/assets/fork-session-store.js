@@ -15,6 +15,13 @@ export const STORE_LOCK_NAME = "fork-chat-session-store-v1";
 
 const ID_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
 
+function parentIdsOf(card) {
+  return Array.from(new Set([
+    ...(card?.parentId ? [card.parentId] : []),
+    ...(Array.isArray(card?.parentIds) ? card.parentIds : []),
+  ]));
+}
+
 function createError(code, message) {
   const err = new Error(message);
   err.code = code;
@@ -348,10 +355,21 @@ export function normalizeForkSnapshot(input) {
         };
       }
     }
-    if (Array.isArray(rawCard.parentIds)) {
+    if (rawCard.parentIds !== undefined && rawCard.parentIds !== null) {
+      if (!Array.isArray(rawCard.parentIds)) {
+        throw createError("INVALID_SESSION_SNAPSHOT", `Invalid parentIds: ${cardId}`);
+      }
       const validParentIds = [];
+      const seenParentIds = new Set();
       for (const pid of rawCard.parentIds) {
-        if (typeof pid === 'string' && ID_REGEX.test(pid) && pid !== cardId) {
+        if (typeof pid !== 'string' || !ID_REGEX.test(pid)) {
+          throw createError("INVALID_SESSION_SNAPSHOT", `Invalid parentIds entry: ${pid}`);
+        }
+        if (pid === cardId) {
+          throw createError("INVALID_SESSION_SNAPSHOT", `Card cannot be its own parent: ${cardId}`);
+        }
+        if (!seenParentIds.has(pid)) {
+          seenParentIds.add(pid);
           validParentIds.push(pid);
         }
       }
@@ -367,31 +385,27 @@ export function normalizeForkSnapshot(input) {
 
   // 4. 校验父引用存在性与 DAG 无环性
   for (const card of normalizedCards) {
-    const parentList = Array.from(new Set([
-      ...(card.parentId ? [card.parentId] : []),
-      ...(card.parentIds || []),
-    ]));
-
-    for (const pId of parentList) {
+    for (const pId of parentIdsOf(card)) {
       if (!cardMap.has(pId)) {
         throw createError("INVALID_SESSION_SNAPSHOT", `Parent card not found: ${pId}`);
       }
     }
-
-    if (card.parentId) {
-      // 检查闭环
-      const visited = new Set([card.id]);
-      let curr = card.parentId;
-      while (curr) {
-        if (visited.has(curr)) {
-          throw createError("INVALID_SESSION_SNAPSHOT", `Cycle detected in card tree at card: ${curr}`);
-        }
-        visited.add(curr);
-        const pCard = cardMap.get(curr);
-        curr = pCard ? pCard.parentId : null;
-      }
-    }
   }
+
+  const visiting = new Set();
+  const visited = new Set();
+  function visit(cardId) {
+    if (visiting.has(cardId)) {
+      throw createError("INVALID_SESSION_SNAPSHOT", `Cycle detected in card DAG at card: ${cardId}`);
+    }
+    if (visited.has(cardId)) return;
+    visiting.add(cardId);
+    const card = cardMap.get(cardId);
+    for (const parentId of parentIdsOf(card)) visit(parentId);
+    visiting.delete(cardId);
+    visited.add(cardId);
+  }
+  for (const card of normalizedCards) visit(card.id);
 
   return {
     cards: normalizedCards,
@@ -585,7 +599,7 @@ export function createForkSessionStore(hana, options = {}) {
 
         const normalized = normalizeForkSnapshot(snapshot);
         const isManual = Boolean(title && typeof title === "string" && title.trim().length > 0);
-        const sessionTitle = isManual ? title.trim() : generateAutoTitle(normalized);
+        const sessionTitle = isManual ? sanitizeSessionTitle(title) : generateAutoTitle(normalized);
         const currentTime = now();
 
         const record = {

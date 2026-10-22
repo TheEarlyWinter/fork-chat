@@ -14,15 +14,25 @@ const canvasId = uniqueId('canvas');
 function uniqueId(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
 }
+function cardParentIds(card) {
+  return Array.from(new Set([
+    ...(card?.parentId ? [card.parentId] : []),
+    ...(Array.isArray(card?.parentIds) ? card.parentIds : []),
+  ]));
+}
+function cardHasParent(card, parentId) {
+  return cardParentIds(card).includes(parentId);
+}
 function chainIsBusy(card) {
   if (!sessionController?.state.ready || sessionController.state.busy) return true;
   const seen = new Set();
-  while (card && !seen.has(card.id)) {
-    seen.add(card.id);
-    if (activeRequests.has(card.id)) return true;
-    card = cards.find(parent => parent.id === card.parentId);
+  function visit(current) {
+    if (!current || seen.has(current.id)) return false;
+    seen.add(current.id);
+    if (activeRequests.has(current.id)) return true;
+    return cardParentIds(current).some(parentId => visit(cards.find(item => item.id === parentId)));
   }
-  return false;
+  return visit(card);
 }
 function statusText(message) {
   if (!message.requestId) return '';
@@ -249,9 +259,7 @@ function renderConnectors() {
   connectorsSvg.innerHTML = '';
 
   cards.forEach(child => {
-    const parentIds = Array.isArray(child.parentIds) && child.parentIds.length > 0
-      ? child.parentIds
-      : (child.parentId ? [child.parentId] : []);
+    const parentIds = cardParentIds(child);
 
     if (parentIds.length === 0) return;
 
@@ -259,7 +267,7 @@ function renderConnectors() {
       const parent = cards.find(c => c.id === pId);
       if (!parent) return;
 
-      const siblings = cards.filter(c => c.parentId === parent.id || (Array.isArray(c.parentIds) && c.parentIds.includes(parent.id)));
+      const siblings = cards.filter(c => cardHasParent(c, parent.id));
       const sibIndex = siblings.indexOf(child);
       const sibCount = siblings.length;
       // 多分支子卡片在起点微调 Y 锚点错位，形成规整线束扇出效果
@@ -347,13 +355,20 @@ async function loadAvailableAgents() {
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
 function buildChainContext(targetCard) {
   const chain = [];
-  let curr = targetCard;
-  const seen = new Set();
-  while (curr && !seen.has(curr.id)) {
-    seen.add(curr.id);
-    chain.unshift(curr);
-    curr = cards.find(c => c.id === curr.parentId);
+  const added = new Set();
+  const visiting = new Set();
+  function visit(card) {
+    if (!card || added.has(card.id)) return;
+    if (visiting.has(card.id)) return;
+    visiting.add(card.id);
+    for (const parentId of cardParentIds(card)) {
+      visit(cards.find(item => item.id === parentId));
+    }
+    visiting.delete(card.id);
+    added.add(card.id);
+    chain.push(card);
   }
+  visit(targetCard);
   const msgs = [];
   chain.forEach(c => {
     if (c.isDoc && c.docContent) {
@@ -643,7 +658,7 @@ function calculateBranchYPositions(parentCard, count, targetX) {
 
 async function runBattleBranches(parentCard, prompt, selectedAgents) {
   if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
-  const existingChildren = cards.filter(c => c.parentId === parentCard.id);
+  const existingChildren = cards.filter(c => cardHasParent(c, parentCard.id));
   const startBranchIndex = existingChildren.length + 1;
   const total = selectedAgents.length;
   const targetX = parentCard.x + (parentCard.width || 340) + 120;
@@ -848,32 +863,25 @@ function navigateCardFocus(direction) {
   if (!current) return;
 
   let target = null;
+  const currentParents = cardParentIds(current);
   if (direction === 'ArrowRight') {
-    const children = cards.filter(c => c.parentId === current.id);
+    const children = cards.filter(c => cardHasParent(c, current.id));
     if (children.length > 0) target = children[0];
   } else if (direction === 'ArrowLeft') {
-    if (current.parentId) {
-      target = cards.find(c => c.id === current.parentId);
+    if (currentParents.length > 0) {
+      target = cards.find(c => c.id === currentParents[0]);
     }
-  } else if (direction === 'ArrowDown') {
-    if (current.parentId) {
-      const siblings = cards.filter(c => c.parentId === current.parentId);
+  } else if (direction === 'ArrowDown' || direction === 'ArrowUp') {
+    if (currentParents.length > 0) {
+      const siblings = cards.filter(c => currentParents.some(parentId => cardHasParent(c, parentId)));
       const idx = siblings.findIndex(c => c.id === current.id);
-      if (idx !== -1 && idx < siblings.length - 1) target = siblings[idx + 1];
+      if (direction === 'ArrowDown' && idx !== -1 && idx < siblings.length - 1) target = siblings[idx + 1];
+      if (direction === 'ArrowUp' && idx > 0) target = siblings[idx - 1];
     } else {
-      const roots = cards.filter(c => !c.parentId);
+      const roots = cards.filter(c => cardParentIds(c).length === 0);
       const idx = roots.findIndex(c => c.id === current.id);
-      if (idx !== -1 && idx < roots.length - 1) target = roots[idx + 1];
-    }
-  } else if (direction === 'ArrowUp') {
-    if (current.parentId) {
-      const siblings = cards.filter(c => c.parentId === current.parentId);
-      const idx = siblings.findIndex(c => c.id === current.id);
-      if (idx > 0) target = siblings[idx - 1];
-    } else {
-      const roots = cards.filter(c => !c.parentId);
-      const idx = roots.findIndex(c => c.id === current.id);
-      if (idx > 0) target = roots[idx - 1];
+      if (direction === 'ArrowDown' && idx !== -1 && idx < roots.length - 1) target = roots[idx + 1];
+      if (direction === 'ArrowUp' && idx > 0) target = roots[idx - 1];
     }
   }
 
@@ -885,7 +893,7 @@ function navigateCardFocus(direction) {
 
 function createBranchCard(card, { autoFocus = true } = {}) {
   if (chainIsBusy(card) || !cards.includes(card)) return null;
-  const existingChildren = cards.filter(c => c.parentId === card.id);
+  const existingChildren = cards.filter(c => cardHasParent(c, card.id));
   const branchIndex = existingChildren.length + 1;
   const newId = uniqueId('branch');
 
@@ -940,7 +948,7 @@ function closeCardHierarchy(card) {
   while (changed) {
     changed = false;
     cards.forEach(c => {
-      if (c.parentId && idsToDelete.has(c.parentId) && !idsToDelete.has(c.id)) {
+      if (cardParentIds(c).some(parentId => idsToDelete.has(parentId)) && !idsToDelete.has(c.id)) {
         idsToDelete.add(c.id);
         changed = true;
       }
@@ -1088,7 +1096,7 @@ function renderCards(preserve = true) {
     restored?.focus?.({ preventScroll: true });
     if (selection?.every(Number.isInteger)) restored?.setSelectionRange?.(...selection);
   }
-  const branchCount = cards.filter(c => c.parentId).length;
+  const branchCount = cards.reduce((count, card) => count + cardParentIds(card).length, 0);
   badgeStats.textContent = `${cards.length} 卡片 · ${branchCount} 追问分支`;
   renderConnectors();
   if (canvasEmptyState) canvasEmptyState.hidden = cards.length > 0;
@@ -1558,8 +1566,9 @@ function autoTidyLayout() {
   });
 
   cards.forEach(c => {
-    if (c.parentId && cardMap.has(c.parentId)) {
-      childrenMap.get(c.parentId).push(c);
+    const parents = cardParentIds(c).filter(parentId => cardMap.has(parentId));
+    if (parents.length > 0) {
+      for (const parentId of parents) childrenMap.get(parentId).push(c);
     } else {
       roots.push(c);
     }
@@ -1578,12 +1587,22 @@ function autoTidyLayout() {
 
   // 计算每层的最大卡片宽度，确保拉伸后的宽卡片在排版时列间距自适应且不重叠
   const depthMap = new Map();
+  const depthVisiting = new Set();
   function assignDepth(node, depth) {
+    if (!node) return;
+    const previous = depthMap.get(node.id);
+    if (previous !== undefined && previous >= depth) return;
     depthMap.set(node.id, depth);
+    if (depthVisiting.has(node.id)) return;
+    depthVisiting.add(node.id);
     const children = childrenMap.get(node.id) || [];
     children.forEach(child => assignDepth(child, depth + 1));
+    depthVisiting.delete(node.id);
   }
   roots.forEach(root => assignDepth(root, 0));
+  cards.forEach(card => {
+    if (!depthMap.has(card.id)) assignDepth(card, 0);
+  });
 
   const maxColWidth = new Map();
   cards.forEach(c => {
@@ -1601,25 +1620,31 @@ function autoTidyLayout() {
     accumulatedX += colW + 120;
   }
 
+  const laidOut = new Set();
+  const layoutVisiting = new Set();
   function layoutSubtree(node, depth) {
+    if (!node || laidOut.has(node.id) || layoutVisiting.has(node.id)) return;
+    layoutVisiting.add(node.id);
     const children = childrenMap.get(node.id) || [];
     node.targetX = colStartX.get(depth) ?? (startX + depth * 460);
     const nodeH = typeof node.height === 'number' ? node.height : cardH;
-
-    if (children.length === 0) {
-      node.targetY = currentY;
-      currentY += nodeH + gapY;
-      return;
-    }
 
     children.forEach(child => {
       layoutSubtree(child, depth + 1);
     });
 
-    const firstChild = children[0];
-    const lastChild = children[children.length - 1];
-    node.targetY = Math.round((firstChild.targetY + lastChild.targetY) / 2);
-    currentY = Math.max(currentY, node.targetY + nodeH + gapY);
+    const positionedChildren = children.filter(child => typeof child.targetY === 'number');
+    if (positionedChildren.length === 0) {
+      node.targetY = currentY;
+      currentY += nodeH + gapY;
+    } else {
+      const firstChild = positionedChildren[0];
+      const lastChild = positionedChildren[positionedChildren.length - 1];
+      node.targetY = Math.round((firstChild.targetY + lastChild.targetY) / 2);
+      currentY = Math.max(currentY, node.targetY + nodeH + gapY);
+    }
+    layoutVisiting.delete(node.id);
+    laidOut.add(node.id);
   }
 
   roots.forEach(root => {
@@ -1659,7 +1684,7 @@ btnNewRoot.addEventListener('click', async () => {
     await sessionController.newSession(initialSnapshot());
     return;
   }
-  const rootCount = cards.filter(c => !c.parentId).length + 1;
+  const rootCount = cards.filter(c => cardParentIds(c).length === 0).length + 1;
   const newRoot = {
     id: uniqueId('card'),
     parentId: null,
@@ -1865,6 +1890,7 @@ function flashMessage(text) {
 const bridgeDialogEl = document.getElementById('bridge-dialog');
 const bridgeSendDialogEl = document.getElementById('bridge-send-dialog');
 const bridgeSessionSelect = document.getElementById('bridge-session-select');
+const bridgeKindSelect = document.getElementById('bridge-kind-select');
 const bridgeLeafSelect = document.getElementById('bridge-leaf-select');
 const bridgeLeafField = document.getElementById('bridge-leaf-field');
 const bridgePreviewEl = document.getElementById('bridge-preview');
@@ -1914,6 +1940,36 @@ function bridgeFail(el, err) {
 
 function bridgeClearError() {
   if (bridgeErrorEl) bridgeErrorEl.textContent = '';
+}
+
+function selectedBridgeKind() {
+  return bridgeKindSelect?.value === 'tree-path' ? 'tree-path' : 'history';
+}
+
+function resetBridgeLeafChoices() {
+  if (bridgeLeafField) bridgeLeafField.hidden = true;
+  if (bridgeLeafSelect) {
+    bridgeLeafSelect.disabled = true;
+    bridgeLeafSelect.innerHTML = '<option value="">选择树状导入后读取</option>';
+    bridgeLeafSelect.value = '';
+  }
+}
+
+function renderBridgeLeafChoices(preview) {
+  const branches = Array.isArray(preview?.branches) ? preview.branches : [];
+  if (bridgeLeafField) bridgeLeafField.hidden = false;
+  if (!bridgeLeafSelect) return;
+  bridgeLeafSelect.innerHTML = branches.length
+    ? '<option value="">请选择一个叶节点</option>' + branches.map((branch, index) => {
+      const id = String(branch.leafId || '');
+      const count = Number.isFinite(branch.messageCount) ? ` · ${branch.messageCount} 条` : '';
+      const summary = branch.lastText ? ` · ${String(branch.lastText).slice(0, 80)}` : '';
+      return `<option value="${escapeHtml(id)}">分支 ${index + 1}${count}${escapeHtml(summary)}</option>`;
+    }).join('')
+    : '<option value="">该会话没有可选叶节点</option>';
+  const selected = preview?.leafId || '';
+  bridgeLeafSelect.value = selected;
+  bridgeLeafSelect.disabled = branches.length === 0;
 }
 
 /** 会话尾号：同名会话靠这个区分 */
@@ -1988,23 +2044,36 @@ async function runBridgePreview() {
   bridgeClearError();
   bridgePreviewCache = null;
   const sessionId = bridgeSessionSelect?.value;
+  const kind = selectedBridgeKind();
+  const leafId = kind === 'tree-path' ? (bridgeLeafSelect?.value || null) : null;
+  if (kind === 'history') resetBridgeLeafChoices();
+  else if (bridgeLeafField) bridgeLeafField.hidden = false;
   if (!sessionId) {
     if (bridgeImportBtn) bridgeImportBtn.disabled = true;
     return;
   }
-  if (bridgeImportBtn) bridgeImportBtn.disabled = false;
-  const kind = 'history';
-  if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">正在读取最新对话快照…</p>';
+  if (bridgeImportBtn) bridgeImportBtn.disabled = true;
+  if (bridgePreviewEl) {
+    bridgePreviewEl.innerHTML = kind === 'tree-path'
+      ? '<p class="bridge-placeholder">正在读取分支树…</p>'
+      : '<p class="bridge-placeholder">正在读取最新对话快照…</p>';
+  }
   try {
     const payload = { sessionId, kind, limit: 100 };
+    if (leafId) payload.leafId = leafId;
     const data = await bridgeRequest('/api/bridge/preview', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     const preview = data.preview;
     bridgePreviewCache = preview;
+    if (kind === 'tree-path') renderBridgeLeafChoices(preview);
 
     const messages = Array.isArray(preview.messages) ? preview.messages : [];
+    if (kind === 'tree-path' && preview.needsLeafChoice) {
+      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">该会话有多个分支，请选择一个叶节点后再导入。</p>';
+      return;
+    }
     if (!messages.length) {
       bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">该会话暂无可见消息。</p>';
       return;
@@ -2012,7 +2081,7 @@ async function runBridgePreview() {
     const rows = messages.map((m) => `
       <div class="bridge-msg">
         <span class="bridge-msg-role ${m.role === 'user' ? 'is-user' : ''}">${m.role === 'user' ? '用户' : '助手'}</span>
-        ${escapeHtml(m.text.slice(0, 600))}${m.text.length > 600 ? '…' : ''}
+        ${escapeHtml(String(m.text || '').slice(0, 600))}${String(m.text || '').length > 600 ? '…' : ''}
       </div>
     `).join('');
     const warn = [];
@@ -2081,6 +2150,8 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
 
 async function importBridgePreview() {
   const sessionId = bridgeSessionSelect?.value;
+  const kind = selectedBridgeKind();
+  const leafId = kind === 'tree-path' ? (bridgeLeafSelect?.value || null) : null;
   if (!sessionId) {
     bridgeFail(bridgeErrorEl, new Error('请先选择一个会话'));
     return;
@@ -2092,14 +2163,24 @@ async function importBridgePreview() {
   }
   try {
     let preview = bridgePreviewCache;
-    // 如果还没拉取完成，或者切换了会话，立即按需拉取
-    if (!preview || preview.session?.sessionId !== sessionId) {
+    const previewMatches = preview
+      && preview.session?.sessionId === sessionId
+      && (kind === 'history'
+        ? preview.kind === 'history'
+        : preview.kind === 'tree' && Boolean(leafId) && preview.leafId === leafId);
+    if (!previewMatches) {
+      const payload = { sessionId, kind, limit: 100 };
+      if (leafId) payload.leafId = leafId;
       const data = await bridgeRequest('/api/bridge/preview', {
         method: 'POST',
-        body: JSON.stringify({ sessionId, kind: 'history', limit: 100 }),
+        body: JSON.stringify(payload),
       });
       preview = data?.preview;
       bridgePreviewCache = preview;
+    }
+    if (preview?.needsLeafChoice) {
+      flashMessage('请先选择一个分支叶节点。');
+      return;
     }
     const messages = Array.isArray(preview?.messages) ? preview.messages : [];
     if (!messages.length) {
@@ -2113,11 +2194,11 @@ async function importBridgePreview() {
       kind: 'hana-session',
       sessionId: preview.session.sessionId,
       entryIds: messages.map((m) => m.entryId).filter(Boolean),
-      leafId: preview.leafId || null,
+      leafId: preview.leafId || leafId || null,
       titleAtImport: preview.session.title || '',
       importedAt: new Date().toISOString(),
       contentHash: '',
-      importKind: 'history',
+      importKind: kind,
     };
     // 内容哈希用与服务端同一套规则，保证去重键一致
     let h1 = 0x811c9dc5;
@@ -2394,12 +2475,18 @@ function initSessionBridge() {
   bridgeSessionSelect?.addEventListener('change', () => {
     const val = bridgeSessionSelect.value;
     if (val) {
-      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
       void runBridgePreview();
     } else {
       if (bridgeImportBtn) bridgeImportBtn.disabled = true;
       if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">请选择要导入的会话。</p>';
     }
+  });
+  bridgeKindSelect?.addEventListener('change', () => {
+    bridgePreviewCache = null;
+    void runBridgePreview();
+  });
+  bridgeLeafSelect?.addEventListener('change', () => {
+    if (selectedBridgeKind() === 'tree-path') void runBridgePreview();
   });
 
   document.getElementById('bridge-tab-import')?.addEventListener('click', () => {
@@ -2466,7 +2553,7 @@ async function createDocumentCard(file, targetCoord = null) {
     flashMessage(`《${result.filename}》没读出来（${result.stage || '未知'}阶段）：${result.error}`);
     return null;
   }
-  const rootCount = cards.filter(c => !c.parentId).length + 1;
+  const rootCount = cards.filter(c => cardParentIds(c).length === 0).length + 1;
   const x = targetCoord ? targetCoord.x : (80 + (rootCount - 1) * 40);
   const y = targetCoord ? targetCoord.y : (100 + (rootCount - 1) * 60);
 

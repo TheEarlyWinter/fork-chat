@@ -27,7 +27,8 @@ const btnMenuDelete = document.getElementById('session-menu-delete');
 // 思考强度字典与助手独立配置
 const THINKING_LEVEL_LABELS = {
   default: '默认',
-  off: '关闭',
+  off: '不思考（None）',
+  none: '不思考（None）',
   minimal: '极低',
   low: '低',
   medium: '中',
@@ -36,12 +37,30 @@ const THINKING_LEVEL_LABELS = {
   max: '极限',
 };
 
+const THINKING_LEVEL_ALIASES = Object.freeze({
+  default: 'default',
+  none: 'off',
+  off: 'off',
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'max',
+});
+
+function normalizeThinkingLevel(value) {
+  if (typeof value !== 'string') return '';
+  const key = value.trim().toLowerCase();
+  return THINKING_LEVEL_ALIASES[key] || '';
+}
+
 let models = [];
 
 function getAgentReasoningEffort(agentId) {
   if (!agentId) return 'default';
   try {
-    return localStorage.getItem(`fork_chat_agent_effort_${agentId}`) || 'default';
+    return normalizeThinkingLevel(localStorage.getItem(`fork_chat_agent_effort_${agentId}`)) || 'default';
   } catch {
     return 'default';
   }
@@ -49,11 +68,12 @@ function getAgentReasoningEffort(agentId) {
 
 function setAgentReasoningEffort(agentId, effort) {
   if (!agentId) return;
+  const normalized = normalizeThinkingLevel(effort) || 'default';
   try {
-    if (!effort || effort === 'default') {
+    if (normalized === 'default') {
       localStorage.removeItem(`fork_chat_agent_effort_${agentId}`);
     } else {
-      localStorage.setItem(`fork_chat_agent_effort_${agentId}`, effort);
+      localStorage.setItem(`fork_chat_agent_effort_${agentId}`, normalized);
     }
   } catch {}
 }
@@ -145,12 +165,15 @@ function renderAgentList() {
     const rawLevels = (Array.isArray(a.thinkingLevels) && a.thinkingLevels.length > 0)
       ? a.thinkingLevels
       : (Array.isArray(matchedModel?.thinkingLevels) ? matchedModel.thinkingLevels : []);
-    // 过滤掉测试遗留的 "off" 显眼包，仅保留真正递增的深度档位
-    const availableLevels = rawLevels.filter(lvl => typeof lvl === 'string' && lvl.trim() && lvl.trim().toLowerCase() !== 'off');
+    // 宿主可能返回 None/off 以及不同大小写；统一为聊天服务接受的 canonical token。
+    // 显式关闭不是“测试遗留项”，必须与默认（未指定）并列展示。
+    const availableLevels = Array.from(new Set(rawLevels
+      .map(normalizeThinkingLevel)
+      .filter(level => level && level !== 'default')));
 
     // 读取该助手独立保存的思考强度
     let currentEffort = getAgentReasoningEffort(a.id);
-    const options = ['default', ...availableLevels];
+    const options = Array.from(new Set(['default', ...availableLevels]));
     if (!options.includes(currentEffort)) {
       currentEffort = 'default';
       setAgentReasoningEffort(a.id, 'default');

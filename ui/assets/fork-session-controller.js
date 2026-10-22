@@ -14,18 +14,27 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   async function refresh() {
     const sequence = ++refreshing;
     const list = await store.list();
-    if (sequence === refreshing) {
-      sessions = list.sessions;
-      if (active && !sessions.some(item => item.id === active.id)) {
-        if (list.activeId) {
-          const replacement = await store.get(list.activeId).catch(() => null);
-          if (sequence === refreshing && !closed) await install(replacement);
-        } else {
-          await install(null);
+    if (sequence !== refreshing || closed) return list;
+
+    sessions = list.sessions;
+    const currentId = active?.id || null;
+    const currentMissing = Boolean(active && !sessions.some(item => item.id === active.id));
+    const activeChanged = list.activeId !== currentId;
+
+    if (currentMissing || activeChanged) {
+      if (list.activeId) {
+        const replacement = await store.get(list.activeId).catch(() => null);
+        if (sequence === refreshing && !closed && replacement
+          && (currentMissing || !active || changed <= saved)) {
+          await install(replacement);
+        } else if (sequence === refreshing && !closed && active && !currentMissing && changed > saved) {
+          error = 'SESSION_ACTIVE_CHANGED: 其他窗口已切换当前会话，本窗口有未保存修改。';
         }
+      } else if (sequence === refreshing && !closed && (currentMissing || !active || changed <= saved)) {
+        await install(null);
       }
-      notify();
     }
+    notify();
     return list;
   }
   function scheduleSave() {

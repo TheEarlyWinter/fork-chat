@@ -94,6 +94,27 @@
         <select class="bridge-select" id="bridge-session-select">
           <option value="">正在读取…</option>
         </select>
+        <div class="bridge-hint" id="bridge-active-hint">尚未绑定当前活跃会话</div>
+      </div>
+
+      <div class="bridge-field">
+        <label class="bridge-label" for="bridge-kind-select">导入范围</label>
+        <select class="bridge-select" id="bridge-kind-select">
+          <option value="history">当前分支最新历史</option>
+          <option value="tree-path">从树状分支选择叶节点</option>
+        </select>
+      </div>
+
+      <div class="bridge-field" id="bridge-leaf-field" hidden>
+        <label class="bridge-label" for="bridge-leaf-select">选择分支叶节点</label>
+        <select class="bridge-select" id="bridge-leaf-select" disabled>
+          <option value="">请先读取分支树</option>
+        </select>
+      </div>
+
+      <div class="bridge-dialog-actions bridge-dialog-actions-secondary">
+        <button class="btn btn-outline" id="btn-bridge-bind-active" type="button">绑定当前会话</button>
+        <button class="btn btn-outline" id="btn-bridge-preview" type="button">刷新预览</button>
       </div>
 
       <div class="bridge-preview" id="bridge-preview">
