@@ -7,10 +7,10 @@
 | 项目 | 值 |
 |---|---|
 | 仓库 | `/home/theearlywinter/Desktop/OH-WorkSpace/OH-Works/Projects/fork-chat` |
-| 分支 | `main`，最新提交 `dd85ad1` |
-| 测试 | `node --experimental-vm-modules --test tests/*.test.mjs` → **424 通过 / 0 失败** |
-| panel.js | 3087 行 → **2251 行** |
-| 已拆模块 | 10 个 |
+| 分支 | `main`，最新提交见 `git log -1` |
+| 测试 | `node --experimental-vm-modules --test tests/*.test.mjs` → **453 通过 / 0 失败** |
+| panel.js | 3087 行 → **2074 行** |
+| 已拆模块 | 12 个 |
 | 版本 | manifest 1.9.3 |
 
 跑测试要留够时间，全量大约两分钟。`tests/` 和 `*.test.mjs` 在 `.gitignore` 里，测试改动不会进版本库。
@@ -28,7 +28,9 @@
 | `panel-canvas-actions.js` | 272 | 根卡/分支/资料卡创建、级联删除、删除留档 |
 | `panel-history-controller.js` | 69 | 撤销栈与恢复适配 |
 | `panel-chat-engine.js` | 189 | 流式发送、终止判定、三重失效检查 |
-| `panel-battle-flow.js` | 118 | 对比推导弹窗与并发开分支 |
+| `panel-battle-flow.js` | 99 | 对比推导弹窗与并发开分支 |
+| `panel-merge.js` | 164 | 多选集合、合流工具栏、合流卡与提示词合成 |
+| `panel-bridge-send.js` | 237 | 回传两阶段 prepare/confirm、正文冻结、unknown 不重试 |
 
 侧边栏另有三个：`function-panel.js`（267，原 1239）、`function-agents.js`（351）、`function-sessions.js`（790）。
 
@@ -38,8 +40,6 @@
 
 | 步 | 目标文件 | 搬什么 | 为什么排这里 |
 |---|---|---|---|
-| 7 | `panel-merge.js` | 多选集合、合流工具栏、合流摘要 | 依赖画布动作与发送引擎，两个都已就位 |
-| 8 | `panel-bridge-send.js` | 回传同步锁、发件箱、两阶段 prepare/confirm | 桥接三块里最独立的一块 |
 | 9 | `panel-bridge-intents.js` | 凭条认领、释放、持久化、ACK | 与第 8 步协议不同，必须单独做 |
 | 10 | `panel-bridge.js` | 导入弹窗、预览、来源快照、装配 | 收口前两块 |
 | 11 | `panel-document-ui.js` | 附件选择、卡片拖放、导入按钮 | 只搬 UI，解析器已在第 4 步搬走 |
