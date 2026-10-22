@@ -7,7 +7,6 @@ import { createForkSessionController } from './fork-session-controller.js';
 import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
 import { collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
 import { bindKeyboardShortcuts } from './panel-shortcuts.js';
-import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
 import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
 import { createAgentController } from './panel-agents.js';
 import { createCanvasViewController } from './panel-canvas-view.js';
@@ -16,6 +15,7 @@ import { cardParentIds, cardHasParent, buildChainContext as buildContext } from 
 import { createDocumentPipeline } from './panel-documents.js';
 import { createChatEngine } from './panel-chat-engine.js';
 import { createBattleFlow } from './panel-battle-flow.js';
+import { createMergeController } from './panel-merge.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
@@ -385,97 +385,49 @@ const battleFlow = createBattleFlow({
 });
 const { closeBattleDialog, openBattleDialog, runBattleBranches } = battleFlow;
 
+// 多选与合流收敛控制器 (Merge Controller)
+const mergeController = createMergeController({
+  multiSelectedCardIds,
+  getCards: () => cards,
+  getSelectedCardId: () => selectedCardId,
+  canMutateCanvas: () => canMutateCanvas(),
+  isDisposed: () => isDisposed,
+  chainIsBusy: card => chainIsBusy(card),
+  calculateBranchYPositions: (parent, count, targetX) => calculateBranchYPositions(parent, count, targetX),
+  fitViewportToCluster: clusterCards => fitViewportToCluster(clusterCards),
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (c, sId) => historyManager?.recordSnapshot(c, sId),
+  sendCardPrompt: (card, prompt) => sendCardPrompt(card, prompt),
+  uniqueId: (...args) => uniqueId(...args),
+  outputFor: msg => outputFor(msg),
+  documentRef: document,
+  mergeToolbar,
+  mergeCountText,
+  btnMergeCancel,
+  btnMergeSubmit,
+  listen,
+});
+mergeController.bindToolbar();
+
 function toggleMultiSelectCard(cardId) {
-  if (!canMutateCanvas()) return;
-  if (multiSelectedCardIds.has(cardId)) {
-    multiSelectedCardIds.delete(cardId);
-  } else {
-    if (multiSelectedCardIds.size === 0 && selectedCardId && selectedCardId !== cardId) {
-      multiSelectedCardIds.add(selectedCardId);
-    }
-    multiSelectedCardIds.add(cardId);
-  }
-  updateMultiSelectionUI();
+  return mergeController.toggleMultiSelectCard(cardId);
 }
 
 function clearMultiSelect() {
-  if (isDisposed) return;
-  if (multiSelectedCardIds.size === 0) return;
-  multiSelectedCardIds.clear();
-  updateMultiSelectionUI();
+  return mergeController.clearMultiSelect();
 }
 
 function updateMultiSelectionUI() {
-  cards.forEach(c => {
-    const el = document.getElementById(`dom-${c.id}`);
-    if (el) {
-      if (multiSelectedCardIds.has(c.id)) {
-        el.classList.add('is-multi-selected');
-      } else {
-        el.classList.remove('is-multi-selected');
-      }
-    }
-  });
-
-  if (multiSelectedCardIds.size >= 2) {
-    if (mergeToolbar) mergeToolbar.hidden = false;
-    if (mergeCountText) mergeCountText.textContent = `已选 ${multiSelectedCardIds.size} 个分支`;
-  } else {
-    if (mergeToolbar) mergeToolbar.hidden = true;
-  }
+  return mergeController.updateMultiSelectionUI();
 }
 
 function synthesizeMergePrompt(selectedCards) {
-  const branchSummaries = selectedCards.map((card, idx) => {
-    const userMsg = card.messages.filter(m => m.role === 'user' && !m.failed).at(-1);
-    const asstMsg = card.messages.filter(m => m.role === 'assistant' && !m.localOnly && !m.failed && (!m.status || m.status === 'completed')).at(-1);
-
-    const questionText = userMsg?.content || userMsg?.text || '（沿用前置主题）';
-    const answerText = asstMsg ? (outputFor(asstMsg).body.trim() || asstMsg.text) : '（尚无推导结论）';
-    const truncatedAnswer = answerText.length > 600 ? answerText.slice(0, 600) + '… [已截断核心]' : answerText;
-
-    return `### 分支 #${idx + 1}：${card.title}\n- **探讨问题**：${questionText}\n- **推导结论要点**：\n${truncatedAnswer}`;
-  }).join('\n\n');
-
-  return `你现在作为首席架构裁判与决策顾问，请对以下 ${selectedCards.length} 个独立探索分支的推导结论进行深度交叉对比与合流收敛：\n\n${branchSummaries}\n\n---\n【合流裁决任务】：\n1. **核心共识与关键分歧**：提炼各个分支方案的交集共识与核心分歧点；\n2. **适用边界与权衡代价 (Trade-offs)**：客观剖析各方案在性能、复杂度、可靠性及维护成本上的利弊得失；\n3. **终局综合决策方案**：给出最终的落地裁决意见与明确的执行路线。`;
+  return mergeController.synthesizeMergePrompt(selectedCards);
 }
 
-async function createMergeCardFromSelected() {
-  if (!canMutateCanvas()) return null;
-  const selectedCards = cards.filter(c => multiSelectedCardIds.has(c.id));
-  if (selectedCards.length < 2 || selectedCards.some(chainIsBusy)) return null;
-
-  const maxX = Math.max(...selectedCards.map(c => c.x + (c.width || 340)));
-  const targetX = maxX + 140;
-  const avgY = Math.round(selectedCards.reduce((acc, c) => acc + c.y, 0) / selectedCards.length);
-  const targetY = calculateBranchYPositions({ x: maxX, y: avgY, width: 0 }, 1, targetX)[0];
-
-  const newId = uniqueId('merge_node');
-  const sourceTitles = selectedCards.map(c => c.title.split(' ')[0]).join(' + ');
-
-  const mergeCard = {
-    id: newId,
-    parentId: selectedCards[0].id,
-    parentIds: selectedCards.map(c => c.id),
-    isMerge: true,
-    title: `合并总结 (${sourceTitles})`,
-    x: targetX,
-    y: targetY,
-    width: 360,
-    messages: [],
-  };
-
-  cards.push(mergeCard);
-  clearMultiSelect();
-  renderCards();
-  sessionController?.scheduleSave();
-  historyManager.recordSnapshot(cards, mergeCard.id);
-
-  fitViewportToCluster([...selectedCards, mergeCard]);
-
-  const prompt = synthesizeMergePrompt(selectedCards);
-  void sendCardPrompt(mergeCard, prompt);
-  return mergeCard;
+function createMergeCardFromSelected() {
+  return mergeController.createMergeCardFromSelected();
 }
 
 // 渲染所有卡片
@@ -2194,14 +2146,6 @@ listen(window, 'pagehide', () => {
   disposePanel();
 });
 
-listen(btnMergeCancel, 'click', () => {
-  clearMultiSelect();
-});
-
-listen(btnMergeSubmit, 'click', () => {
-  void createMergeCardFromSelected();
-});
-
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
@@ -2213,7 +2157,6 @@ if (typeof window !== 'undefined') {
     buildChainContext,
     loadAvailableAgents,
     getAvailableAgents: () => agentController.getAvailableAgents(),
-  loadAvailableAgents: () => agentController.loadAvailableAgents(),
     getCards: () => cards,
     getView: () => view,
     openBattleDialog,
