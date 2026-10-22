@@ -1,5 +1,6 @@
 import { parseAssistantOutput } from './assistant-output.js';
 import { formatFileSize, escapeHtml } from './panel-format.js';
+import katex from '../vendor/katex/katex.mjs';
 
 /**
  * 消息投影与状态格式化纯函数模块。
@@ -8,6 +9,48 @@ import { formatFileSize, escapeHtml } from './panel-format.js';
  * 纯函数无副作用，DOM 绘制通过 createMessagePainter 工厂函数依赖注入。
  * 严禁在顶层访问 window 或 document。
  */
+
+
+/**
+ * 把正文切成「普通文字」和「公式」两类片段。
+ *
+ * 块级 $$...$$ 优先，行内 $...$ 兜底；行内要求 $ 内侧不贴空格，
+ * 否则「$100 和 $200」这种会被误当成公式。
+ */
+function splitFormulaSegments(text) {
+  const segments = [];
+  const re = /\$\$([\s\S]+?)\$\$|\$(?!\s)([^$\n]+?)(?<!\s)\$/g;
+  let last = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) segments.push({ type: 'text', value: text.slice(last, match.index) });
+    const display = match[1] !== undefined;
+    segments.push({ type: 'math', value: display ? match[1] : match[2], display });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ type: 'text', value: text.slice(last) });
+  return segments;
+}
+
+/**
+ * 正文转 HTML：文字转义，公式交给 KaTeX。
+ * 渲染失败就原样吐回去——宁可看到 $T_g$ 这种标记，也不能让一条公式把整段正文吞掉。
+ */
+export function renderBodyHtml(text) {
+  if (!text) return '';
+  return splitFormulaSegments(String(text)).map(segment => {
+    if (segment.type === 'text') return escapeHtml(segment.value);
+    try {
+      return katex.renderToString(segment.value, {
+        displayMode: segment.display,
+        throwOnError: false,
+        strict: false,
+      });
+    } catch {
+      return escapeHtml(segment.display ? `$$${segment.value}$$` : `$${segment.value}$`);
+    }
+  }).join('');
+}
 
 export function statusText(message) {
   if (!message || !message.requestId) return '';
@@ -47,7 +90,7 @@ export function messageMarkup(message) {
   if (!message) return '';
   const output = outputFor(message);
   const replyId = message.requestId ? `id="reply-${message.requestId}"` : '';
-  const bubble = `<div class="msg-bubble" ${replyId} ${output.body.trim() ? '' : 'hidden'}>${escapeHtml(output.body)}</div>`;
+  const bubble = `<div class="msg-bubble" ${replyId} ${output.body.trim() ? '' : 'hidden'}>${renderBodyHtml(output.body)}</div>`;
   const docPreviewHtml = message.docPreview ? `
     <details class="doc-content-preview">
       <summary>查看文档内容提取预览 (${message.docMeta?.lineCount || 0} 行 · ${message.docMeta?.charCount || 0} 字)</summary>
