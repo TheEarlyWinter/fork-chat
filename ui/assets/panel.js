@@ -275,21 +275,27 @@ function renderConnectors() {
         ? 110 + (sibIndex - (sibCount - 1) / 2) * 12
         : 110;
 
-      // 起点：父卡片右侧边缘锚点
-      const startX = parent.x + parent.width;
+      // 判断相对位置：子卡片在父卡片右侧还是左侧
+      const isForward = child.x >= parent.x;
+
+      // 起点：前进向右从父右边缘引出；后退向左从父左边缘引出，规避麻花畸变
+      const startX = isForward ? parent.x + parent.width : parent.x;
       const startY = parent.y + startOffsetY;
 
-      // 终点：子卡片左侧中点（多亲合流汇入时也按线束微调终点 Y 锚点）
+      // 终点：前进向右连入子左边缘；后退向左连入子右边缘
       const endOffsetY = parentIds.length > 1
         ? 110 + (pIndex - (parentIds.length - 1) / 2) * 14
         : 110;
-      const endX = child.x;
+      const endX = isForward ? child.x : child.x + child.width;
       const endY = child.y + endOffsetY;
 
-      const deltaX = Math.abs(endX - startX) * 0.55;
+      const spanX = Math.abs(endX - startX);
+      const deltaX = Math.max(spanX * 0.55, 30);
+      const c1X = isForward ? startX + deltaX : startX - deltaX;
+      const c2X = isForward ? endX - deltaX : endX + deltaX;
 
       // 平滑贝塞尔曲线
-      const d = `M ${startX} ${startY} C ${startX + deltaX} ${startY}, ${endX - deltaX} ${endY}, ${endX} ${endY}`;
+      const d = `M ${startX} ${startY} C ${c1X} ${startY}, ${c2X} ${endY}, ${endX} ${endY}`;
 
       // 背景粗边描边
       const pathBg = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -1492,8 +1498,8 @@ window.addEventListener('keydown', (e) => {
     }
   }
 
-  // 5. Delete / Backspace 关闭卡片（非编辑状态）
-  if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && selectedCardId) {
+  // 5. Delete 关闭卡片（非编辑状态，移除危险的 Backspace 级联误删保护）
+  if (e.key === 'Delete' && !isEditing && selectedCardId) {
     const currentCard = cards.find(c => c.id === selectedCardId);
     if (currentCard) {
       e.preventDefault();
@@ -2379,11 +2385,11 @@ async function pollBridgeIntents() {
 
     for (const intent of list) {
       if (!intent?.intentId || intent.consumed) continue;
-      // 抢占凭条，防多窗口竞争
+      // 抢占凭条：使用当前窗口全局唯一的 canvasId 作为 claimer，实现真正的多窗口并发抢占与隔离
       try {
         await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/claim`, {
           method: 'POST',
-          body: JSON.stringify({ claimer: 'primary' }),
+          body: JSON.stringify({ claimer: canvasId }),
         });
       } catch {
         continue;
@@ -2399,30 +2405,51 @@ async function pollBridgeIntents() {
         if (!messages.length) {
           await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
             method: 'POST',
-            body: JSON.stringify({ claimer: 'primary' }),
+            body: JSON.stringify({ claimer: canvasId }),
           }).catch(() => {});
           continue;
         }
 
-        const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
-        const text = `# ${intent.title || preview.session?.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+        // 精准区分：消息级导入（精确匹配 intent.messageId）还是全会话历史导入
+        const targetMsg = intent.messageId ? messages.find((m) => m.entryId === intent.messageId) : null;
+        let cardTitle = '';
+        let text = '';
+        let importKind = 'history';
+        let importEntryIds = [];
+        let importedCount = 0;
+
+        if (targetMsg) {
+          importKind = 'message';
+          importEntryIds = [targetMsg.entryId].filter(Boolean);
+          cardTitle = intent.title ? `消息切片 · ${intent.title}` : `消息切片 · ${shortId(intent.sessionId)}`;
+          text = `# ${cardTitle}\n\n> 本体导入快照（单条消息）。只读摘录，不代表原会话仍在同步。\n\n【${targetMsg.role === 'user' ? '用户' : '助手'}】${targetMsg.text}`;
+          importedCount = 1;
+        } else {
+          importKind = 'history';
+          importEntryIds = messages.map((m) => m.entryId).filter(Boolean);
+          cardTitle = intent.title || preview.session?.title || '本体会话';
+          const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
+          text = `# ${cardTitle}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+          importedCount = messages.length;
+        }
+
         const sourceRef = {
           version: 1,
           kind: 'hana-session',
           sessionId: intent.sessionId,
-          entryIds: messages.map((m) => m.entryId).filter(Boolean),
+          entryIds: importEntryIds,
           leafId: preview.leafId || null,
           titleAtImport: intent.title || preview.session?.title || '',
           importedAt: new Date().toISOString(),
           contentHash: '',
-          importKind: 'history',
+          importKind,
         };
 
         let h1 = 0x811c9dc5;
         let h2 = 0x01000193;
-        const payloadStr = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
-        for (let i = 0; i < payloadStr.length; i += 1) {
-          const code = payloadStr.charCodeAt(i);
+        const hashTarget = targetMsg ? `${targetMsg.role}:${targetMsg.text}` : messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
+        for (let i = 0; i < hashTarget.length; i += 1) {
+          const code = hashTarget.charCodeAt(i);
           h1 = (h1 ^ code) >>> 0;
           h1 = Math.imul(h1, 0x01000193) >>> 0;
           h2 = (h2 + code * (i + 1)) >>> 0;
@@ -2430,22 +2457,23 @@ async function pollBridgeIntents() {
         sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 
         createBridgeDocCard({
-          title: intent.title || preview.session?.title || '本体会话',
+          title: cardTitle,
           text,
           sourceRef,
-          messageCount: messages.length,
+          messageCount: importedCount,
         });
 
         await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
           method: 'POST',
-          body: JSON.stringify({ claimer: 'primary' }),
+          body: JSON.stringify({ claimer: canvasId }),
         });
 
-        flashMessage(`已自动从本体导入《${intent.title || preview.session?.title || '会话'}》（${messages.length} 条记录）到画布。`);
+        const flashDesc = targetMsg ? `单条消息快照` : `《${cardTitle}》（${messages.length} 条记录）`;
+        flashMessage(`已自动从本体导入${flashDesc}到画布。`);
       } catch (err) {
         await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
           method: 'POST',
-          body: JSON.stringify({ claimer: 'primary' }),
+          body: JSON.stringify({ claimer: canvasId }),
         }).catch(() => {});
       }
     }

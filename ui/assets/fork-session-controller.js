@@ -41,7 +41,8 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     if (!ready || busy || closed) return;
     const alreadyDirty = changed > saved;
     changed++;
-    if (timer === null && !error) timer = setTimeout(() => {
+    // 新的修改应当允许排队尝试保存，自动打破上一次偶发失败留下的锁死状态
+    if (timer === null) timer = setTimeout(() => {
       timer = null;
       void flush().catch(() => {});
     }, delayMs);
