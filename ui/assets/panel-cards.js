@@ -311,7 +311,7 @@ export function buildCardHtml({
     <div class="card-header" data-drag-handle="true">
       <div class="card-title-box">
         <div class="card-dot" style="${dotStyle}"></div>
-        <span class="card-title">${escapeHtml(card.title)}</span>
+        <span class="card-title" title="${escapeHtml(card.title || '')}">${escapeHtml(card.title)}</span>
         ${originTag}
         ${stampBadge}
         ${collapsedPillHtml}

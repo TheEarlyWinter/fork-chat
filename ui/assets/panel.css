@@ -352,6 +352,11 @@ html, body {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-main);
+  /* 有些文件名本身就是一整句话，不截断会把卡片头撑成三行 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-origin-tag {
