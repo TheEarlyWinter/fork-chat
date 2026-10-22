@@ -22,10 +22,27 @@ import { createCanvasActions } from './panel-canvas-actions.js';
 import { createBridgeSend } from './panel-bridge-send.js';
 import { createBridgeIntents } from './panel-bridge-intents.js';
 import { createDocumentUi } from './panel-document-ui.js';
+import { createCardGestures } from './panel-card-gestures.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
+
+// 卡片上的拖拽移动与缩放
+const cardGestures = createCardGestures({
+  listen: (target, type, handler) => listen(target, type, handler),
+  getSession: () => sessionController,
+  getCards: () => cards,
+  getView: () => view,
+  getIsSpacePressed: () => isSpacePressed,
+  getSelectedCardId: () => selectedCardId,
+  getDocumentRef: () => document,
+  renderConnectors: () => renderConnectors(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (list, id) => historyManager?.recordSnapshot(list, id),
+  getIsDisposed: () => isDisposed,
+  getWindowRef: () => (typeof window !== 'undefined' ? window : globalThis),
+});
 
 // 文档上传的界面动作：选文件、拖进卡片、拖到画布
 const documentUi = createDocumentUi({
@@ -675,121 +692,11 @@ function bindCardEvents(cardEl, card) {
 
   // 1. 卡片拖拽移动
   on(header, 'mousedown', (e) => {
-    if (isSpacePressed) return;
-    const active = document.activeElement;
-    if (active && active !== document.body && typeof active.blur === 'function') {
-      active.blur();
-    }
-    e.stopPropagation();
-    if (!sessionController?.state.ready || sessionController.state.busy) return;
-    const dragGeneration = sessionController.generation;
-    let startMouseX = e.clientX;
-    let startMouseY = e.clientY;
-    let startCardX = card.x;
-    let startCardY = card.y;
-
-    const onMouseMove = (moveEvent) => {
-      if (sessionController.generation !== dragGeneration || !cards.includes(card)) return;
-      const dx = (moveEvent.clientX - startMouseX) / view.scale;
-      const dy = (moveEvent.clientY - startMouseY) / view.scale;
-      card.x = Math.round(startCardX + dx);
-      card.y = Math.round(startCardY + dy);
-      cardEl.style.left = `${card.x}px`;
-      cardEl.style.top = `${card.y}px`;
-      renderConnectors();
-    };
-
-    const onMouseUp = () => {
-      stopMove();
-      stopUp();
-      stopBlur();
-      if (sessionController.generation === dragGeneration) {
-        sessionController.scheduleSave();
-        if (card.x !== startCardX || card.y !== startCardY) {
-          historyManager.recordSnapshot(cards, selectedCardId);
-        }
-      }
-    };
-
-    const stopMove = listen(window, 'mousemove', onMouseMove);
-    const stopUp = listen(window, 'mouseup', onMouseUp);
-    // 鼠标拖出窗口再松手，window 收不到 mouseup，光标就永久卡在移动态。
-    // 窗口失焦同样意味着这次拖拽已经结束。
-    const stopBlur = listen(window, 'blur', onMouseUp);
+    cardGestures.beginCardDrag({ card, cardEl, event: e });
   });
 
   // 1.1 卡片 2D 自由拖拽缩放（右侧宽、底部高、右下角宽高对角）
-  const setupResize = (selector, direction) => {
-    const handle = cardEl.querySelector(selector);
-    if (!handle || handle.__resizeBound) return;
-    handle.__resizeBound = true;
-
-    on(handle, 'mousedown', (e) => {
-      if (isSpacePressed) return;
-      e.stopPropagation();
-      e.preventDefault();
-      if (!sessionController?.state.ready || sessionController.state.busy) return;
-      const resizeGeneration = sessionController.generation;
-      const startMouseX = e.clientX;
-      const startMouseY = e.clientY;
-      const startWidth = card.width || 340;
-      const startHeight = card.height || cardEl.offsetHeight || 360;
-
-      cardEl.classList.add('is-resizing');
-      document.body?.classList.add('is-card-resizing');
-      if (direction === 'bottom') document.body?.classList.add('resizing-s');
-      else if (direction === 'corner') document.body?.classList.add('resizing-se');
-      else document.body?.classList.add('resizing-ew');
-
-      const onMouseMove = (moveEvent) => {
-        if (sessionController.generation !== resizeGeneration || !cards.includes(card)) return;
-        const dx = (moveEvent.clientX - startMouseX) / view.scale;
-        const dy = (moveEvent.clientY - startMouseY) / view.scale;
-
-        if (direction === 'right' || direction === 'corner') {
-          const newWidth = Math.min(Math.max(Math.round(startWidth + dx), 260), 1200);
-          card.width = newWidth;
-          cardEl.style.width = `${newWidth}px`;
-        }
-        if (direction === 'bottom' || direction === 'corner') {
-          const newHeight = Math.min(Math.max(Math.round(startHeight + dy), 200), 1600);
-          card.height = newHeight;
-          cardEl.style.height = `${newHeight}px`;
-          cardEl.classList.add('has-custom-height');
-          const bodyEl = cardEl.querySelector(`#body-${card.id}`);
-          if (bodyEl) {
-            bodyEl.style.maxHeight = 'none';
-            bodyEl.style.flex = '1 1 0';
-          }
-        }
-        renderConnectors();
-      };
-
-      const onMouseUp = () => {
-        cardEl.classList.remove('is-resizing');
-        document.body?.classList.remove('is-card-resizing', 'resizing-s', 'resizing-se', 'resizing-ew');
-        stopMove();
-        stopUp();
-        stopBlur();
-        if (sessionController.generation === resizeGeneration) {
-          sessionController.scheduleSave();
-          if (card.width !== startWidth || card.height !== startHeight) {
-            historyManager.recordSnapshot(cards, selectedCardId);
-          }
-        }
-      };
-
-      const stopMove = listen(window, 'mousemove', onMouseMove);
-      const stopUp = listen(window, 'mouseup', onMouseUp);
-      // 同上：拖出窗口松手时也要收尾，否则 is-resizing 粘住、光标一直是双箭头
-      const stopBlur = listen(window, 'blur', onMouseUp);
-    });
-  };
-
-  setupResize('[data-direction="right"]', 'right');
-  setupResize('[data-direction="bottom"]', 'bottom');
-  setupResize('[data-direction="corner"]', 'corner');
-  setupResize('[data-action="resize-card"]', 'right');
+  cardGestures.bindResizeHandles({ card, cardEl });
 
   // 2. 发送消息并执行打字机流式推理
   const doSend = async () => {
