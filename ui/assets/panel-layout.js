@@ -130,29 +130,34 @@ export function computeAutoTidyPositions(cards, cardParentIds) {
   const positions = new Map();
   const laidOut = new Set();
   const layoutVisiting = new Set();
+  const colNextY = new Map();
 
   function layoutSubtree(node, depth) {
     if (!node || laidOut.has(node.id) || layoutVisiting.has(node.id)) return;
     layoutVisiting.add(node.id);
+    const nodeDepth = depthMap.get(node.id) ?? depth;
     const children = childrenMap.get(node.id) || [];
-    const targetX = colStartX.get(depth) ?? (startX + depth * 460);
+    const targetX = colStartX.get(nodeDepth) ?? (startX + nodeDepth * 460);
     const nodeH = typeof node.height === 'number' ? node.height : cardH;
 
     children.forEach(child => {
-      layoutSubtree(child, depth + 1);
+      layoutSubtree(child, nodeDepth + 1);
     });
 
     const positionedChildren = children.filter(child => positions.has(child.id));
+    const minColY = colNextY.get(nodeDepth) ?? 80;
     let targetY = 0;
     if (positionedChildren.length === 0) {
-      targetY = currentY;
-      currentY += nodeH + gapY;
+      targetY = Math.max(currentY, minColY);
+      currentY = targetY + nodeH + gapY;
     } else {
       const firstChild = positions.get(positionedChildren[0].id);
       const lastChild = positions.get(positionedChildren[positionedChildren.length - 1].id);
-      targetY = Math.round((firstChild.y + lastChild.y) / 2);
+      const idealY = Math.round((firstChild.y + lastChild.y) / 2);
+      targetY = Math.max(idealY, minColY);
       currentY = Math.max(currentY, targetY + nodeH + gapY);
     }
+    colNextY.set(nodeDepth, targetY + nodeH + gapY);
     positions.set(node.id, { x: targetX, y: targetY });
     layoutVisiting.delete(node.id);
     laidOut.add(node.id);
@@ -161,6 +166,14 @@ export function computeAutoTidyPositions(cards, cardParentIds) {
   roots.forEach(root => {
     layoutSubtree(root, 0);
     currentY += gapRoot;
+  });
+
+  // 兜底：处理未能从 roots 触达的残余或独立卡片
+  cards.forEach(card => {
+    if (!positions.has(card.id)) {
+      layoutSubtree(card, depthMap.get(card.id) || 0);
+      currentY += gapRoot;
+    }
   });
 
   return positions;

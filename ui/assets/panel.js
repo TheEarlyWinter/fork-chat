@@ -17,6 +17,65 @@ const canvasId = uniqueId('canvas');
 function uniqueId(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
 }
+let isDisposed = false;
+let disposalPromise = null;
+const panelCleanups = new Set();
+const cardCleanups = new Set();
+const battleCleanups = new Set();
+const documentTasks = new Set();
+const panelTimers = new Set();
+const panelAbort = new AbortController();
+
+function canMutateCanvas(generation) {
+  return !isDisposed && Boolean(sessionController?.state.ready) && !sessionController.state.busy
+    && (generation === undefined || generation === sessionController.generation);
+}
+function drain(cleanups) {
+  for (const cleanup of [...cleanups]) {
+    try { cleanup(); } catch { /* One failed disposer must not retain other resources. */ }
+  }
+  cleanups.clear();
+}
+function listen(target, type, handler, options, scope = panelCleanups) {
+  if (isDisposed || !target?.addEventListener) return () => {};
+  const guarded = event => { if (!isDisposed) return handler(event); };
+  const off = () => {
+    target.removeEventListener?.(type, guarded, options);
+    scope.delete(off);
+  };
+  target.addEventListener(type, guarded, options);
+  scope.add(off);
+  return off;
+}
+function later(callback, delay) {
+  if (isDisposed) return null;
+  const id = setTimeout(() => {
+    panelTimers.delete(id);
+    if (!isDisposed) callback();
+  }, delay);
+  panelTimers.add(id);
+  return id;
+}
+function cancelLater(id) { clearTimeout(id); panelTimers.delete(id); }
+function inactiveError() { return new ChatError('PANEL_INACTIVE', '画布已关闭或任务已失效。'); }
+function abortable(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason || inactiveError());
+    if (signal.aborted) { Promise.resolve(promise).catch(() => {}); abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+function waitForParser(delay, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const abort = () => { clearTimeout(timer); reject(signal.reason || inactiveError()); };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);
+  });
+}
+
 function cardParentIds(card) {
   return Array.from(new Set([
     ...(card?.parentId ? [card.parentId] : []),
@@ -27,7 +86,7 @@ function cardHasParent(card, parentId) {
   return cardParentIds(card).includes(parentId);
 }
 function chainIsBusy(card) {
-  if (!sessionController?.state.ready || sessionController.state.busy) return true;
+  if (!canMutateCanvas()) return true;
   const seen = new Set();
   function visit(current) {
     if (!current || seen.has(current.id)) return false;
@@ -90,6 +149,7 @@ function messageMarkup(message) {
     </details>`;
 }
 function paintMessage(message) {
+  if (isDisposed) return;
   const output = outputFor(message);
   const bubble = document.getElementById(`reply-${message.requestId}`);
   if (bubble) { bubble.textContent = output.body; bubble.hidden = !output.body.trim(); }
@@ -205,6 +265,7 @@ function updateHeaderStatus() {
 updateHeaderStatus();
 
 bus.onmessage = (e) => {
+  if (isDisposed) return;
   const message = e.data;
   if (message?.targetCanvasId && message.targetCanvasId !== canvasId) return;
   if (message?.type === 'FORK_SESSION_HELLO') {
@@ -250,6 +311,7 @@ bus.onmessage = (e) => {
 
 // 更新画布平移与缩放矩阵
 function updateTransform() {
+  if (isDisposed) return;
   surface.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
   zoomText.textContent = `${Math.round(view.scale * 100)}%`;
   sessionController?.scheduleSave();
@@ -259,6 +321,7 @@ function updateTransform() {
 
 // 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
 function renderConnectors() {
+  if (isDisposed) return;
   renderConnectorsLayer({
     svg: connectorsSvg,
     cards,
@@ -283,17 +346,18 @@ function getAgentReasoningEffort(agentId) {
 let cachedAgents = [];
 let agentsLoadingPromise = null;
 async function loadAvailableAgents() {
+  if (isDisposed) return [];
   if (cachedAgents.length > 0) return cachedAgents;
   if (agentsLoadingPromise) return agentsLoadingPromise;
   agentsLoadingPromise = (async () => {
     try {
-      const res = await requestHost(hana, '/api/agents');
-      const data = await res.json();
-      if (Array.isArray(data?.agents)) {
+      const res = await abortable(requestHost(hana, '/api/agents', { signal: panelAbort.signal }), panelAbort.signal);
+      const data = await abortable(res.json(), panelAbort.signal);
+      if (!isDisposed && Array.isArray(data?.agents)) {
         cachedAgents = data.agents;
       }
     } catch {
-      cachedAgents = [currentAgent];
+      if (!isDisposed) cachedAgents = [currentAgent];
     } finally {
       agentsLoadingPromise = null;
     }
@@ -354,7 +418,7 @@ function buildChainContext(targetCard) {
 
 // 通用卡片流式推导发送引擎（支持单卡发送与多模型横向并发推导）
 async function sendCardPrompt(card, text, options = {}) {
-  if (chainIsBusy(card) || !cards.includes(card)) return;
+  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return;
   const trimmed = typeof text === 'string' ? text.trim() : '';
   const attachments = Array.isArray(options.attachments) && options.attachments.length > 0 ? options.attachments : undefined;
   if (!trimmed && !attachments) return;
@@ -456,9 +520,9 @@ async function sendCardPrompt(card, text, options = {}) {
       asstMsg.error = safeDetail(`${error.code || 'REQUEST_FAILED'}: ${error.message}`);
     }
   } finally {
-    asstMsg.streaming = false;
+    if (!isDisposed && sessionController.generation === requestGeneration) asstMsg.streaming = false;
     if (activeRequests.get(card.id) === active) activeRequests.delete(card.id);
-    if (sessionController.generation === requestGeneration && cards.includes(card)) {
+    if (canMutateCanvas(requestGeneration) && cards.includes(card)) {
       card.scrollToEnd = true;
       renderCards();
       sessionController.scheduleSave();
@@ -473,7 +537,9 @@ function updateBattleSelectedCount() {
 }
 
 function renderBattleAgentsList(agents) {
-  if (!battleAgentsList) return;
+  if (isDisposed || !battleAgentsList) return;
+  drain(battleCleanups);
+  const on = (target, type, handler, options) => listen(target, type, handler, options, battleCleanups);
   battleAgentsList.innerHTML = '';
 
   agents.forEach(agent => {
@@ -496,7 +562,7 @@ function renderBattleAgentsList(agents) {
       </div>
     `;
 
-    item.addEventListener('click', (e) => {
+    on(item, 'click', (e) => {
       if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
       const chk = item.querySelector('input[type="checkbox"]');
       const nowChecked = !battleSelectedAgentIds.has(agent.id);
@@ -521,7 +587,7 @@ function closeBattleDialog() {
 }
 
 async function openBattleDialog(card, initialPromptText = '') {
-  if (chainIsBusy(card) || !cards.includes(card)) return;
+  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return;
   battleTargetCard = card;
   if (battleDialogError) battleDialogError.textContent = '';
 
@@ -535,11 +601,14 @@ async function openBattleDialog(card, initialPromptText = '') {
   }
   if (btnUseLastPrompt) {
     btnUseLastPrompt.onclick = () => {
+      if (isDisposed) return;
       if (lastUserMsg && battlePromptInput) battlePromptInput.value = lastUserMsg;
     };
   }
 
+  const generation = sessionController.generation;
   const agents = await loadAvailableAgents();
+  if (!canMutateCanvas(generation) || !cards.includes(card)) return;
   battleSelectedAgentIds.clear();
 
   if (agents.length <= 2) {
@@ -558,6 +627,7 @@ async function openBattleDialog(card, initialPromptText = '') {
 }
 
 function fitViewportToCluster(clusterCards) {
+  if (isDisposed) return;
   fitViewportToClusterLayout(clusterCards, { viewport, view });
   updateTransform();
 }
@@ -612,6 +682,7 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
 }
 
 function toggleMultiSelectCard(cardId) {
+  if (!canMutateCanvas()) return;
   if (multiSelectedCardIds.has(cardId)) {
     multiSelectedCardIds.delete(cardId);
   } else {
@@ -624,6 +695,7 @@ function toggleMultiSelectCard(cardId) {
 }
 
 function clearMultiSelect() {
+  if (isDisposed) return;
   if (multiSelectedCardIds.size === 0) return;
   multiSelectedCardIds.clear();
   updateMultiSelectionUI();
@@ -665,8 +737,9 @@ function synthesizeMergePrompt(selectedCards) {
 }
 
 async function createMergeCardFromSelected() {
+  if (!canMutateCanvas()) return null;
   const selectedCards = cards.filter(c => multiSelectedCardIds.has(c.id));
-  if (selectedCards.length < 2) return null;
+  if (selectedCards.length < 2 || selectedCards.some(chainIsBusy)) return null;
 
   const maxX = Math.max(...selectedCards.map(c => c.x + (c.width || 340)));
   const targetX = maxX + 140;
@@ -704,6 +777,7 @@ let selectedCardId = null;
 let isSpacePressed = false;
 
 function selectCard(cardId, focusInput = false) {
+  if (isDisposed) return;
   selectedCardId = cardId;
   cards.forEach(c => {
     const el = document.getElementById(`dom-${c.id}`);
@@ -719,6 +793,7 @@ function selectCard(cardId, focusInput = false) {
 }
 
 function ensureCardInView(card) {
+  if (isDisposed) return;
   const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
   const vpWidth = vpRect.width || 1000;
   const vpHeight = vpRect.height || 700;
@@ -748,6 +823,7 @@ function ensureCardInView(card) {
 }
 
 function focusCardInViewport(card) {
+  if (isDisposed) return;
   if (!card) return;
   const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
   const vpWidth = vpRect.width || 1000;
@@ -762,7 +838,7 @@ function focusCardInViewport(card) {
   const el = document.getElementById(`dom-${card.id}`);
   if (el) {
     el.classList.add('is-imported-pulse');
-    setTimeout(() => {
+    later(() => {
       el.classList.remove('is-imported-pulse');
     }, 2000);
   }
@@ -783,7 +859,7 @@ function navigateCardFocus(direction) {
 }
 
 function createBranchCard(card, { autoFocus = true } = {}) {
-  if (chainIsBusy(card) || !cards.includes(card)) return null;
+  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return null;
   const existingChildren = cards.filter(c => cardHasParent(c, card.id));
   const branchIndex = existingChildren.length + 1;
   const newId = uniqueId('branch');
@@ -833,7 +909,8 @@ function createBranchCard(card, { autoFocus = true } = {}) {
 }
 
 function closeCardHierarchy(card) {
-  if (!sessionController?.state.ready || sessionController.state.busy) return;
+  if (isDisposed || !sessionController?.state.ready || sessionController.state.busy) return;
+  if (battleDialog?.open || deleteDialog?.open || bridgeDialogEl?.open || bridgeSendDialogEl?.open) return;
   const idsToDelete = new Set([card.id]);
   let changed = true;
   while (changed) {
@@ -856,6 +933,7 @@ function closeCardHierarchy(card) {
 
 // 渲染所有卡片
 function renderCards(preserve = true) {
+  if (isDisposed) return;
   // Never copy the previous session's DOM state into a newly loaded canvas.
   if (preserve) {
   for (const input of cardsLayer.querySelectorAll?.('.card-input') || []) {
@@ -875,6 +953,7 @@ function renderCards(preserve = true) {
   const focused = preserve ? document.activeElement : null;
   const focusId = /^(input-|asides-toggle-)/.test(focused?.id || '') ? focused.id : null;
   const selection = focusId?.startsWith('input-') ? [focused.selectionStart, focused.selectionEnd] : null;
+  drain(cardCleanups);
   cardsLayer.innerHTML = '';
 
   cards.forEach(card => {
@@ -994,13 +1073,14 @@ function renderCards(preserve = true) {
 }
 
 function bindCardEvents(cardEl, card) {
+  const on = (target, type, handler, options) => listen(target, type, handler, options, cardCleanups);
   const header = cardEl.querySelector('[data-drag-handle="true"]');
   const inputEl = cardEl.querySelector(`#input-${card.id}`);
   const btnSend = cardEl.querySelector('[data-action="send"]');
   const btnBattle = cardEl.querySelector('[data-action="battle"]');
   const btnClose = cardEl.querySelector('[data-action="close"]');
   // 跳回本体：只定位会话，不声称定位到具体某条消息
-  cardEl.querySelector('[data-action="jump-source"]')?.addEventListener('click', async (e) => {
+  on(cardEl.querySelector('[data-action="jump-source"]'), 'click', async (e) => {
     e.stopPropagation();
     if (!card.sourceRef?.sessionId) return;
     try {
@@ -1017,11 +1097,11 @@ function bindCardEvents(cardEl, card) {
     const asides = cardEl.querySelector(`#asides-${message.requestId}`);
     if (!asides) continue;
     asides.open = Boolean(message.asidesOpen);
-    asides.addEventListener('toggle', () => {
+    on(asides, 'toggle', () => {
       if (message.asidesOpen !== asides.open) { message.asidesOpen = asides.open; sessionController?.scheduleSave(); }
     });
   }
-  cardEl.addEventListener('mousedown', (e) => {
+  on(cardEl, 'mousedown', (e) => {
     if (isSpacePressed) return;
     if (e.shiftKey) {
       e.stopPropagation();
@@ -1031,13 +1111,13 @@ function bindCardEvents(cardEl, card) {
     clearMultiSelect();
     selectCard(card.id, false);
   });
-  inputEl.addEventListener('focus', () => {
+  on(inputEl, 'focus', () => {
     selectCard(card.id, true);
   });
 
   inputEl.value = card.draft || '';
-  inputEl.addEventListener('input', () => { card.draft = inputEl.value; sessionController?.scheduleSave(); });
-  btnCancel.addEventListener('click', () => {
+  on(inputEl, 'input', () => { card.draft = inputEl.value; sessionController?.scheduleSave(); });
+  on(btnCancel, 'click', () => {
     const active = activeRequests.get(card.id);
     if (!active || active.terminalSeen) return;
     if (document.activeElement === btnCancel) inputEl.focus({ preventScroll: true });
@@ -1047,12 +1127,12 @@ function bindCardEvents(cardEl, card) {
     paintMessage(active.message);
   });
 
-  btnBattle?.addEventListener('click', (e) => {
+  on(btnBattle, 'click', (e) => {
     e.stopPropagation();
     if (chainIsBusy(card) || !cards.includes(card)) return;
     void openBattleDialog(card, inputEl.value.trim());
   });
-  btnBranchBattle?.addEventListener('click', (e) => {
+  on(btnBranchBattle, 'click', (e) => {
     e.stopPropagation();
     if (chainIsBusy(card) || !cards.includes(card)) return;
     void openBattleDialog(card, inputEl.value.trim());
@@ -1062,17 +1142,20 @@ function bindCardEvents(cardEl, card) {
   const fileInput = cardEl.querySelector(`#file-${card.id}`);
   const stagedBar = cardEl.querySelector('.staged-attachments-bar');
 
-  btnAttach?.addEventListener('click', (e) => {
+  on(btnAttach, 'click', (e) => {
     e.stopPropagation();
     if (chainIsBusy(card) || !cards.includes(card)) return;
     fileInput?.click();
   });
 
-  fileInput?.addEventListener('change', async (e) => {
+  on(fileInput, 'change', async (e) => {
+    if (!canMutateCanvas() || !cards.includes(card)) return;
+    const generation = sessionController.generation;
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     for (const file of files) {
       const parsed = await extractDocumentFile(file);
+      if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
       if (!parsed.ok) {
         flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
         continue;
@@ -1092,7 +1175,7 @@ function bindCardEvents(cardEl, card) {
     sessionController?.scheduleSave();
   });
 
-  stagedBar?.addEventListener('click', (e) => {
+  on(stagedBar, 'click', (e) => {
     const removeBtn = e.target.closest('[data-action="remove-attachment"]');
     if (!removeBtn) return;
     e.stopPropagation();
@@ -1105,7 +1188,7 @@ function bindCardEvents(cardEl, card) {
   });
 
   // 卡片级文件拖拽支持
-  cardEl.addEventListener('dragover', (e) => {
+  on(cardEl, 'dragover', (e) => {
     if (e.dataTransfer?.types?.includes('Files')) {
       e.preventDefault();
       e.stopPropagation();
@@ -1113,22 +1196,25 @@ function bindCardEvents(cardEl, card) {
     }
   });
 
-  cardEl.addEventListener('dragleave', (e) => {
+  on(cardEl, 'dragleave', (e) => {
     if (e.target === cardEl || !cardEl.contains(e.relatedTarget)) {
       cardEl.classList.remove('card-drop-active');
     }
   });
 
-  cardEl.addEventListener('drop', async (e) => {
+  on(cardEl, 'drop', async (e) => {
+    if (!canMutateCanvas() || !cards.includes(card)) return;
+    const generation = sessionController.generation;
     if (e.dataTransfer?.files?.length) {
       e.preventDefault();
       e.stopPropagation();
       cardEl.classList.remove('card-drop-active');
       if (canvasDropIndicator) canvasDropIndicator.hidden = true;
-      clearTimeout(dragOverTimer);
+      cancelLater(dragOverTimer);
 
       for (const file of Array.from(e.dataTransfer.files)) {
         const parsed = await extractDocumentFile(file);
+        if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
         if (!parsed.ok) {
           flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
           continue;
@@ -1149,7 +1235,7 @@ function bindCardEvents(cardEl, card) {
   });
 
   // 1. 卡片拖拽移动
-  header.addEventListener('mousedown', (e) => {
+  on(header, 'mousedown', (e) => {
     if (isSpacePressed) return;
     e.stopPropagation();
     if (!sessionController?.state.ready || sessionController.state.busy) return;
@@ -1171,13 +1257,13 @@ function bindCardEvents(cardEl, card) {
     };
 
     const onMouseUp = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
+      stopMove();
+      stopUp();
       if (sessionController.generation === dragGeneration) sessionController.scheduleSave();
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+    const stopMove = listen(window, 'mousemove', onMouseMove);
+    const stopUp = listen(window, 'mouseup', onMouseUp);
   });
 
   // 1.1 卡片 2D 自由拖拽缩放（右侧宽、底部高、右下角宽高对角）
@@ -1186,7 +1272,7 @@ function bindCardEvents(cardEl, card) {
     if (!handle || handle.__resizeBound) return;
     handle.__resizeBound = true;
 
-    handle.addEventListener('mousedown', (e) => {
+    on(handle, 'mousedown', (e) => {
       if (isSpacePressed) return;
       e.stopPropagation();
       e.preventDefault();
@@ -1230,15 +1316,15 @@ function bindCardEvents(cardEl, card) {
       const onMouseUp = () => {
         cardEl.classList.remove('is-resizing');
         document.body?.classList.remove('is-card-resizing', 'resizing-s', 'resizing-se', 'resizing-ew');
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
+        stopMove();
+        stopUp();
         if (sessionController.generation === resizeGeneration) {
           sessionController.scheduleSave();
         }
       };
 
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      const stopMove = listen(window, 'mousemove', onMouseMove);
+      const stopUp = listen(window, 'mouseup', onMouseUp);
     });
   };
 
@@ -1261,8 +1347,9 @@ function bindCardEvents(cardEl, card) {
     await sendCardPrompt(card, text, { attachments: staged });
   };
 
-  btnSend.addEventListener('click', doSend);
-  inputEl.addEventListener('keydown', (e) => {
+  on(btnSend, 'click', doSend);
+  on(inputEl, 'keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       doSend();
@@ -1280,20 +1367,21 @@ function bindCardEvents(cardEl, card) {
   });
 
   // 3. 点击从右侧开辟追问分支卡片
-  btnBranch.addEventListener('click', (e) => {
+  on(btnBranch, 'click', (e) => {
     e.stopPropagation();
+    if (isDisposed) return;
     createBranchCard(card, { autoFocus: true });
   });
 
   // 4. 关闭卡片
-  btnClose.addEventListener('click', (e) => {
+  on(btnClose, 'click', (e) => {
     e.stopPropagation();
     closeCardHierarchy(card);
   });
 }
 
 // 画布视口拖拽平移 (Pan)
-viewport.addEventListener('mousedown', (e) => {
+listen(viewport, 'mousedown', (e) => {
   if (e.button !== 0) return;
   if (isSpacePressed) {
     view.isDragging = true;
@@ -1314,14 +1402,14 @@ viewport.addEventListener('mousedown', (e) => {
   viewport.classList.add('is-dragging-canvas');
 });
 
-window.addEventListener('mousemove', (e) => {
+listen(window, 'mousemove', (e) => {
   if (!view.isDragging) return;
   view.x = e.clientX - view.dragStartX;
   view.y = e.clientY - view.dragStartY;
   updateTransform();
 });
 
-window.addEventListener('mouseup', () => {
+listen(window, 'mouseup', () => {
   if (view.isDragging) {
     view.isDragging = false;
     viewport.classList.remove('is-dragging-canvas');
@@ -1329,11 +1417,12 @@ window.addEventListener('mouseup', () => {
 });
 
 // 全局键盘快捷键
-bindKeyboardShortcuts({
+const unbindKeyboardShortcuts = bindKeyboardShortcuts({
   windowRef: window,
   documentRef: document,
   viewport,
   getState: () => ({
+    isDisposed,
     isSpacePressed,
     cards,
     selectedCardId,
@@ -1355,7 +1444,7 @@ bindKeyboardShortcuts({
 });
 
 // 滚轮缩放 (Zoom)
-viewport.addEventListener('wheel', (e) => {
+listen(viewport, 'wheel', (e) => {
   e.preventDefault();
   const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
   const newScale = Math.min(Math.max(view.scale * zoomFactor, 0.4), 2.2);
@@ -1371,18 +1460,19 @@ viewport.addEventListener('wheel', (e) => {
   updateTransform();
 }, { passive: false });
 
-btnZoomIn.addEventListener('click', () => {
+listen(btnZoomIn, 'click', () => {
   view.scale = Math.min(view.scale * 1.15, 2.2);
   updateTransform();
 });
 
-btnZoomOut.addEventListener('click', () => {
+listen(btnZoomOut, 'click', () => {
   view.scale = Math.max(view.scale * 0.85, 0.4);
   updateTransform();
 });
 
 // 树状一键自动整理排版算法 (Auto-Tidy Engine)
 function autoTidyLayout() {
+  if (!canMutateCanvas()) return;
   if (!cards || cards.length === 0) return;
   const positions = computeAutoTidyPositions(cards, cardParentIds);
   cards.forEach(c => {
@@ -1398,11 +1488,11 @@ function autoTidyLayout() {
   fitViewportToCluster(cards);
 }
 
-btnAutoTidy?.addEventListener('click', () => {
+listen(btnAutoTidy, 'click', () => {
   autoTidyLayout();
 });
 
-btnResetView.addEventListener('click', () => {
+listen(btnResetView, 'click', () => {
   view.x = 60;
   view.y = 40;
   view.scale = 1;
@@ -1410,8 +1500,8 @@ btnResetView.addEventListener('click', () => {
 });
 
 // 新建主线根卡片
-btnNewRoot.addEventListener('click', async () => {
-  if (!sessionController?.state.ready || sessionController.state.busy) return;
+listen(btnNewRoot, 'click', async () => {
+  if (!canMutateCanvas()) return;
   if (!sessionController.state.activeId) {
     await sessionController.newSession(initialSnapshot());
     return;
@@ -1452,6 +1542,23 @@ function formatFileSize(bytes) {
 }
 
 async function extractDocumentFile(file) {
+  const cancelled = () => ({ ok: false, cancelled: true, filename: file?.name || '未知文件', stage: 'cancelled', error: '画布任务已失效。' });
+  if (!canMutateCanvas() || !file) return cancelled();
+  const task = new AbortController();
+  documentTasks.add(task);
+  try {
+    return await abortable(extractDocumentFileActive(file, task.signal), task.signal);
+  } catch (error) {
+    if (task.signal.aborted || isDisposed) return cancelled();
+    return { ok: false, filename: file.name, stage: 'read', error: safeDetail(error?.message || String(error)) };
+  } finally {
+    documentTasks.delete(task);
+  }
+}
+
+async function extractDocumentFileActive(file, signal) {
+  const checkActive = () => { if (signal.aborted || isDisposed) throw inactiveError(); };
+  checkActive();
   const name = file.name || '未知文件';
   const ext = (name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '');
   const textExtensions = new Set([
@@ -1488,11 +1595,13 @@ async function extractDocumentFile(file) {
       ? `正在解析 ${name}…（扫描件会走云端，可能要十几秒）`
       : `正在解析 ${name}…`;
   }
-  let parseJobId = null, parseCompleted = false;
+  let parseJobId = null, parseCompleted = false, parseCancelled = false;
   const cancelParser = () => {
-    if (parseJobId && !parseCompleted) void requestHost(hana, `/api/document/parse/${encodeURIComponent(parseJobId)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+    if (!parseJobId || parseCompleted || parseCancelled) return;
+    parseCancelled = true;
+    void requestHost(hana, `/api/document/parse/${encodeURIComponent(parseJobId)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
   };
-  window.addEventListener?.('pagehide', cancelParser, { once: true });
+  signal.addEventListener('abort', cancelParser, { once: true });
   try {
     // UI uploads are bounded chunks; outbound cloud transfers use the authorised runtime.
     const CHUNK_RAW_BYTES = 6 * 1024 * 1024;
@@ -1506,15 +1615,17 @@ async function extractDocumentFile(file) {
       let uploaded = null;
       for (let i = 0; i < total; i += 1) {
         const slice = file.slice(i * CHUNK_RAW_BYTES, (i + 1) * CHUNK_RAW_BYTES);
-        const chunkBase64 = bufferToBase64(await slice.arrayBuffer());
+        const chunkBase64 = bufferToBase64(await abortable(slice.arrayBuffer(), signal));
+        checkActive();
         if (badgeStats) {
           badgeStats.textContent = `正在上传 ${name}… ${i + 1}/${total}`;
         }
         const chunkRes = await requestHost(hana, '/api/document/upload', {
           method: 'POST',
-          body: JSON.stringify({ uploadId, filename: name, index: i, total, size: file.size, chunk: chunkBase64 }),
+          body: JSON.stringify({ uploadId, filename: name, index: i, total, size: file.size, chunk: chunkBase64 }), signal,
         });
-        const chunkData = await chunkRes.json();
+        const chunkData = await abortable(chunkRes.json(), signal);
+        checkActive();
         if (!chunkData.ok) throw new Error(chunkData.error || '分块上传失败');
         uploadId = chunkData.uploadId;
         if (chunkData.done) uploaded = chunkData;
@@ -1525,28 +1636,33 @@ async function extractDocumentFile(file) {
     } else {
       let contentBase64 = '';
       if (typeof file.arrayBuffer === 'function') {
-        contentBase64 = bufferToBase64(await file.arrayBuffer());
+        contentBase64 = bufferToBase64(await abortable(file.arrayBuffer(), signal));
       }
       requestBody = { filename: name, contentBase64 };
     }
 
+    // A late start receipt must still reveal its jobId so disposal can cancel it.
+    checkActive();
     // 长解析拆成「发起 + 轮询」：单次请求都在秒级完成，不再赌链路耐心
     window.__forkChatLastStage = '发起解析';
     const startRes = await requestHost(hana, '/api/document/parse', {
       method: 'POST',
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(requestBody), signal,
     });
     const startData = await startRes.json();
     if (!startData.ok || !startData.jobId) throw new Error(startData.error || '无法启动解析任务');
     parseJobId = startData.jobId;
+    if (signal.aborted || isDisposed) { cancelParser(); throw inactiveError(); }
 
     let data = null;
     const deadline = Date.now() + Math.min(20 * 60 * 1000, Math.max(30000, Number(startData.timeoutMs) || 5 * 60 * 1000));
     while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      await waitForParser(1200, signal);
+      checkActive();
       window.__forkChatLastStage = '轮询解析进度';
-      const statusRes = await requestHost(hana, `/api/document/parse/${encodeURIComponent(startData.jobId)}`);
-      const status = await statusRes.json();
+      const statusRes = await abortable(requestHost(hana, `/api/document/parse/${encodeURIComponent(startData.jobId)}`, { signal }), signal);
+      const status = await abortable(statusRes.json(), signal);
+      checkActive();
       if (!status.ok) throw new Error(status.error || '解析状态查询失败');
       if (status.status === 'done') {
         data = status.result;
@@ -1569,6 +1685,7 @@ async function extractDocumentFile(file) {
     // 解析失败时把原因说清楚（扫描件、字体映射、文件损坏各有各的说法）
     throw new Error(data?.error || '文档解析服务返回异常');
   } catch (err) {
+    if (signal.aborted || isDisposed) return { ok: false, cancelled: true, filename: name, stage: 'cancelled' };
     const stage = window.__forkChatLastStage || '未知';
     // 界面里的报错在宿主日志里看不到，先上报一份，排查时才有凭据
     try {
@@ -1590,14 +1707,15 @@ async function extractDocumentFile(file) {
       error: err.message || String(err),
     };
   } finally {
-    window.removeEventListener?.('pagehide', cancelParser);
+    signal.removeEventListener('abort', cancelParser);
     cancelParser();
-    if (badgeStats && idleBadge) badgeStats.textContent = idleBadge;
+    if (!isDisposed && badgeStats && idleBadge) badgeStats.textContent = idleBadge;
   }
 }
 
 // 解析失败时原地报一声，比默默生成一张空白的资料卡诚实
 function flashMessage(text) {
+  if (isDisposed) return;
   let el = document.getElementById('fork-flash');
   if (!el) {
     el = document.createElement('div');
@@ -1613,8 +1731,8 @@ function flashMessage(text) {
   }
   el.textContent = text;
   el.style.opacity = '1';
-  clearTimeout(flashMessage._timer);
-  flashMessage._timer = setTimeout(() => { el.style.opacity = '0'; }, 4600);
+  cancelLater(flashMessage._timer);
+  flashMessage._timer = later(() => { el.style.opacity = '0'; }, 4600);
 }
 
 // ===== 本体会话桥接：导入、来源、回传 =====
@@ -1638,6 +1756,7 @@ let bridgeSendOpening = false;
 let bridgeSendAttempt = null;
 
 function updateBridgeSendControls() {
+  if (isDisposed) return;
   const locked = Boolean(bridgeSendBusy || bridgeSendAttempt?.actionId);
   const confirm = document.getElementById('btn-bridge-send-confirm');
   if (confirm) {
@@ -1662,11 +1781,16 @@ function closeBridgeSendDialog() {
 }
 
 async function bridgeRequest(path, init) {
-  const res = await requestHost(hana, path, init);
-  return res.json();
+  if (isDisposed) throw inactiveError();
+  const res = await abortable(requestHost(hana, path, { ...init, signal: panelAbort.signal }), panelAbort.signal);
+  if (isDisposed) throw inactiveError();
+  const data = await abortable(res.json(), panelAbort.signal);
+  if (isDisposed) throw inactiveError();
+  return data;
 }
 
 function bridgeFail(el, err) {
+  if (isDisposed) return;
   if (el) el.textContent = safeDetail(err?.message || String(err));
 }
 
@@ -1711,6 +1835,7 @@ function shortId(id) {
 }
 
 async function loadBridgeSessions(preferSessionId = null) {
+  if (isDisposed) return;
   bridgeClearError();
   if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">正在读取…</option>';
   try {
@@ -1720,6 +1845,7 @@ async function loadBridgeSessions(preferSessionId = null) {
         ? hana.sessions.getActive().catch(() => null)
         : null,
     ]);
+    if (isDisposed) return;
     const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
     if (!bridgeSessionSelect) return;
     if (!sessions.length) {
@@ -1747,15 +1873,18 @@ async function loadBridgeSessions(preferSessionId = null) {
       void runBridgePreview();
     }
   } catch (err) {
+    if (isDisposed) return;
     if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">读取失败</option>';
     bridgeFail(bridgeErrorEl, err);
   }
 }
 
 async function bindActiveSession() {
+  if (isDisposed) return;
   bridgeClearError();
   try {
     const active = await hana.sessions.getActive();
+    if (isDisposed) return;
     if (!active?.sessionId) {
       if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口没有选中会话';
       return;
@@ -1768,11 +1897,13 @@ async function bindActiveSession() {
       void runBridgePreview();
     }
   } catch {
+    if (isDisposed) return;
     if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口不支持读取本体会话';
   }
 }
 
 async function runBridgePreview() {
+  if (isDisposed) return;
   bridgeClearError();
   bridgePreviewCache = null;
   const sessionId = bridgeSessionSelect?.value;
@@ -1823,6 +1954,7 @@ async function runBridgePreview() {
     bridgePreviewEl.innerHTML = rows + (warn.length ? `<div class="bridge-warn">${escapeHtml(warn.join('；'))}</div>` : '');
     if (bridgeImportBtn) bridgeImportBtn.disabled = false;
   } catch (err) {
+    if (isDisposed) return;
     bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取快照失败。</p>';
     bridgeFail(bridgeErrorEl, err);
   }
@@ -1830,6 +1962,7 @@ async function runBridgePreview() {
 
 /** 导入成一张只读来源资料卡，并写下来源引用便于跳回与去重 */
 function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
+  if (!canMutateCanvas()) return null;
   // 去重只看内容与导入类型：同内容的快照生成两张一模一样的卡没有意义，
   // 即使两个来源会话标题相同也定位回已有卡片。
   const existing = cards.find((c) => c.sourceRef
@@ -1881,6 +2014,8 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
 }
 
 async function importBridgePreview() {
+  if (!canMutateCanvas()) return;
+  const generation = sessionController.generation;
   const sessionId = bridgeSessionSelect?.value;
   const kind = selectedBridgeKind();
   const leafId = kind === 'tree-path' ? (bridgeLeafSelect?.value || null) : null;
@@ -1907,9 +2042,11 @@ async function importBridgePreview() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      if (!canMutateCanvas(generation)) return;
       preview = data?.preview;
       bridgePreviewCache = preview;
     }
+    if (!canMutateCanvas(generation)) return;
     if (preview?.needsLeafChoice) {
       flashMessage('请先选择一个分支叶节点。');
       return;
@@ -1954,7 +2091,7 @@ async function importBridgePreview() {
   } catch (err) {
     bridgeFail(bridgeErrorEl, err);
   } finally {
-    if (bridgeImportBtn) {
+    if (!isDisposed && bridgeImportBtn) {
       bridgeImportBtn.disabled = false;
       bridgeImportBtn.textContent = '导入到画布';
     }
@@ -1962,6 +2099,7 @@ async function importBridgePreview() {
 }
 
 async function loadOutboxList() {
+  if (isDisposed) return;
   const box = document.getElementById('bridge-outbox-list');
   if (!box) return;
   try {
@@ -1981,11 +2119,13 @@ async function loadOutboxList() {
       </div>`;
     }).join('');
   } catch (err) {
+    if (isDisposed) return;
     box.innerHTML = `<p class="bridge-placeholder">${escapeHtml(safeDetail(err?.message || String(err)))}</p>`;
   }
 }
 
 async function openBridgeSendDialog() {
+  if (isDisposed) return;
   if (!bridgeSendDialogEl || bridgeSendDialogEl.open || bridgeSendBusy || bridgeSendOpening) return;
   bridgeSendOpening = true;
   // 已知完成/明确失败后的主动打开才是新流程；未知回执仍是旧流程。
@@ -2008,9 +2148,11 @@ async function openBridgeSendDialog() {
         }
       }
     } catch (err) {
+      if (isDisposed) return;
       if (errEl) errEl.textContent = safeDetail(err?.message || String(err));
     }
     const updateMeta = () => {
+      if (isDisposed) return;
       const box = document.getElementById('bridge-send-text');
       if (meta) meta.textContent = `${new Blob([box?.value || '']).size} 字节 / 上限 65536`;
     };
@@ -2039,7 +2181,7 @@ async function openBridgeSendDialog() {
 
 async function confirmBridgeSend() {
   // disabled 不是互斥锁；程序触发、排队的第二次点击也必须被这道同步闸门挡住。
-  if (!bridgeSendDialogEl?.open || bridgeSendBusy || bridgeSendAttempt?.completed) return;
+  if (isDisposed || !bridgeSendDialogEl?.open || bridgeSendBusy || bridgeSendAttempt?.completed) return;
   bridgeSendBusy = true;
   const sel = document.getElementById('bridge-send-target');
   const text = document.getElementById('bridge-send-text');
@@ -2099,24 +2241,37 @@ async function confirmBridgeSend() {
 }
 
 let pollBridgeIntentsBusy = false;
+let bridgeInitialized = false;
+const ownedBridgeClaims = new Set();
+function releaseBridgeClaim(intentId) {
+  if (!ownedBridgeClaims.delete(intentId)) return Promise.resolve();
+  return requestHost(hana, `/api/bridge/intents/${encodeURIComponent(intentId)}/release`, {
+    method: 'POST', body: JSON.stringify({ claimer: canvasId }), keepalive: true,
+  }).catch(() => {});
+}
 
 /** 本体那边点的导入请求（右键 / 消息图标）：自动认领并直接铸造成卡片置入画布 */
 async function pollBridgeIntents() {
-  if (pollBridgeIntentsBusy) return;
+  if (!canMutateCanvas() || pollBridgeIntentsBusy) return;
+  const generation = sessionController.generation;
   pollBridgeIntentsBusy = true;
   try {
     const data = await bridgeRequest('/api/bridge/intents');
     const list = Array.isArray(data?.intents) ? data.intents : [];
-    if (!list.length) return;
+    if (!canMutateCanvas(generation) || !list.length) return;
 
     for (const intent of list) {
+      if (!canMutateCanvas(generation)) break;
       if (!intent?.intentId || intent.consumed) continue;
       // 抢占凭条：使用当前窗口全局唯一的 canvasId 作为 claimer，实现真正的多窗口并发抢占与隔离
       try {
-        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/claim`, {
-          method: 'POST',
-          body: JSON.stringify({ claimer: canvasId }),
+        // Observe late claim receipts even after disposal, then release our ownership.
+        const claimed = await requestHost(hana, `/api/bridge/intents/${encodeURIComponent(intent.intentId)}/claim`, {
+          method: 'POST', body: JSON.stringify({ claimer: canvasId }),
         });
+        await claimed.json();
+        ownedBridgeClaims.add(intent.intentId);
+        if (!canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); break; }
       } catch {
         continue;
       }
@@ -2126,13 +2281,11 @@ async function pollBridgeIntents() {
           method: 'POST',
           body: JSON.stringify({ sessionId: intent.sessionId, kind: 'history', limit: 100 }),
         });
+        if (!canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); break; }
         const preview = previewData?.preview;
         const messages = Array.isArray(preview?.messages) ? preview.messages : [];
         if (!messages.length) {
-          await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
-            method: 'POST',
-            body: JSON.stringify({ claimer: canvasId }),
-          }).catch(() => {});
+          await releaseBridgeClaim(intent.intentId);
           continue;
         }
 
@@ -2182,25 +2335,24 @@ async function pollBridgeIntents() {
         }
         sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 
-        createBridgeDocCard({
+        const imported = createBridgeDocCard({
           title: cardTitle,
           text,
           sourceRef,
           messageCount: importedCount,
         });
 
+        if (!imported || !canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); continue; }
         await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
           method: 'POST',
           body: JSON.stringify({ claimer: canvasId }),
         });
 
+        ownedBridgeClaims.delete(intent.intentId);
         const flashDesc = targetMsg ? `单条消息快照` : `《${cardTitle}》（${messages.length} 条记录）`;
         flashMessage(`已自动从本体导入${flashDesc}到画布。`);
       } catch (err) {
-        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
-          method: 'POST',
-          body: JSON.stringify({ claimer: canvasId }),
-        }).catch(() => {});
+        await releaseBridgeClaim(intent.intentId);
       }
     }
   } catch {
@@ -2211,22 +2363,23 @@ async function pollBridgeIntents() {
 }
 
 function initSessionBridge() {
-  if (!bridgeDialogEl) return;
+  if (isDisposed || bridgeInitialized || !bridgeDialogEl) return;
   // 裁剪过的宿主（或测试里的假 document）没有这些方法，就让桥接安静退场
   if (typeof document.querySelectorAll !== 'function') return;
-  document.getElementById('btn-bridge-open')?.addEventListener('click', async () => {
+  bridgeInitialized = true;
+  listen(document.getElementById('btn-bridge-open'), 'click', async () => {
     bridgeDialogEl.showModal();
     await loadBridgeSessions();
     await loadOutboxList();
   });
-  document.getElementById('btn-bridge-close')?.addEventListener('click', () => bridgeDialogEl.close());
-  document.getElementById('btn-bridge-cancel')?.addEventListener('click', () => bridgeDialogEl.close());
-  document.getElementById('btn-bridge-bind-active')?.addEventListener('click', bindActiveSession);
-  document.getElementById('btn-bridge-preview')?.addEventListener('click', runBridgePreview);
-  bridgeImportBtn?.addEventListener('click', importBridgePreview);
-  document.getElementById('btn-bridge-refresh-outbox')?.addEventListener('click', loadOutboxList);
+  listen(document.getElementById('btn-bridge-close'), 'click', () => bridgeDialogEl.close());
+  listen(document.getElementById('btn-bridge-cancel'), 'click', () => bridgeDialogEl.close());
+  listen(document.getElementById('btn-bridge-bind-active'), 'click', bindActiveSession);
+  listen(document.getElementById('btn-bridge-preview'), 'click', runBridgePreview);
+  listen(bridgeImportBtn, 'click', importBridgePreview);
+  listen(document.getElementById('btn-bridge-refresh-outbox'), 'click', loadOutboxList);
 
-  bridgeSessionSelect?.addEventListener('change', () => {
+  listen(bridgeSessionSelect, 'change', () => {
     const val = bridgeSessionSelect.value;
     if (val) {
       void runBridgePreview();
@@ -2235,21 +2388,21 @@ function initSessionBridge() {
       if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">请选择要导入的会话。</p>';
     }
   });
-  bridgeKindSelect?.addEventListener('change', () => {
+  listen(bridgeKindSelect, 'change', () => {
     bridgePreviewCache = null;
     void runBridgePreview();
   });
-  bridgeLeafSelect?.addEventListener('change', () => {
+  listen(bridgeLeafSelect, 'change', () => {
     if (selectedBridgeKind() === 'tree-path') void runBridgePreview();
   });
 
-  document.getElementById('bridge-tab-import')?.addEventListener('click', () => {
+  listen(document.getElementById('bridge-tab-import'), 'click', () => {
     document.getElementById('bridge-pane-import').hidden = false;
     document.getElementById('bridge-pane-outbox').hidden = true;
     document.getElementById('bridge-tab-import').classList.add('is-active');
     document.getElementById('bridge-tab-outbox').classList.remove('is-active');
   });
-  document.getElementById('bridge-tab-outbox')?.addEventListener('click', () => {
+  listen(document.getElementById('bridge-tab-outbox'), 'click', () => {
     document.getElementById('bridge-pane-import').hidden = true;
     document.getElementById('bridge-pane-outbox').hidden = false;
     document.getElementById('bridge-tab-outbox').classList.add('is-active');
@@ -2257,52 +2410,57 @@ function initSessionBridge() {
     void loadOutboxList();
   });
 
-  document.getElementById('btn-bridge-send')?.addEventListener('click', openBridgeSendDialog);
-  document.getElementById('btn-bridge-send-close')?.addEventListener('click', closeBridgeSendDialog);
-  document.getElementById('btn-bridge-send-cancel')?.addEventListener('click', closeBridgeSendDialog);
-  bridgeSendDialogEl?.addEventListener('cancel', (event) => {
+  listen(document.getElementById('btn-bridge-send'), 'click', openBridgeSendDialog);
+  listen(document.getElementById('btn-bridge-send-close'), 'click', closeBridgeSendDialog);
+  listen(document.getElementById('btn-bridge-send-cancel'), 'click', closeBridgeSendDialog);
+  listen(bridgeSendDialogEl, 'cancel', (event) => {
     if (bridgeSendBusy) event.preventDefault();
   });
-  document.getElementById('btn-bridge-send-confirm')?.addEventListener('click', confirmBridgeSend);
+  listen(document.getElementById('btn-bridge-send-confirm'), 'click', confirmBridgeSend);
   updateBridgeSendControls();
 
   void pollBridgeIntents();
   if (typeof setInterval === 'function') {
-    setInterval(() => { void pollBridgeIntents(); }, 5000);
+    const timer = setInterval(() => { void pollBridgeIntents(); }, 5000);
+    panelCleanups.add(() => clearInterval(timer));
   }
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-    window.addEventListener('focus', () => void pollBridgeIntents());
+    listen(window, 'focus', () => void pollBridgeIntents());
   }
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-    document.addEventListener('visibilitychange', () => {
+    listen(document, 'visibilitychange', () => {
       if (!document.hidden) void pollBridgeIntents();
     });
   }
   // 前台会话切换只更新提示，不改已绑定目标
   try {
-    hana.sessions.onActiveChanged?.((change) => {
-      if (!bridgeActiveHint) return;
+    const stopActive = hana.sessions.onActiveChanged?.((change) => {
+      if (isDisposed || !bridgeActiveHint) return;
       bridgeActiveHint.textContent = change?.sessionId
         ? `当前会话：${change.title || change.sessionId}`
         : '当前窗口没有选中会话';
     });
+    if (typeof stopActive === 'function') panelCleanups.add(stopActive);
   } catch {
     // 窗口不支持就静默
   }
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initSessionBridge, { once: true });
+  listen(document, 'DOMContentLoaded', initSessionBridge, { once: true });
 } else {
   initSessionBridge();
 }
 
 async function createDocumentCard(file, targetCoord = null) {
-  if (!sessionController?.state.ready || sessionController.state.busy || !file) return null;
+  if (!canMutateCanvas() || !file) return null;
   if (!sessionController.state.activeId) {
     await sessionController.newSession(initialSnapshot());
   }
+  if (!canMutateCanvas() || !sessionController.state.activeId) return null;
+  const generation = sessionController.generation;
   const result = await extractDocumentFile(file);
+  if (!canMutateCanvas(generation) || result.cancelled) return null;
   if (!result.ok) {
     flashMessage(`《${result.filename}》没读出来（${result.stage || '未知'}阶段）：${result.error}`);
     return null;
@@ -2350,11 +2508,11 @@ async function createDocumentCard(file, targetCoord = null) {
   return newCard;
 }
 
-btnImportDoc?.addEventListener('click', () => {
+listen(btnImportDoc, 'click', () => {
   globalDocInput?.click();
 });
 
-globalDocInput?.addEventListener('change', async (e) => {
+listen(globalDocInput, 'change', async (e) => {
   const files = Array.from(e.target.files || []);
   if (files.length === 0) return;
   for (const file of files) {
@@ -2365,36 +2523,36 @@ globalDocInput?.addEventListener('change', async (e) => {
 
 // 画布全局拖拽释放文档
 let dragOverTimer = null;
-viewport?.addEventListener('dragenter', (e) => {
+listen(viewport, 'dragenter', (e) => {
   if (e.dataTransfer?.types?.includes('Files')) {
     e.preventDefault();
     if (canvasDropIndicator) canvasDropIndicator.hidden = false;
   }
 });
 
-viewport?.addEventListener('dragover', (e) => {
+listen(viewport, 'dragover', (e) => {
   if (e.dataTransfer?.types?.includes('Files')) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
     if (canvasDropIndicator) canvasDropIndicator.hidden = false;
-    clearTimeout(dragOverTimer);
-    dragOverTimer = setTimeout(() => {
+    cancelLater(dragOverTimer);
+    dragOverTimer = later(() => {
       if (canvasDropIndicator) canvasDropIndicator.hidden = true;
     }, 400);
   }
 });
 
-viewport?.addEventListener('dragleave', (e) => {
+listen(viewport, 'dragleave', (e) => {
   if (e.target === viewport || e.target === canvasDropIndicator) {
     if (canvasDropIndicator) canvasDropIndicator.hidden = true;
   }
 });
 
-viewport?.addEventListener('drop', async (e) => {
+listen(viewport, 'drop', async (e) => {
   if (e.dataTransfer?.files?.length) {
     e.preventDefault();
     if (canvasDropIndicator) canvasDropIndicator.hidden = true;
-    clearTimeout(dragOverTimer);
+    cancelLater(dragOverTimer);
     const files = Array.from(e.dataTransfer.files);
     const rect = viewport.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -2452,6 +2610,7 @@ function captureSnapshot() {
   }));
 }
 function applySnapshot(snapshot) {
+  if (isDisposed) return;
   if (!snapshot) {
     cards = [];
     view.x = 60; view.y = 40; view.scale = 1; view.isDragging = false;
@@ -2471,6 +2630,7 @@ function applySnapshot(snapshot) {
   updateHeaderStatus(); updateTransform(); renderCards(false);
 }
 function cancelSessionRequests(reason) {
+  for (const task of documentTasks) task.abort(inactiveError());
   for (const active of activeRequests.values()) {
     active.message.status = 'cancelled'; active.message.failed = true; active.message.streaming = false;
     active.message.error = `REQUEST_INTERRUPTED: ${reason}，回复未完成。`;
@@ -2480,7 +2640,7 @@ function cancelSessionRequests(reason) {
   activeRequests.clear();
 }
 function publishSessionState(targetPanelId) {
-  if (!sessionController) return;
+  if (isDisposed || !sessionController) return;
   const state = sessionController.state;
   bus.postMessage({
     type: 'FORK_SESSION_STATE',
@@ -2499,15 +2659,18 @@ function publishSessionState(targetPanelId) {
   });
 }
 function replySessionCommand(message, result) {
+  if (isDisposed) return;
   if (!message?.requestId || !message?.panelId) return;
   bus.postMessage({ type: 'FORK_SESSION_RESULT', canvasId, targetPanelId: message.panelId,
     requestId: message.requestId, command: message.command, ...result });
 }
 async function renameSessionFromIntent(message) {
+  if (isDisposed) return;
   if (activeRenameCommands.has(message.requestId)) return;
   activeRenameCommands.add(message.requestId);
   try {
     const intent = await readRenameIntent(hana, message.requestId, message.sessionId);
+    if (isDisposed) return;
     const result = await sessionController.rename(message.sessionId, intent.title, intent.expectedTitle);
     replySessionCommand(message, result);
   } catch (err) { replySessionCommand(message, { ok: false, error: safeDetail(err.message) }); }
@@ -2522,6 +2685,7 @@ function dismissDeleteConfirmation(cancelled = true) {
   if (cancelled) replySessionCommand(message, { ok: false, cancelled: true });
 }
 async function openDeleteConfirmation(message) {
+  if (isDisposed) return;
   if (!sessionController.state.ready || sessionController.state.busy) {
     replySessionCommand(message, { ok: false, error: '会话正忙，请稍后重试。' }); return;
   }
@@ -2534,6 +2698,7 @@ async function openDeleteConfirmation(message) {
   deleteDialog.showModal(); btnDeleteCancel.focus(); publishSessionState();
   try {
     const record = await sessionStore.get(message.sessionId);
+    if (isDisposed) return;
     if (deleteIntent !== intent) return;
     intent.record = record;
     deleteTargetTitle.textContent = record.title;
@@ -2545,12 +2710,12 @@ async function openDeleteConfirmation(message) {
       : '确认后将永久删除该会话及其全部卡片记录。';
     btnDeleteConfirm.disabled = false;
   } catch (err) {
-    if (deleteIntent === intent) deleteDialogError.textContent = safeDetail(err.message);
+    if (!isDisposed && deleteIntent === intent) deleteDialogError.textContent = safeDetail(err.message);
   }
 }
-btnDeleteCancel.addEventListener('click', () => dismissDeleteConfirmation());
-deleteDialog.addEventListener('cancel', event => { event.preventDefault(); dismissDeleteConfirmation(); });
-btnDeleteConfirm.addEventListener('click', async event => {
+listen(btnDeleteCancel, 'click', () => dismissDeleteConfirmation());
+listen(deleteDialog, 'cancel', event => { event.preventDefault(); dismissDeleteConfirmation(); });
+listen(btnDeleteConfirm, 'click', async event => {
   // A forged channel message or scripted .click() is not deletion consent.
   if (!event?.isTrusted) return;
   const intent = deleteIntent;
@@ -2558,6 +2723,7 @@ btnDeleteConfirm.addEventListener('click', async event => {
   deleteInProgress = true; btnDeleteConfirm.disabled = btnDeleteCancel.disabled = true;
   deleteDialogError.textContent = ''; deleteDialogProgress.textContent = '正在删除…';
   const result = await sessionController.remove(intent.record.id, intent.record.revision, initialSnapshot());
+  if (isDisposed) return;
   deleteInProgress = false;
   if (result.ok) {
     dismissDeleteConfirmation(false);
@@ -2573,6 +2739,7 @@ const sessionStore = createForkSessionStore(hana);
 sessionController = createForkSessionController({
   store: sessionStore, capture: captureSnapshot, apply: applySnapshot, cancelPending: cancelSessionRequests,
   onChange(state) {
+    if (isDisposed) return;
     sessionStatusEl.textContent = state.error ? `${state.dirty ? '未保存' : '会话操作失败'} · ${safeDetail(state.error)}`
       : !state.ready ? '正在恢复会话…'
       : !state.activeId ? '暂无会话 · 可点击新建会话'
@@ -2587,25 +2754,58 @@ sessionController = createForkSessionController({
     publishSessionState();
   },
 });
-btnEmptyNewSession?.addEventListener('click', () => {
+listen(btnEmptyNewSession, 'click', () => {
   void sessionController?.newSession(initialSnapshot()).catch(() => {});
 });
-btnRetrySave.addEventListener('click', () => { void (sessionController.state.ready ? sessionController.flush() : sessionController.init()).catch(() => {}); });
-btnSaveCopy.addEventListener('click', () => { void sessionController.saveCopy().catch(() => {}); });
+listen(btnRetrySave, 'click', () => { void (sessionController.state.ready ? sessionController.flush() : sessionController.init()).catch(() => {}); });
+listen(btnSaveCopy, 'click', () => { void sessionController.saveCopy().catch(() => {}); });
 const stopWatchingSessions = sessionStore.watch(() => { void sessionController.refresh().catch(() => {}); });
-window.addEventListener('pagehide', () => {
-  stopWatchingSessions?.();
-  void sessionController.close().catch(() => {});
+
+function disposePanel() {
+  if (disposalPromise) return disposalPromise;
+  if (isDisposed) return Promise.resolve();
+  isDisposed = true; // Close the command gate synchronously, before any await.
+  panelAbort.abort(inactiveError());
+  for (const stop of [unbindKeyboardShortcuts, stopWatchingSessions]) { try { stop?.(); } catch {} }
+  drain(cardCleanups); drain(battleCleanups); drain(panelCleanups);
+  for (const timer of panelTimers) clearTimeout(timer);
+  panelTimers.clear();
+  bus.onmessage = null;
+  try { bus.close?.(); } catch {}
+  for (const intentId of ownedBridgeClaims) void releaseBridgeClaim(intentId);
+  btnUseLastPrompt.onclick = null;
+  const sendText = document.getElementById('bridge-send-text');
+  if (sendText) sendText.oninput = null;
+  view.isDragging = false;
+  isSpacePressed = false;
+  viewport.classList.remove('is-hand-tool', 'is-dragging-canvas');
+  document.body?.classList.remove('is-card-resizing', 'resizing-s', 'resizing-se', 'resizing-ew');
+  canvasDropIndicator.hidden = true;
+  for (const card of cards) {
+    document.getElementById(`dom-${card.id}`)?.classList.remove('is-resizing', 'card-drop-active');
+    const input = document.getElementById(`input-${card.id}`);
+    if (input) input.disabled = true;
+  }
+  for (const control of document.querySelectorAll?.('button, input, textarea, select') || []) control.disabled = true;
+  for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl]) dialog?.close?.();
+  // close() cancels generation-bound work and flushes the last snapshot once.
+  disposalPromise = sessionController.close();
+  void disposalPromise.catch(() => {});
+  return disposalPromise;
+}
+
+listen(window, 'pagehide', () => {
+  disposePanel();
 });
 
-btnBattleClose?.addEventListener('click', closeBattleDialog);
-btnBattleCancel?.addEventListener('click', closeBattleDialog);
-battleDialog?.addEventListener('cancel', (e) => {
+listen(btnBattleClose, 'click', closeBattleDialog);
+listen(btnBattleCancel, 'click', closeBattleDialog);
+listen(battleDialog, 'cancel', (e) => {
   e.preventDefault();
   closeBattleDialog();
 });
 
-btnBattleSubmit?.addEventListener('click', async () => {
+listen(btnBattleSubmit, 'click', async () => {
   const prompt = battlePromptInput?.value?.trim() || '';
   if (!prompt) {
     if (battleDialogError) battleDialogError.textContent = '请输入推导问题。';
@@ -2626,17 +2826,18 @@ btnBattleSubmit?.addEventListener('click', async () => {
   }
 });
 
-btnMergeCancel?.addEventListener('click', () => {
+listen(btnMergeCancel, 'click', () => {
   clearMultiSelect();
 });
 
-btnMergeSubmit?.addEventListener('click', () => {
+listen(btnMergeSubmit, 'click', () => {
   void createMergeCardFromSelected();
 });
 
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
+if (bridgeInitialized && !isDisposed) void pollBridgeIntents();
 
 if (typeof window !== 'undefined') {
   window.__forkChat = {
@@ -2668,5 +2869,8 @@ if (typeof window !== 'undefined') {
     formatFileSize,
     extractDocumentFile,
     createDocumentCard,
+    unbindKeyboardShortcuts: () => unbindKeyboardShortcuts?.(),
+    isDisposed: () => isDisposed,
+    dispose: disposePanel,
   };
 }

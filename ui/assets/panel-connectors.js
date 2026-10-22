@@ -46,59 +46,130 @@ export function calculateConnectorGeometry({ parent, child, sibIndex = 0, sibCou
 }
 
 /**
- * 渲染全量卡片之间的贝塞尔连线到 SVG 容器
+ * 渲染全量卡片之间的贝塞尔连线到 SVG 容器（支持拓扑 O(N) 索引加速与节点增量原位复用）
  */
 export function renderConnectorsLayer({ svg, cards, cardParentIds, cardHasParent, documentRef = typeof document !== 'undefined' ? document : null }) {
   if (!svg || !cards) return;
   const doc = documentRef || svg.ownerDocument;
   if (!doc) return;
 
-  svg.innerHTML = '';
+  // 1. O(N) 一次遍历：建立卡片字典、兄弟序号与兄弟总数索引，彻底消灭内层循环中的 indexOf 平方级扫描
+  const cardMap = new Map();
+  for (let i = 0; i < cards.length; i++) {
+    cardMap.set(cards[i].id, cards[i]);
+  }
 
-  cards.forEach(child => {
+  const childIndexMap = new Map(); // key: `${pId}->${child.id}` => sibIndex (0-based)
+  const parentSibCounts = new Map(); // key: pId => total siblings count
+
+  for (let i = 0; i < cards.length; i++) {
+    const child = cards[i];
     const parentIds = cardParentIds(child);
-    if (!parentIds || parentIds.length === 0) return;
+    if (parentIds && parentIds.length > 0) {
+      for (let j = 0; j < parentIds.length; j++) {
+        const pId = parentIds[j];
+        const currentCount = parentSibCounts.get(pId) || 0;
+        childIndexMap.set(`${pId}->${child.id}`, currentCount);
+        parentSibCounts.set(pId, currentCount + 1);
+      }
+    }
+  }
 
-    parentIds.forEach((pId, pIndex) => {
-      const parent = cards.find(c => c.id === pId);
-      if (!parent) return;
+  // 2. 收集所有有效边及其计算几何（全过程纯 O(1) 字典查找，严格 O(N) 几何计算）
+  const edges = [];
+  for (let i = 0; i < cards.length; i++) {
+    const child = cards[i];
+    const parentIds = cardParentIds(child);
+    if (!parentIds || parentIds.length === 0) continue;
 
-      const siblings = cards.filter(c => cardHasParent(c, parent.id));
-      const sibIndex = siblings.indexOf(child);
-      const sibCount = siblings.length;
+    for (let pIndex = 0; pIndex < parentIds.length; pIndex++) {
+      const pId = parentIds[pIndex];
+      const parent = cardMap.get(pId);
+      if (!parent) continue;
+
+      const sibIndex = childIndexMap.get(`${pId}->${child.id}`) ?? 0;
+      const sibCount = parentSibCounts.get(pId) || 1;
 
       const geom = calculateConnectorGeometry({
         parent,
         child,
-        sibIndex: sibIndex >= 0 ? sibIndex : 0,
-        sibCount: sibCount > 0 ? sibCount : 1,
+        sibIndex,
+        sibCount,
         pIndex,
         parentCount: parentIds.length,
       });
 
-      // 背景粗边描边（5px 白色隔离带）
-      const pathBg = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
-      pathBg.setAttribute('d', geom.d);
-      pathBg.setAttribute('fill', 'none');
-      pathBg.setAttribute('stroke', '#ffffff');
-      pathBg.setAttribute('stroke-width', '5');
-      svg.appendChild(pathBg);
+      edges.push({
+        edgeKey: `${pId}->${child.id}`,
+        geom,
+      });
+    }
+  }
 
-      // 主连线（1.8px 深色主干）
-      const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', geom.d);
-      path.setAttribute('fill', 'none');
-      path.setAttribute('stroke', '#18181b');
-      path.setAttribute('stroke-width', '1.8');
-      svg.appendChild(path);
+  const existingChildren = svg.children || [];
+  const requiredElementCount = edges.length * 3;
 
-      // 终点微圆环
-      const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      circle.setAttribute('cx', String(geom.endX));
-      circle.setAttribute('cy', String(geom.endY));
-      circle.setAttribute('r', '3');
-      circle.setAttribute('fill', '#18181b');
-      svg.appendChild(circle);
-    });
-  });
+  // 3. 增量复用检测：如果现有 DOM 节点数量与拓扑边结构完全一致（如卡片拖拽、尺寸缩放高频帧），直接原位更新属性
+  let canReuseInPlace = existingChildren.length === requiredElementCount;
+  if (canReuseInPlace) {
+    for (let i = 0; i < edges.length; i++) {
+      const pathEl = existingChildren[i * 3 + 1];
+      if (!pathEl || pathEl.getAttribute?.('data-edge') !== edges[i].edgeKey) {
+        canReuseInPlace = false;
+        break;
+      }
+    }
+  }
+
+  if (canReuseInPlace) {
+    for (let i = 0; i < edges.length; i++) {
+      const { geom } = edges[i];
+      const baseIdx = i * 3;
+      const pathBg = existingChildren[baseIdx];
+      const path = existingChildren[baseIdx + 1];
+      const circle = existingChildren[baseIdx + 2];
+
+      if (pathBg.getAttribute?.('d') !== geom.d) pathBg.setAttribute('d', geom.d);
+      if (path.getAttribute?.('d') !== geom.d) path.setAttribute('d', geom.d);
+      const strEndX = String(geom.endX);
+      const strEndY = String(geom.endY);
+      if (circle.getAttribute?.('cx') !== strEndX) circle.setAttribute('cx', strEndX);
+      if (circle.getAttribute?.('cy') !== strEndY) circle.setAttribute('cy', strEndY);
+    }
+    return;
+  }
+
+  // 4. 拓扑结构变动或初次挂载：清空并全量构建
+  svg.innerHTML = '';
+
+  for (let i = 0; i < edges.length; i++) {
+    const { edgeKey, geom } = edges[i];
+
+    // 背景粗边描边（5px 白色隔离带）
+    const pathBg = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+    pathBg.setAttribute('d', geom.d);
+    pathBg.setAttribute('fill', 'none');
+    pathBg.setAttribute('stroke', '#ffffff');
+    pathBg.setAttribute('stroke-width', '5');
+    pathBg.setAttribute('data-edge-bg', edgeKey);
+    svg.appendChild(pathBg);
+
+    // 主连线（1.8px 深色主干）
+    const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', geom.d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', '#18181b');
+    path.setAttribute('stroke-width', '1.8');
+    path.setAttribute('data-edge', edgeKey);
+    svg.appendChild(path);
+
+    // 终点微圆环
+    const circle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', String(geom.endX));
+    circle.setAttribute('cy', String(geom.endY));
+    circle.setAttribute('r', '3');
+    circle.setAttribute('fill', '#18181b');
+    circle.setAttribute('data-edge-circle', edgeKey);
+    svg.appendChild(circle);
+  }
 }
