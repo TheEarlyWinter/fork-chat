@@ -5,13 +5,12 @@ import { parseAssistantOutput } from './assistant-output.js';
 import { createForkSessionStore } from './fork-session-store.js';
 import { createForkSessionController } from './fork-session-controller.js';
 import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
-import { renderConnectorsLayer } from './panel-connectors.js';
-import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewportToCluster as fitViewportToClusterLayout, computeAutoTidyPositions, collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
-import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js';
-import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
+import { collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
+import { bindKeyboardShortcuts } from './panel-shortcuts.js';
 import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
 import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
 import { createAgentController } from './panel-agents.js';
+import { createCanvasViewController } from './panel-canvas-view.js';
 import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
 import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
@@ -130,6 +129,8 @@ function initialCards() { return [
   }
 ]; }
 let cards = initialCards();
+let selectedCardId = null;
+let isSpacePressed = false;
 /**
  * 最近被删除的卡片内容。
  * 撤销删除时优先从这里取，而不是用布局快照里那份可能是很久以前的副本。
@@ -298,25 +299,43 @@ bus.onmessage = (e) => {
   }
 };
 
-// 更新画布平移与缩放矩阵
-function updateTransform() {
-  if (isDisposed) return;
-  applyViewportTransform({ surface, viewport, zoomText, view, isDisposed });
-  sessionController?.scheduleSave();
-}
+// 画布视图、连线、选择与导航控制器 (Canvas View Controller)
+const canvasViewController = createCanvasViewController({
+  getCards: () => cards,
+  getSelectedCardId: () => selectedCardId,
+  setSelectedCardId: id => { selectedCardId = id; },
+  view,
+  multiSelectedCardIds,
+  surface,
+  viewport,
+  zoomText,
+  connectorsSvg,
+  btnZoomIn,
+  btnZoomOut,
+  getIsSpacePressed: () => isSpacePressed,
+  canMutateCanvas: () => canMutateCanvas(),
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (c, sId) => historyManager.recordSnapshot(c, sId),
+  clearMultiSelect: () => clearMultiSelect(),
+  isDisposed: () => isDisposed,
+  listen,
+  later,
+  documentRef: document,
+  windowRef: typeof window !== 'undefined' ? window : null,
+});
+canvasViewController.bind();
 
-// 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
-function renderConnectors() {
-  if (isDisposed) return;
-  const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
-  renderConnectorsLayer({
-    svg: connectorsSvg,
-    cards: visibleCards,
-    cardParentIds,
-    cardHasParent,
-    documentRef: document,
-  });
-}
+const updateTransform = () => canvasViewController.updateTransform();
+const renderConnectors = () => canvasViewController.renderConnectors();
+const fitViewportToCluster = clusterCards => canvasViewController.fitViewportToCluster(clusterCards);
+const calculateBranchYPositions = (parent, count, targetX) => canvasViewController.calculateBranchYPositions(parent, count, targetX);
+const selectCard = (cardId, focusInput) => canvasViewController.selectCard(cardId, focusInput);
+const ensureCardInView = card => canvasViewController.ensureCardInView(card);
+const focusCardInViewport = card => canvasViewController.focusCardInViewport(card);
+const navigateCardFocus = direction => canvasViewController.navigateCardFocus(direction);
+const autoTidyLayout = () => canvasViewController.autoTidyLayout();
+const visibleCardsForFraming = () => canvasViewController.visibleCardsForFraming();
 
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
 const buildChainContext = targetCard => buildContext({ cards, targetCard });
@@ -480,23 +499,6 @@ async function openBattleDialog(card, initialPromptText = '') {
   }
 }
 
-function fitViewportToCluster(clusterCards) {
-  if (isDisposed) return;
-  // 卡片的 data 高度不一定等于屏幕上的高度（长文档卡会被 CSS 撑开），
-  // 先按 DOM 实测补一次，否则算出来的垂直中心偏高。
-  const measured = clusterCards.map(c => {
-    const el = document.getElementById(`dom-${c.id}`);
-    const h = el?.offsetHeight;
-    return (typeof h === 'number' && h > 0) ? { ...c, height: h } : c;
-  });
-  fitViewportToClusterLayout(measured, { viewport, view });
-  updateTransform();
-}
-
-function calculateBranchYPositions(parentCard, count, targetX) {
-  return calculateBranchYPositionsLayout(parentCard, count, targetX, cards);
-}
-
 async function runBattleBranches(parentCard, prompt, selectedAgents) {
   if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
   const existingChildren = cards.filter(c => cardHasParent(c, parentCard.id));
@@ -624,85 +626,6 @@ async function createMergeCardFromSelected() {
   const prompt = synthesizeMergePrompt(selectedCards);
   void sendCardPrompt(mergeCard, prompt);
   return mergeCard;
-}
-
-let selectedCardId = null;
-let isSpacePressed = false;
-
-function selectCard(cardId, focusInput = false) {
-  if (isDisposed) return;
-  selectedCardId = cardId;
-  cards.forEach(c => {
-    const el = document.getElementById(`dom-${c.id}`);
-    if (el) {
-      if (c.id === cardId) el.classList.add('is-selected-card');
-      else el.classList.remove('is-selected-card');
-    }
-  });
-  if (cardId && focusInput) {
-    const inputEl = document.getElementById(`input-${cardId}`);
-    inputEl?.focus?.({ preventScroll: true });
-  }
-}
-
-function ensureCardInView(card) {
-  if (isDisposed || !card) return;
-  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const next = computeEnsureCardVisible({
-    card,
-    view,
-    viewportWidth: vpRect.width || 1000,
-    viewportHeight: vpRect.height || 700,
-    margin: 60,
-  });
-  if (next.x !== view.x || next.y !== view.y) {
-    view.x = next.x;
-    view.y = next.y;
-    updateTransform();
-  }
-}
-
-function focusCardInViewport(card) {
-  if (isDisposed || !card) return;
-  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const cardW = card.width || 360;
-  // 高度不能写死：长文档卡能到八九百像素，按 340 算出来的中心会明显偏上
-  const domEl = document.getElementById(`dom-${card.id}`);
-  const cardH = (typeof domEl?.offsetHeight === 'number' && domEl.offsetHeight > 0)
-    ? domEl.offsetHeight
-    : (card.height || 360);
-  const next = computeCenterOnCard({
-    card: { ...card, width: cardW, height: cardH },
-    viewportWidth: vpRect.width || 1000,
-    viewportHeight: vpRect.height || 700,
-    scale: view.scale,
-  });
-
-  view.x = next.x;
-  view.y = next.y;
-  updateTransform();
-
-  const el = document.getElementById(`dom-${card.id}`);
-  if (el) {
-    el.classList.add('is-imported-pulse');
-    later(() => {
-      el.classList.remove('is-imported-pulse');
-    }, 2000);
-  }
-}
-
-function navigateCardFocus(direction) {
-  const target = findCardByDirection({
-    cards,
-    selectedCardId,
-    direction,
-    cardParentIds,
-    cardHasParent,
-  });
-  if (target) {
-    selectCard(target.id, false);
-    ensureCardInView(target);
-  }
 }
 
 function createBranchCard(card, { autoFocus = true } = {}) {
@@ -1280,29 +1203,6 @@ function bindCardEvents(cardEl, card) {
   });
 }
 
-// 画布视口平移与缩放控制器 (Viewport Controller)
-const viewportController = bindViewportController({
-  viewport,
-  surface,
-  zoomText,
-  btnZoomIn,
-  btnZoomOut,
-  view,
-  getState: () => ({
-    isDisposed,
-    isSpacePressed,
-    onCanvasMouseDown: () => {
-      clearMultiSelect();
-      selectCard(null);
-    },
-  }),
-  onTransformChange: () => {
-    sessionController?.scheduleSave();
-  },
-  listen,
-  windowRef: window,
-});
-
 // 全局卡片搜索控制器 (Ctrl+F)
 let searchMatches = [];
 let currentSearchIndex = -1;
@@ -1432,37 +1332,6 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
     openSearchBar: () => searchController?.open(),
   },
 });
-
-// 树状一键自动整理排版算法 (Auto-Tidy Engine)
-function autoTidyLayout() {
-  if (!canMutateCanvas()) return;
-  if (!cards || cards.length === 0) return;
-  const positions = computeAutoTidyPositions(cards, cardParentIds);
-  cards.forEach(c => {
-    const pos = positions.get(c.id);
-    if (pos) {
-      c.x = pos.x;
-      c.y = pos.y;
-    }
-  });
-
-  renderCards();
-  sessionController?.scheduleSave();
-  // 只框可见的那部分。折叠起来的子孙如果也参与包围盒，
-  // 视野会被压得很小，屏幕上留一大片空白。
-  fitViewportToCluster(visibleCardsForFraming());
-  historyManager.recordSnapshot(cards, selectedCardId);
-}
-
-/** 当前真正显示在画布上的卡片（折叠的子分支不算） */
-function visibleCardsForFraming() {
-  try {
-    const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
-    return visibleCards.length ? visibleCards : cards;
-  } catch {
-    return cards;
-  }
-}
 
 listen(btnAutoTidy, 'click', () => {
   autoTidyLayout();
@@ -2614,7 +2483,7 @@ function disposePanel() {
   const sendText = document.getElementById('bridge-send-text');
   if (sendText) sendText.oninput = null;
   battleController.cleanup();
-  viewportController.cleanup();
+  canvasViewController.cleanup();
   view.isDragging = false;
   isSpacePressed = false;
   viewport.classList.remove('is-hand-tool', 'is-dragging-canvas');
@@ -2686,7 +2555,7 @@ if (typeof window !== 'undefined') {
     canRedo: () => historyManager.canRedo(),
     getHistoryStats: () => historyManager.getStats(),
     unbindKeyboardShortcuts: () => unbindKeyboardShortcuts?.(),
-    unbindViewportController: () => viewportController?.cleanup(),
+    unbindViewportController: () => canvasViewController.cleanup(),
     isDisposed: () => isDisposed,
     dispose: disposePanel,
   };
