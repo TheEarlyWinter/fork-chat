@@ -11,6 +11,7 @@ import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js
 import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
 import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
 import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
+import { createAgentController } from './panel-agents.js';
 import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
 import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
@@ -250,11 +251,27 @@ let currentReasoningEffort = (() => {
   }
 })();
 
-function updateHeaderStatus() {
-  if (activeAgentDisplay) {
-    activeAgentDisplay.textContent = `当前助手: ${currentAgent.name} [${currentAgent.model || 'default'}]`;
-  }
-}
+const agentController = createAgentController({
+  getAgent: () => currentAgent,
+  setAgent: next => { currentAgent = next; },
+  getReasoningEffort: () => currentReasoningEffort,
+  setReasoningEffort: next => { currentReasoningEffort = next; },
+  activeAgentDisplay,
+  isBusy: () => Boolean(sessionController?.state.busy || deleteIntent),
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  isDisposed: () => isDisposed,
+  hana,
+  requestHost,
+  abortable,
+  getSignal: () => panelAbort.signal,
+  storage: typeof localStorage !== 'undefined' ? localStorage : null,
+});
+
+const updateHeaderStatus = () => agentController.updateHeaderStatus();
+const getAgentReasoningEffort = id => agentController.getAgentReasoningEffort(id);
+const loadAvailableAgents = () => agentController.loadAvailableAgents();
+
 updateHeaderStatus();
 
 bus.onmessage = (e) => {
@@ -265,12 +282,7 @@ bus.onmessage = (e) => {
     publishSessionState(message.panelId);
     return;
   }
-  if (e.data?.type === 'REASONING_EFFORT_CHANGED') {
-    currentReasoningEffort = e.data.reasoningEffort || null;
-    try {
-      localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default');
-    } catch {}
-    sessionController?.scheduleSave();
+  if (agentController.handleBroadcast(message)) {
     return;
   }
   if (message?.type === 'FORK_SESSION_COMMAND') {
@@ -283,25 +295,6 @@ bus.onmessage = (e) => {
       : sessionController.state.ready ? sessionController.refresh() : sessionController.init();
     void operation.catch(() => {});
     return;
-  }
-  if (e.data?.type === 'AGENT_CHANGED' && e.data.agent) {
-    // 以前忙的时候直接丢掉这条广播，于是侧边栏已经高亮了新助手，
-    // 主画布还在用旧的发消息。助手选择是界面偏好，不影响快照冲突，
-    // 所以照样更新，只是暂不落盘。
-    const deferSave = Boolean(sessionController?.state.busy || deleteIntent);
-    currentAgent = { ...currentAgent, ...e.data.agent };
-    if (e.data.reasoningEffort !== undefined) {
-      currentReasoningEffort = e.data.reasoningEffort || null;
-      try { localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default'); } catch {}
-    }
-    for (const [key, value] of Object.entries({ id: currentAgent.id, name: currentAgent.name, model: currentAgent.model, provider: currentAgent.provider })) {
-      try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch {}
-    }
-    updateHeaderStatus();
-    renderCards();
-    if (!deferSave) sessionController?.scheduleSave();
-  } else if (e.data?.type === 'MODEL_CHANGED' && e.data.model) {
-    updateHeaderStatus();
   }
 };
 
@@ -323,41 +316,6 @@ function renderConnectors() {
     cardHasParent,
     documentRef: document,
   });
-}
-
-// 读取指定助手独立配置的思考深度
-function getAgentReasoningEffort(agentId) {
-  if (!agentId) return null;
-  try {
-    const val = localStorage.getItem(`fork_chat_agent_effort_${agentId}`);
-    return val && val !== 'default' ? val : null;
-  } catch {
-    return null;
-  }
-}
-
-// 缓存系统可用助手列表
-let cachedAgents = [];
-let agentsLoadingPromise = null;
-async function loadAvailableAgents() {
-  if (isDisposed) return [];
-  if (cachedAgents.length > 0) return cachedAgents;
-  if (agentsLoadingPromise) return agentsLoadingPromise;
-  agentsLoadingPromise = (async () => {
-    try {
-      const res = await abortable(requestHost(hana, '/api/agents', { signal: panelAbort.signal }), panelAbort.signal);
-      const data = await abortable(res.json(), panelAbort.signal);
-      if (!isDisposed && Array.isArray(data?.agents)) {
-        cachedAgents = data.agents;
-      }
-    } catch {
-      if (!isDisposed) cachedAgents = [currentAgent];
-    } finally {
-      agentsLoadingPromise = null;
-    }
-    return cachedAgents;
-  })();
-  return agentsLoadingPromise;
 }
 
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
@@ -500,7 +458,7 @@ const battleController = bindBattleDialogController({
   loadAgents: loadAvailableAgents,
   getReasoningEffort: getAgentReasoningEffort,
   onSubmit: ({ targetCard, prompt, selectedAgentIds }) => {
-    const agents = cachedAgents.filter(a => selectedAgentIds.has(a.id));
+    const agents = agentController.getAvailableAgents().filter(a => selectedAgentIds.has(a.id));
     if (targetCard && cards.includes(targetCard)) {
       void runBattleBranches(targetCard, prompt, agents);
     }
@@ -2481,14 +2439,7 @@ function applySnapshot(snapshot) {
   }
   cards = snapshot.cards;
   Object.assign(view, snapshot.view, { isDragging: false });
-  currentAgent = { ...currentAgent, ...snapshot.agent };
-  currentReasoningEffort = snapshot.agent?.reasoningEffort || null;
-  try {
-    localStorage.setItem('fork_chat_reasoning_effort', currentReasoningEffort || 'default');
-  } catch {}
-  for (const [key, value] of Object.entries({ id: currentAgent.id, name: currentAgent.name, model: currentAgent.model, provider: currentAgent.provider })) {
-    try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch { /* Host storage is authoritative; this is only a legacy UI hint. */ }
-  }
+  agentController.restoreAgent(snapshot.agent);
   updateHeaderStatus(); updateTransform(); renderCards(false);
   historyManager.clear();
   historyManager.recordSnapshot(cards, selectedCardId);
@@ -2704,7 +2655,7 @@ if (typeof window !== 'undefined') {
     sendCardPrompt,
     buildChainContext,
     loadAvailableAgents,
-    getAvailableAgents: () => cachedAgents,
+    getAvailableAgents: () => agentController.getAvailableAgents(),
     getCards: () => cards,
     getView: () => view,
     openBattleDialog,
