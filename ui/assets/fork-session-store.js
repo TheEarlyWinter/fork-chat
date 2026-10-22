@@ -89,6 +89,11 @@ export function generateAutoTitle(snapshot) {
  * @param {any} input
  * @returns {object} normalizedSnapshot
  */
+/** 单卡文档正文上限：与 MinerU 的 MAX_MARKDOWN_CHARS 对齐 */
+export const DOC_CONTENT_MAX_CHARS = 2000000;
+/** 单个附件正文上限 */
+export const ATTACHMENT_MAX_CHARS = 1000000;
+
 export function normalizeForkSnapshot(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw createError("INVALID_SESSION_SNAPSHOT", "Snapshot must be a valid non-null object");
@@ -254,6 +259,22 @@ export function normalizeForkSnapshot(input) {
       if (typeof rawMsg.modelRef === "string") {
         msg.modelRef = rawMsg.modelRef.slice(0, 200);
       }
+      // 资料预览可重算，但重开页面后必须能回来，否则卡片展开只剩空白
+      if (typeof rawMsg.docPreview === "string") {
+        msg.docPreview = rawMsg.docPreview.slice(0, 60000);
+      }
+      if (rawMsg.docMeta && typeof rawMsg.docMeta === "object") {
+        msg.docMeta = {
+          name: typeof rawMsg.docMeta.name === "string" ? rawMsg.docMeta.name.slice(0, 200) : "",
+          size: typeof rawMsg.docMeta.size === "number" ? rawMsg.docMeta.size : 0,
+          type: typeof rawMsg.docMeta.type === "string" ? rawMsg.docMeta.type.slice(0, 50) : "",
+          charCount: typeof rawMsg.docMeta.charCount === "number" ? rawMsg.docMeta.charCount : 0,
+          lineCount: typeof rawMsg.docMeta.lineCount === "number" ? rawMsg.docMeta.lineCount : 0,
+          extension: typeof rawMsg.docMeta.extension === "string" ? rawMsg.docMeta.extension.slice(0, 50) : "",
+        };
+      }
+      if (rawMsg.partial === true) msg.partial = true;
+
       if (Array.isArray(rawMsg.attachments)) {
         msg.attachments = rawMsg.attachments.slice(0, 10).map(att => ({
           name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
@@ -261,7 +282,9 @@ export function normalizeForkSnapshot(input) {
           extension: typeof att?.extension === 'string' ? att.extension.slice(0, 50) : '',
           charCount: typeof att?.charCount === 'number' ? att.charCount : 0,
           lineCount: typeof att?.lineCount === 'number' ? att.lineCount : 0,
-          content: typeof att?.content === 'string' ? att.content.slice(0, 300000) : '',
+          // 和暂存区用同一个上限。以前这里写死 30 万，暂存区已经放宽到 100 万，
+          // 于是发出去的消息在刷新之后被悄悄切掉大半，且没有任何标记。
+          content: typeof att?.content === 'string' ? att.content.slice(0, ATTACHMENT_MAX_CHARS) : '',
           preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
         }));
       }
@@ -303,22 +326,43 @@ export function normalizeForkSnapshot(input) {
     };
     if (typeof cardHeight === 'number') normCard.height = cardHeight;
     if (requestId) normCard.requestId = requestId;
+    // 盖戳与折叠是用户的操作结果，丢了就等于每次重开都被重置
+    if (rawCard.statusStamp === 'accepted' || rawCard.statusStamp === 'rejected') {
+      normCard.statusStamp = rawCard.statusStamp;
+    }
+    if (rawCard.isCollapsed === true) normCard.isCollapsed = true;
     if (rawCard.isMerge) normCard.isMerge = true;
     if (rawCard.isBattle) normCard.isBattle = true;
     if (rawCard.isDoc) normCard.isDoc = true;
     if (Array.isArray(rawCard.stagedAttachments)) {
-      normCard.stagedAttachments = rawCard.stagedAttachments.slice(0, 10).map(att => ({
+      // 上限还在，但越界不再无声无息：留一个可读的标记，让人知道丢过东西。
+      if (rawCard.stagedAttachments.length > 20) {
+        normCard.stagedAttachmentsDropped = rawCard.stagedAttachments.length - 20;
+      }
+      normCard.stagedAttachments = rawCard.stagedAttachments.slice(0, 20).map(att => ({
         name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
         size: typeof att?.size === 'number' ? att.size : 0,
         extension: typeof att?.extension === 'string' ? att.extension.slice(0, 50) : '',
         charCount: typeof att?.charCount === 'number' ? att.charCount : 0,
         lineCount: typeof att?.lineCount === 'number' ? att.lineCount : 0,
-        content: typeof att?.content === 'string' ? att.content.slice(0, 300000) : '',
+        content: typeof att?.content === 'string' ? att.content.slice(0, ATTACHMENT_MAX_CHARS) : '',
         preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
       }));
+      // 记录哪些附件正文被截断，而不是让 charCount 继续撒谎
+      const truncatedIdx = normCard.stagedAttachments
+        .map((att, i) => (att.content.length >= ATTACHMENT_MAX_CHARS ? i : -1))
+        .filter(i => i >= 0);
+      if (truncatedIdx.length) normCard.stagedAttachmentsTruncated = truncatedIdx;
     }
     if (typeof rawCard.docContent === 'string') {
-      normCard.docContent = rawCard.docContent.slice(0, 500000);
+      normCard.docContent = rawCard.docContent.slice(0, DOC_CONTENT_MAX_CHARS);
+      // 静默截断等于把「保存成功」当谎话说。留标记，界面要如实显示。
+      if (rawCard.docContent.length > DOC_CONTENT_MAX_CHARS) {
+        normCard.docContentTruncated = {
+          kept: DOC_CONTENT_MAX_CHARS,
+          original: rawCard.docContent.length,
+        };
+      }
     }
     if (rawCard.docMeta && typeof rawCard.docMeta === 'object') {
       normCard.docMeta = {

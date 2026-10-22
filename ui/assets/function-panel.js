@@ -159,8 +159,16 @@ function renderAgentList() {
     card.className = `agent-card ${isActive ? 'active' : ''}`;
     card.id = `agent-${a.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-    // 匹配该助手绑定模型的思考能力
-    const matchedModel = models.find(m => m.id === a.model || m.ref === `${a.provider}/${a.model}` || m.ref === a.model);
+    // 匹配该助手绑定模型的思考能力。provider/model 精确优先，
+    // 同名模型跨供应商时不能只看 id，否则会拿到别人的思考档位。
+    const matchedModel = (() => {
+      const exact = models.find(m => m.provider && a.provider && m.provider === a.provider && m.model === a.model);
+      if (exact) return exact;
+      const byRef = models.find(m => m.ref === `${a.provider}/${a.model}`);
+      if (byRef) return byRef;
+      const byId = models.filter(m => m.id === a.model || m.ref === a.model);
+      return byId.length === 1 ? byId[0] : null;
+    })();
     const supportsReasoning = Boolean(a.reasoning || matchedModel?.reasoning);
     const rawLevels = (Array.isArray(a.thinkingLevels) && a.thinkingLevels.length > 0)
       ? a.thinkingLevels

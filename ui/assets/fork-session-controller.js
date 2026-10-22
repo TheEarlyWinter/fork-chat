@@ -6,8 +6,10 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   let active = null, sessions = [], ready = false, busy = false, error = '';
   let generation = 0, changed = 0, saved = 0, timer = null, saving = false;
   let tail = Promise.resolve(), refreshing = 0, closed = false;
+  /** 一次性提示（例如覆盖了别的窗口的修改），读走即清 */
+  let notice = '';
   const detail = err => `${err?.code || 'SESSION_STORAGE_ERROR'}: ${err?.message || '会话保存失败'}`;
-  const state = () => ({ activeId: active?.id || null, activeRevision: active?.revision || null, title: active?.title || '', ready, busy, saving, dirty: changed > saved, error, sessions, generation });
+  const state = () => ({ activeId: active?.id || null, activeRevision: active?.revision || null, title: active?.title || '', ready, busy, saving, dirty: changed > saved, error, notice, sessions, generation });
   const notify = () => onChange(state());
   const clearTimer = () => { if (timer !== null) clearTimeout(timer); timer = null; };
 
@@ -26,17 +28,34 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
         const replacement = await store.get(list.activeId).catch(() => null);
         if (sequence === refreshing && !closed && replacement
           && (currentMissing || !active || changed <= saved)) {
-          await install(replacement);
+          await adoptExternal(replacement);
         } else if (sequence === refreshing && !closed && active && !currentMissing && changed > saved) {
           error = 'SESSION_ACTIVE_CHANGED: 其他窗口已切换当前会话，本窗口有未保存修改。';
         }
       } else if (sequence === refreshing && !closed && (currentMissing || !active || changed <= saved)) {
-        await install(null);
+        await adoptExternal(null);
       }
     }
     notify();
     return list;
   }
+  /**
+   * 别的窗口切了会话（或删掉了当前会话）时，由本窗口被动接受新快照。
+   *
+   * 以前这里直接 install()，既不涨 generation 也不 cancelPending：
+   * 旧回合的异步工作收不到取消，busy 账本也可能留下残影。
+   * 现在和主动切换走同一条转换协议，只是不需要再写盘。
+   */
+  async function adoptExternal(record) {
+    if (closed) return;
+    clearTimer();
+    generation++;
+    cancelPending('会话已在别处切换');
+    notify();
+    await install(record);
+    notify();
+  }
+
   function scheduleSave() {
     if (!ready || busy || closed) return;
     const alreadyDirty = changed > saved;
@@ -62,7 +81,22 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
         }
         if (changed <= saved) changed = saved + 1;
         const version = changed;
-        const record = await store.save(id, active.revision, snapshot);
+        let record;
+        try {
+          record = await store.save(id, active.revision, snapshot);
+        } catch (conflict) {
+          if (conflict?.code !== 'SESSION_CONFLICT') throw conflict;
+          // 冲突之后只把版本号对齐到远端最新，不自动重放本地内容。
+          // 以前连版本号都不更新，于是无论点多少次「重试保存」送上去的都是
+          // 同一个过期版本号，永远冲突；而自动覆盖又会悄悄吃掉别人的修改。
+          // 折中：对齐版本，覆盖与否交给用户再点一次决定。
+          const latest = await store.get(id).catch(() => null);
+          if (latest) {
+            active = { ...active, revision: latest.revision };
+            notice = '另一窗口已修改本会话，再次点击「重试保存」将覆盖它的修改';
+          }
+          throw conflict;
+        }
         active = record;
         saved = version;
         // A successful durable write stays successful even if a later list read fails.
@@ -197,5 +231,5 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     // Best effort only: the last acknowledged autosave is the recovery boundary.
     return flush(true);
   }
-  return { get state() { return state(); }, get generation() { return generation; }, init, refresh, scheduleSave, flush, switchTo: transition, newSession, saveCopy, rename, remove, close };
+  return { get state() { return state(); }, takeNotice() { const current = notice; notice = ''; return current; }, get generation() { return generation; }, init, refresh, scheduleSave, flush, switchTo: transition, newSession, saveCopy, rename, remove, close };
 }

@@ -166,6 +166,13 @@ export function bindViewportController({
     addListener(viewport, 'wheel', (e) => {
       const state = getState();
       if (state.isDisposed) return;
+      // 卡片内部的正文区自己要能滚。以前这里无条件接管滚轮，
+      // 结果鼠标停在长回答上滚一下就变成画布缩放，卡片里根本翻不动。
+      const scrollHost = e.target?.closest?.('.card-body, .bridge-preview, .card-attachment-body');
+      if (scrollHost) {
+        const canScroll = (scrollHost.scrollHeight || 0) > (scrollHost.clientHeight || 0) + 1;
+        if (canScroll) return;
+      }
       e.preventDefault?.();
 
       const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;

@@ -47,11 +47,38 @@ export function findCardsByKeyword({ cards = [], query = '' } = {}) {
     if (!isMatch && card.docMeta && typeof card.docMeta.name === 'string' && card.docMeta.name.toLowerCase().includes(q)) {
       isMatch = true;
     }
+    // 4b. 资料正文与附件正文也要能搜到。
+    // 以前只搜标题和消息，导入进来的文档正文明明在卡里，搜关键词却回 0 条。
+    if (!isMatch && typeof card.docContent === 'string' && card.docContent.toLowerCase().includes(q)) {
+      isMatch = true;
+    }
     if (!isMatch && Array.isArray(card.stagedAttachments)) {
       for (const att of card.stagedAttachments) {
-        if (att && typeof att.name === 'string' && att.name.toLowerCase().includes(q)) {
+        if (!att) continue;
+        if (typeof att.name === 'string' && att.name.toLowerCase().includes(q)) {
           isMatch = true;
           break;
+        }
+        if (typeof att.content === 'string' && att.content.toLowerCase().includes(q)) {
+          isMatch = true;
+          break;
+        }
+      }
+    }
+    // 4c. 消息里携带的资料预览与附件正文
+    if (!isMatch && Array.isArray(card.messages)) {
+      for (const msg of card.messages) {
+        if (!msg) continue;
+        if (typeof msg.docPreview === 'string' && msg.docPreview.toLowerCase().includes(q)) {
+          isMatch = true;
+          break;
+        }
+        if (Array.isArray(msg.attachments)) {
+          let hit = false;
+          for (const att of msg.attachments) {
+            if (att && typeof att.content === 'string' && att.content.toLowerCase().includes(q)) { hit = true; break; }
+          }
+          if (hit) { isMatch = true; break; }
         }
       }
     }
@@ -134,6 +161,9 @@ export function bindSearchBarController({
         e.preventDefault();
         close();
       } else if (e.key === 'Enter') {
+        // 中文输入法状态下按 Enter 是「确认候选词」，不是「跳到下一个结果」。
+        // keyCode 229 是合成态的老约定，isComposing 是新标准，两个都看。
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         onNavigate?.(e.shiftKey ? 'prev' : 'next');
       }

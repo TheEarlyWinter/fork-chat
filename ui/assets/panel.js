@@ -27,7 +27,8 @@ let disposalPromise = null;
 const panelCleanups = new Set();
 const cardCleanups = new Set();
 const battleCleanups = new Set();
-const documentTasks = new Set();
+// cardId -> Set<AbortController>；null 键表示还不属于任何卡片的解析
+const documentTasks = new Map();
 const panelTimers = new Set();
 const panelAbort = new AbortController();
 
@@ -195,11 +196,47 @@ function initialCards() { return [
   }
 ]; }
 let cards = initialCards();
+/**
+ * 最近被删除的卡片内容。
+ * 撤销删除时优先从这里取，而不是用布局快照里那份可能是很久以前的副本。
+ * 有界，超出就丢最老的。
+ */
+const removedCardArchive = new Map();
+function rememberRemovedCard(card) {
+  removedCardArchive.set(card.id, JSON.parse(JSON.stringify(card)));
+  while (removedCardArchive.size > 30) {
+    removedCardArchive.delete(removedCardArchive.keys().next().value);
+  }
+}
+
 const historyManager = createHistoryManager({
   maxDepth: 30,
   onRestore: (restoredCards, restoredSelectedId) => {
     if (isDisposed) return;
-    cards = restoredCards;
+    // 布局撤销只回填几何与结构字段。
+    // 业务内容（messages、docContent、附件、标记）一律以现存卡为准，
+    // 否则一次撤销就会把旧快照里的空消息数组盖回去，连之后的问答一起吐掉。
+    // statusStamp 也要在这里：盖戳本身会被 recordSnapshot，撤销时却回填不到，
+    // 点了盖戳再 Ctrl+Z 就变成什么都没发生。
+    const LIVE_KEYS = ['x', 'y', 'width', 'height', 'isCollapsed', 'zIndex', 'parentId', 'parentIds', 'statusStamp'];
+    const liveById = new Map((cards || []).map(c => [c.id, c]));
+    const merged = [];
+    for (const snap of restoredCards) {
+      const live = liveById.get(snap.id);
+      if (!live) {
+        // 快照里有、现在没有：这张卡是被删掉的。
+        // 先用删除时留档的完整内容，实在没有才退回快照。
+        const remembered = removedCardArchive.get(snap.id);
+        merged.push(remembered ? { ...remembered } : snap);
+        continue;
+      }
+      for (const key of LIVE_KEYS) {
+        if (snap[key] !== undefined) live[key] = snap[key];
+      }
+      liveById.delete(snap.id);
+      merged.push(live);
+    }
+    cards = merged;
     selectedCardId = restoredSelectedId && cards.some(c => c.id === restoredSelectedId) ? restoredSelectedId : null;
     renderCards();
     renderConnectors();
@@ -315,7 +352,10 @@ bus.onmessage = (e) => {
     return;
   }
   if (e.data?.type === 'AGENT_CHANGED' && e.data.agent) {
-    if (sessionController?.state.busy || deleteIntent) { publishSessionState(); return; }
+    // 以前忙的时候直接丢掉这条广播，于是侧边栏已经高亮了新助手，
+    // 主画布还在用旧的发消息。助手选择是界面偏好，不影响快照冲突，
+    // 所以照样更新，只是暂不落盘。
+    const deferSave = Boolean(sessionController?.state.busy || deleteIntent);
     currentAgent = { ...currentAgent, ...e.data.agent };
     if (e.data.reasoningEffort !== undefined) {
       currentReasoningEffort = e.data.reasoningEffort || null;
@@ -326,7 +366,7 @@ bus.onmessage = (e) => {
     }
     updateHeaderStatus();
     renderCards();
-    sessionController?.scheduleSave();
+    if (!deferSave) sessionController?.scheduleSave();
   } else if (e.data?.type === 'MODEL_CHANGED' && e.data.model) {
     updateHeaderStatus();
   }
@@ -434,7 +474,19 @@ function buildChainContext(targetCard) {
       });
     });
   });
-  return msgs;
+  // 收尾：失败的助手回复被剔掉后，它对应的那条提问也不能留着。
+  // 否则同一张卡里重试时会拼出两条连续的 user 消息，
+  // 严格校验轮次的模型接口会直接 400，这张卡就永远发不出去了。
+  const balanced = [];
+  for (const m of msgs) {
+    const prev = balanced[balanced.length - 1];
+    // 两条 user 挨着，说明前一条的回复没留下来（失败或被中断）：把前一条去掉。
+    // 只做这一件事，其余结构原样保留。
+    if (m.role === 'user' && prev && prev.role === 'user') balanced.pop();
+    balanced.push(m);
+  }
+  return balanced;
+
 }
 
 // 通用卡片流式推导发送引擎（支持单卡发送与多模型横向并发推导）
@@ -499,6 +551,8 @@ async function sendCardPrompt(card, text, options = {}) {
         asstMsg.cancelConfirmed = confirmed;
         asstMsg.cancelError = detail;
         paintMessage(asstMsg);
+        // 这个回执也要落盘，否则刷新之后"服务端到底确认没确认取消"就没了
+        sessionController.scheduleSave();
       },
       onEvent(event) {
         if (sessionController.generation !== requestGeneration || activeRequests.get(card.id) !== active || !cards.includes(card)) return;
@@ -529,9 +583,14 @@ async function sendCardPrompt(card, text, options = {}) {
     const isHostConverterError = (error.message && error.message.includes('The model provider could not complete the request'))
       || error.code === 'APP_MODEL_PROVIDER_ERROR';
 
-    // 关键容错：若上游已成功吐出有效正文，但在终态由于宿主校验空思考签名报错，
-    // 平滑判定为已完成，允许继续正常分支追问，绝不把可用回答直接作废！
-    if (parsed.body.trim() && isHostConverterError && error.code !== 'REQUEST_CANCELLED') {
+    // 容错只留给一个已确认的窄场景：宿主校验空思考签名报错。
+    // 以前这里把整个 APP_MODEL_PROVIDER_ERROR 类别都判成成功，
+    // 于是普通的连接失败只要溢出几个字，也会被当成完整回答，
+    // 还会跟着分支一起进下一轮上下文。
+    const looksLikeThinkingSignatureIssue = isHostConverterError
+      && /signature|thinking|reasoning/i.test(error.message || '');
+
+    if (parsed.body.trim() && looksLikeThinkingSignatureIssue && error.code !== 'REQUEST_CANCELLED') {
       asstMsg.failed = false;
       asstMsg.status = 'completed';
       asstMsg.error = '';
@@ -539,6 +598,8 @@ async function sendCardPrompt(card, text, options = {}) {
       asstMsg.failed = true;
       asstMsg.status = error.code === 'REQUEST_CANCELLED' ? 'cancelled' : 'failed';
       asstMsg.error = safeDetail(`${error.code || 'REQUEST_FAILED'}: ${error.message}`);
+      // 已经吐出来的内容留在卡上供人看，但不能冒充完整回答。
+      if (parsed.body.trim()) asstMsg.partial = true;
     }
   } finally {
     if (!isDisposed && sessionController.generation === requestGeneration) asstMsg.streaming = false;
@@ -589,7 +650,14 @@ async function openBattleDialog(card, initialPromptText = '') {
 
 function fitViewportToCluster(clusterCards) {
   if (isDisposed) return;
-  fitViewportToClusterLayout(clusterCards, { viewport, view });
+  // 卡片的 data 高度不一定等于屏幕上的高度（长文档卡会被 CSS 撑开），
+  // 先按 DOM 实测补一次，否则算出来的垂直中心偏高。
+  const measured = clusterCards.map(c => {
+    const el = document.getElementById(`dom-${c.id}`);
+    const h = el?.offsetHeight;
+    return (typeof h === 'number' && h > 0) ? { ...c, height: h } : c;
+  });
+  fitViewportToClusterLayout(measured, { viewport, view });
   updateTransform();
 }
 
@@ -762,11 +830,28 @@ function ensureCardInView(card) {
   }
 }
 
+/**
+ * 新建根卡片的位置。
+ *
+ * 以前是每次只挪 40×60 像素，而卡片本身 340×360，
+ * 连着建几张就叠成一摞，几乎完整盖住前一张。
+ * 改成三列网格，格子比卡片略大，留出拖拽与连线的空间。
+ */
+function rootSlotPosition(index) {
+  const col = (index - 1) % 3;
+  const row = Math.floor((index - 1) / 3);
+  return { x: 80 + col * 400, y: 100 + row * 440 };
+}
+
 function focusCardInViewport(card) {
   if (isDisposed || !card) return;
   const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
   const cardW = card.width || 360;
-  const cardH = 340;
+  // 高度不能写死：长文档卡能到八九百像素，按 340 算出来的中心会明显偏上
+  const domEl = document.getElementById(`dom-${card.id}`);
+  const cardH = (typeof domEl?.offsetHeight === 'number' && domEl.offsetHeight > 0)
+    ? domEl.offsetHeight
+    : (card.height || 360);
   const next = computeCenterOnCard({
     card: { ...card, width: cardW, height: cardH },
     viewportWidth: vpRect.width || 1000,
@@ -864,7 +949,17 @@ function closeCardHierarchy(card) {
       }
     });
   }
-  for (const id of idsToDelete) activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
+  for (const id of idsToDelete) {
+    activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
+    abortDocumentTasksFor(id);
+    // 被关掉的卡也要从多选集合里退出来，否则合并工具条会一直悬着点不动
+    multiSelectedCardIds.delete(id);
+  }
+  // 记住删掉的内容。撤销删除时快照里只有那一刻的旧数据，
+  // 直接拿它重建会把删除前的对话整段丢掉。
+  for (const card of cards) {
+    if (idsToDelete.has(card.id)) rememberRemovedCard(card);
+  }
   cards = cards.filter(c => !idsToDelete.has(c.id));
   if (selectedCardId && idsToDelete.has(selectedCardId)) {
     selectedCardId = null;
@@ -875,8 +970,14 @@ function closeCardHierarchy(card) {
 }
 
 // 渲染所有卡片
+// 输入法合成（拼音选词）期间的重建会把合成会话打断，打的字直接没。
+// 这段时间先记下来，等 compositionend 再补一次。
+let composingInputId = null;
+let pendingRenderCards = false;
+
 function renderCards(preserve = true) {
   if (isDisposed) return;
+  if (composingInputId) { pendingRenderCards = true; return; }
   // Never copy the previous session's DOM state into a newly loaded canvas.
   if (preserve) {
   for (const input of cardsLayer.querySelectorAll?.('.card-input') || []) {
@@ -1056,7 +1157,7 @@ function bindCardEvents(cardEl, card) {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     for (const file of files) {
-      const parsed = await extractDocumentFile(file);
+      const parsed = await extractDocumentFile(file, card.id);
       if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
       if (!parsed.ok) {
         flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
@@ -1115,7 +1216,7 @@ function bindCardEvents(cardEl, card) {
       cancelLater(dragOverTimer);
 
       for (const file of Array.from(e.dataTransfer.files)) {
-        const parsed = await extractDocumentFile(file);
+        const parsed = await extractDocumentFile(file, card.id);
         if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
         if (!parsed.ok) {
           flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
@@ -1165,6 +1266,7 @@ function bindCardEvents(cardEl, card) {
     const onMouseUp = () => {
       stopMove();
       stopUp();
+      stopBlur();
       if (sessionController.generation === dragGeneration) {
         sessionController.scheduleSave();
         if (card.x !== startCardX || card.y !== startCardY) {
@@ -1175,6 +1277,9 @@ function bindCardEvents(cardEl, card) {
 
     const stopMove = listen(window, 'mousemove', onMouseMove);
     const stopUp = listen(window, 'mouseup', onMouseUp);
+    // 鼠标拖出窗口再松手，window 收不到 mouseup，光标就永久卡在移动态。
+    // 窗口失焦同样意味着这次拖拽已经结束。
+    const stopBlur = listen(window, 'blur', onMouseUp);
   });
 
   // 1.1 卡片 2D 自由拖拽缩放（右侧宽、底部高、右下角宽高对角）
@@ -1229,6 +1334,7 @@ function bindCardEvents(cardEl, card) {
         document.body?.classList.remove('is-card-resizing', 'resizing-s', 'resizing-se', 'resizing-ew');
         stopMove();
         stopUp();
+        stopBlur();
         if (sessionController.generation === resizeGeneration) {
           sessionController.scheduleSave();
           if (card.width !== startWidth || card.height !== startHeight) {
@@ -1239,6 +1345,8 @@ function bindCardEvents(cardEl, card) {
 
       const stopMove = listen(window, 'mousemove', onMouseMove);
       const stopUp = listen(window, 'mouseup', onMouseUp);
+      // 同上：拖出窗口松手时也要收尾，否则 is-resizing 粘住、光标一直是双箭头
+      const stopBlur = listen(window, 'blur', onMouseUp);
     });
   };
 
@@ -1379,6 +1487,7 @@ const viewportController = bindViewportController({
 // 全局卡片搜索控制器 (Ctrl+F)
 let searchMatches = [];
 let currentSearchIndex = -1;
+let searchDebounceTimer = null;
 
 function clearSearchHighlights() {
   cards.forEach(c => {
@@ -1388,6 +1497,18 @@ function clearSearchHighlights() {
 }
 
 function focusSearchMatch(index) {
+  // 搜索结果是一份快照，卡片可能在这之后被删掉。
+  // 先剔掉已经不在画布上的，否则会飞到一个不存在的位置，屏幕上啥也看不见。
+  const liveIds = new Set(cards.map(c => c.id));
+  if (searchMatches.some(c => !liveIds.has(c.id))) {
+    const kept = searchMatches.filter(c => liveIds.has(c.id));
+    const anchored = searchMatches[index];
+    searchMatches = kept;
+    if (!kept.length) { currentSearchIndex = -1; searchController?.updateCounter?.(-1, 0); return; }
+    const nextIndex = anchored ? kept.findIndex(c => c.id === anchored.id) : -1;
+    index = nextIndex >= 0 ? nextIndex : Math.min(index, kept.length - 1);
+    currentSearchIndex = index;
+  }
   if (index < 0 || index >= searchMatches.length) return;
   cards.forEach(c => {
     const el = document.getElementById(`dom-${c.id}`);
@@ -1410,19 +1531,27 @@ const searchController = bindSearchBarController({
   btnNext: btnSearchNext,
   btnClose: btnSearchClose,
   onSearch: (query) => {
-    clearSearchHighlights();
-    searchMatches = findCardsByKeyword({ cards, query });
-    if (searchMatches.length > 0) {
-      currentSearchIndex = 0;
-      searchMatches.forEach(c => {
-        const el = document.getElementById(`dom-${c.id}`);
-        el?.classList.add('is-search-match');
-      });
-      focusSearchMatch(0);
-    } else {
-      currentSearchIndex = -1;
-    }
-    searchController.updateCounter(currentSearchIndex, searchMatches.length);
+    // 每敲一个字就全画布扫一遍，卡片一多就明显卡顿。
+    // 空查询例外：清空要立刻见效，不能等那一下。
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    const run = () => {
+      searchDebounceTimer = null;
+      clearSearchHighlights();
+      searchMatches = findCardsByKeyword({ cards, query });
+      if (searchMatches.length > 0) {
+        currentSearchIndex = 0;
+        searchMatches.forEach(c => {
+          const el = document.getElementById(`dom-${c.id}`);
+          el?.classList.add('is-search-match');
+        });
+        focusSearchMatch(0);
+      } else {
+        currentSearchIndex = -1;
+      }
+      searchController.updateCounter(currentSearchIndex, searchMatches.length);
+    };
+    if (!query) { run(); return; }
+    searchDebounceTimer = setTimeout(run, 120);
   },
   onNavigate: (direction) => {
     if (searchMatches.length === 0) return;
@@ -1435,6 +1564,7 @@ const searchController = bindSearchBarController({
     searchController.updateCounter(currentSearchIndex, searchMatches.length);
   },
   onClose: () => {
+    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
     clearSearchHighlights();
     searchMatches = [];
     currentSearchIndex = -1;
@@ -1496,8 +1626,20 @@ function autoTidyLayout() {
 
   renderCards();
   sessionController?.scheduleSave();
-  fitViewportToCluster(cards);
+  // 只框可见的那部分。折叠起来的子孙如果也参与包围盒，
+  // 视野会被压得很小，屏幕上留一大片空白。
+  fitViewportToCluster(visibleCardsForFraming());
   historyManager.recordSnapshot(cards, selectedCardId);
+}
+
+/** 当前真正显示在画布上的卡片（折叠的子分支不算） */
+function visibleCardsForFraming() {
+  try {
+    const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
+    return visibleCards.length ? visibleCards : cards;
+  } catch {
+    return cards;
+  }
 }
 
 listen(btnAutoTidy, 'click', () => {
@@ -1505,6 +1647,12 @@ listen(btnAutoTidy, 'click', () => {
 });
 
 listen(btnResetView, 'click', () => {
+  // 按钮叫「居中视野」，那就真的居中到现有卡片；
+  // 以前是把视图重置成 (60, 40) 的固定原点，卡片一多就跑到视口外面去了。
+  if (cards.length > 0) {
+    fitViewportToCluster(visibleCardsForFraming());
+    return;
+  }
   view.x = 60;
   view.y = 40;
   view.scale = 1;
@@ -1523,8 +1671,7 @@ listen(btnNewRoot, 'click', async () => {
     id: uniqueId('card'),
     parentId: null,
     title: `主线对话 #${rootCount.toString().padStart(2, '0')}`,
-    x: 80 + (rootCount - 1) * 40,
-    y: 100 + (rootCount - 1) * 60,
+    ...rootSlotPosition(rootCount),
     width: 340,
     messages: [
       { role: 'assistant', localOnly: true, text: '全新主线节点已创建。在下方输入问题开启推导。' }
@@ -1539,12 +1686,17 @@ listen(btnNewRoot, 'click', async () => {
 function bufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   const len = bytes.byteLength;
-  let binary = '';
-  const chunk = 8192;
+  // 分块各转各的，再拼字符串。
+  // 原来是先把整个文件拼成一个二进制字符串再 btoa，
+  // 16 MB 的文件在内存里同时躺着原始字节、字符串和 base64 三份，低配环境会直接翻车。
+  // 块长取 3 的倍数，保证每段 base64 都能独立成立、直接首尾相接。
+  const chunk = 8190;
+  let out = '';
   for (let i = 0; i < len; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, len)));
+    const slice = bytes.subarray(i, Math.min(i + chunk, len));
+    out += btoa(String.fromCharCode.apply(null, slice));
   }
-  return btoa(binary);
+  return out;
 }
 
 function formatFileSize(bytes) {
@@ -1554,19 +1706,35 @@ function formatFileSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-async function extractDocumentFile(file) {
+async function extractDocumentFile(file, cardId = null) {
   const cancelled = () => ({ ok: false, cancelled: true, filename: file?.name || '未知文件', stage: 'cancelled', error: '画布任务已失效。' });
   if (!canMutateCanvas() || !file) return cancelled();
   const task = new AbortController();
-  documentTasks.add(task);
+  // 按卡片登记。以前只登记控制器本身，关掉卡片时根本找不到属于它的那个，
+  // 于是卡没了，后台还在分块上传、云端轮询。
+  const key = cardId || null;
+  if (!documentTasks.has(key)) documentTasks.set(key, new Set());
+  documentTasks.get(key).add(task);
   try {
     return await abortable(extractDocumentFileActive(file, task.signal), task.signal);
   } catch (error) {
     if (task.signal.aborted || isDisposed) return cancelled();
     return { ok: false, filename: file.name, stage: 'read', error: safeDetail(error?.message || String(error)) };
   } finally {
-    documentTasks.delete(task);
+    const bucket = documentTasks.get(key);
+    if (bucket) {
+      bucket.delete(task);
+      if (!bucket.size) documentTasks.delete(key);
+    }
   }
+}
+
+/** 取消某张卡片名下所有未完成的解析任务 */
+function abortDocumentTasksFor(cardId) {
+  const bucket = documentTasks.get(cardId);
+  if (!bucket) return;
+  for (const controller of bucket) controller.abort(inactiveError());
+  documentTasks.delete(cardId);
 }
 
 async function extractDocumentFileActive(file, signal) {
@@ -2177,7 +2345,7 @@ async function openBridgeSendDialog() {
     if (box && selected && !box.value.trim()) {
       const lastAssistant = [...(selected.messages || [])].reverse().find((m) => m.role === 'assistant' && m.text);
       const excerpt = lastAssistant?.text ? lastAssistant.text.slice(0, 4000) : (selected.docContent || '').slice(0, 4000);
-      box.value = `> 来自「分叉对话」的梅理，原卡片：${selected.title || '未命名'}\n\n${excerpt}`;
+      box.value = `> 来自「分叉对话」的整理，原卡片：${selected.title || '未命名'}\n\n${excerpt}`;
     }
     if (bridgeSendAttempt) {
       // 关闭后重开不能把不确定的上次投递偷偷变成一个新的动作。
@@ -2305,6 +2473,14 @@ async function pollBridgeIntents() {
 
         // 精准区分：消息级导入（精确匹配 intent.messageId）还是全会话历史导入
         const targetMsg = intent.messageId ? messages.find((m) => m.entryId === intent.messageId) : null;
+        // 带 messageId 却找不到：说明那条消息在预览范围外（更早、或另一条分支）。
+        // 这时不能悄悄退化成"导入整段历史" —— 用户点的是那条消息，
+        // 范围被悄悄放大后，后面的分支会把没打算要的内容一起喂给模型。
+        if (intent.messageId && !targetMsg) {
+          await releaseBridgeClaim(intent.intentId);
+          flashMessage('那条消息不在这次能读到的范围里（可能更早或属于别的分支），没有导入。');
+          continue;
+        }
         let cardTitle = '';
         let text = '';
         let importKind = 'history';
@@ -2357,6 +2533,16 @@ async function pollBridgeIntents() {
         });
 
         if (!imported || !canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); continue; }
+        // 先落盘再 ACK：ACK 一旦发出，这条凭条就没了。
+        // 如果卡片只在内存里、随后的自动保存又因配额或磁盘错误失败，
+        // 就会变成「凭条已消费、内容没存下」的静默丢失。
+        try {
+          await sessionController.flush(true);
+        } catch (saveErr) {
+          await releaseBridgeClaim(intent.intentId);
+          flashMessage(`导入没能落盘（${safeDetail(saveErr?.message || String(saveErr))}），凭条已释放，可以重试。`);
+          continue;
+        }
         await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
           method: 'POST',
           body: JSON.stringify({ claimer: canvasId }),
@@ -2480,8 +2666,9 @@ async function createDocumentCard(file, targetCoord = null) {
     return null;
   }
   const rootCount = cards.filter(c => cardParentIds(c).length === 0).length + 1;
-  const x = targetCoord ? targetCoord.x : (80 + (rootCount - 1) * 40);
-  const y = targetCoord ? targetCoord.y : (100 + (rootCount - 1) * 60);
+  const spot = rootSlotPosition(rootCount);
+  const x = targetCoord ? targetCoord.x : spot.x;
+  const y = targetCoord ? targetCoord.y : spot.y;
 
   const newCard = {
     id: uniqueId('doc'),
@@ -2589,7 +2776,11 @@ function escapeHtml(str) {
   return String(str || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    // 引号必须转：这个函数的结果会进 title="..." / value="..." 这类属性上下文，
+    // 漏掉一个双引号就能闭合属性挂上事件处理器。
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function initialSnapshot() {
@@ -2647,7 +2838,8 @@ function applySnapshot(snapshot) {
   historyManager.recordSnapshot(cards, selectedCardId);
 }
 function cancelSessionRequests(reason) {
-  for (const task of documentTasks) task.abort(inactiveError());
+  for (const bucket of documentTasks.values()) for (const task of bucket) task.abort(inactiveError());
+  documentTasks.clear();
   for (const active of activeRequests.values()) {
     active.message.status = 'cancelled'; active.message.failed = true; active.message.streaming = false;
     active.message.error = `REQUEST_INTERRUPTED: ${reason}，回复未完成。`;
@@ -2734,7 +2926,12 @@ listen(btnDeleteCancel, 'click', () => dismissDeleteConfirmation());
 listen(deleteDialog, 'cancel', event => { event.preventDefault(); dismissDeleteConfirmation(); });
 listen(btnDeleteConfirm, 'click', async event => {
   // A forged channel message or scripted .click() is not deletion consent.
-  if (!event?.isTrusted) return;
+  // 伪造的通道消息或脚本点击不算删除同意。但不能静默退出，
+  // 否则读屏软件和键盘模拟点一次就卡住，界面既不动也不说为什么。
+  if (!event?.isTrusted) {
+    deleteDialogError.textContent = '这次点击未被识别为本人操作，请直接用鼠标或键盘确认。';
+    return;
+  }
   const intent = deleteIntent;
   if (!intent?.record || deleteInProgress) return;
   deleteInProgress = true; btnDeleteConfirm.disabled = btnDeleteCancel.disabled = true;
@@ -2751,12 +2948,29 @@ listen(btnDeleteConfirm, 'click', async event => {
     btnDeleteConfirm.disabled = btnDeleteCancel.disabled = false;
   }
 });
+
+// 合成起止用捕获阶段挂在 document 上，卡片重建后依然有效；
+// 必须走 listen，面板销毁时要能解绑，否则关掉的画布还在收事件。
+listen(document, 'compositionstart', event => {
+  if (event?.target?.classList?.contains?.('card-input')) composingInputId = event.target.id || '';
+}, true);
+listen(document, 'compositionend', () => {
+  composingInputId = null;
+  if (pendingRenderCards && !isDisposed) { pendingRenderCards = false; renderCards(); }
+}, true);
+
 let lastPhase = '';
+let lastNotice = '';
 const sessionStore = createForkSessionStore(hana);
 sessionController = createForkSessionController({
   store: sessionStore, capture: captureSnapshot, apply: applySnapshot, cancelPending: cancelSessionRequests,
   onChange(state) {
     if (isDisposed) return;
+    // 会话控制器只知道"发生了什么"，说不出人话；在这里翻成一句提示
+    if (state.notice && state.notice !== lastNotice) {
+      lastNotice = state.notice;
+      flashMessage(state.notice);
+    }
     sessionStatusEl.textContent = state.error ? `${state.dirty ? '未保存' : '会话操作失败'} · ${safeDetail(state.error)}`
       : !state.ready ? '正在恢复会话…'
       : !state.activeId ? '暂无会话 · 可点击新建会话'

@@ -34,25 +34,34 @@ export function calculateBranchYPositions(parentCard, count, targetX, cards = []
  */
 export function fitViewportToCluster(clusterCards, { viewport, view }) {
   if (!clusterCards || clusterCards.length === 0 || !view) return;
+
+  const cardW = c => (typeof c.width === 'number' && c.width > 0 ? c.width : 340);
+  // 卡片高度以前写死 360，长文档卡和短卡混在一起时，垂直中心就偏了
+  const cardH = c => (typeof c.height === 'number' && c.height > 0 ? c.height : 360);
+
   const minX = Math.min(...clusterCards.map(c => c.x));
-  const maxX = Math.max(...clusterCards.map(c => c.x + (c.width || 340)));
+  const maxX = Math.max(...clusterCards.map(c => c.x + cardW(c)));
   const minY = Math.min(...clusterCards.map(c => c.y));
-  const maxY = Math.max(...clusterCards.map(c => c.y + 360));
+  const maxY = Math.max(...clusterCards.map(c => c.y + cardH(c)));
 
   const padX = 80;
   const padY = 80;
   const clusterWidth = (maxX - minX) + padX * 2;
   const clusterHeight = (maxY - minY) + padY * 2;
+  if (clusterWidth <= 0 || clusterHeight <= 0) return;
 
-  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const vpWidth = vpRect.width || 1000;
-  const vpHeight = vpRect.height || 700;
+  // clientWidth/Height 不含边框与滚动条，跟 translate 的坐标系一致
+  const vpRect = viewport?.getBoundingClientRect?.() || {};
+  const vpWidth = viewport?.clientWidth || vpRect.width || 1000;
+  const vpHeight = viewport?.clientHeight || vpRect.height || 700;
 
-  const targetScale = Math.min(1.0, Math.max(0.45, Math.min(vpWidth / clusterWidth, vpHeight / clusterHeight)));
+  // 下限跟着存储契约走（0.4–2.2），越界会被快照校验打回
+  const targetScale = Math.min(1.0, Math.max(0.4, Math.min(vpWidth / clusterWidth, vpHeight / clusterHeight)));
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
 
   view.scale = Number(targetScale.toFixed(2));
+  // surface 的 transform-origin 是 0 0，所以屏幕上某点 = 卡片坐标 * scale + view.x
   view.x = Math.round(vpWidth / 2 - centerX * view.scale);
   view.y = Math.round(vpHeight / 2 - centerY * view.scale);
 }

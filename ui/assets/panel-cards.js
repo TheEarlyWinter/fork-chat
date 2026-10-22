@@ -3,6 +3,19 @@
  * 画布卡片 DOM 结构组装、尺寸拖拽约束与卡片内部交互组件引擎
  */
 
+/**
+ * 默认转义器：同时处理 & < > " '。
+ * 供未传入 escapeHtml 的调用方兼底，避免默认行为退化成无转义。
+ */
+function defaultEscapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export const MIN_CARD_WIDTH = 340;
 export const MAX_CARD_WIDTH = 720;
 export const MIN_CARD_HEIGHT = 240;
@@ -119,17 +132,61 @@ export function formatCardChainMarkdown(chainCards = [], { title } = {}) {
     lines.push('');
 
     const messages = Array.isArray(card.messages) ? card.messages : [];
-    if (messages.length === 0) {
+
+    // 资料卡的正文本身是内容，不是"附件"。以前只导 messages，导出来的
+    // 链路里那张文档卡是空的，看着像没内容。
+    if (typeof card.docContent === 'string' && card.docContent.trim()) {
+      lines.push('### 资料正文');
+      lines.push('');
+      lines.push(card.docContent.trim());
+      lines.push('');
+    }
+    if (Array.isArray(card.stagedAttachments) && card.stagedAttachments.length) {
+      lines.push('### 附件');
+      lines.push('');
+      card.stagedAttachments.forEach(att => {
+        const label = att?.name || '附件';
+        lines.push(`#### ${label}`);
+        lines.push('');
+        if (typeof att?.content === 'string' && att.content.trim()) {
+          lines.push(att.content.trim());
+        } else {
+          lines.push(`*（仅有文件名，未保存正文）*`);
+        }
+        lines.push('');
+      });
+    }
+
+    if (messages.length === 0 && !(typeof card.docContent === 'string' && card.docContent.trim())) {
       lines.push('*（暂无对话内容）*');
       lines.push('');
     } else {
       messages.forEach(msg => {
         const isUser = msg.role === 'user';
         const roleLabel = isUser ? 'User' : (msg.agentName ? `Assistant (${msg.agentName})` : 'Assistant');
-        lines.push(`### ${roleLabel}`);
+        // 未完成的回答不能冒充完整推导，导出时如实标出来
+        const badges = [];
+        if (msg.status === 'failed') badges.push('失败/未完成');
+        else if (msg.status === 'cancelled') badges.push('已中断');
+        if (msg.partial) badges.push('部分内容');
+        if (msg.localOnly) badges.push('本地提示');
+        lines.push(`### ${roleLabel}${badges.length ? ` · ${badges.join(' / ')}` : ''}`);
         lines.push('');
         lines.push(msg.text ? msg.text.trim() : '');
         lines.push('');
+        if (Array.isArray(msg.attachments) && msg.attachments.length) {
+          msg.attachments.forEach(att => {
+            const label = att?.name || '附件';
+            lines.push(`#### 附件：${label}`);
+            lines.push('');
+            if (typeof att?.content === 'string' && att.content.trim()) {
+              lines.push(att.content.trim());
+            } else {
+              lines.push(`*（仅有文件名，未保存正文）*`);
+            }
+            lines.push('');
+          });
+        }
       });
     }
 
@@ -151,7 +208,7 @@ export function buildCardHtml({
   isMultiSelected = false,
   isBusy = false,
   chainBusy = false,
-  escapeHtml = (s) => String(s || ''),
+  escapeHtml = defaultEscapeHtml,
   messageMarkup = () => '',
   statusText = () => '',
   formatFileSize = (s) => `${s} B`,
@@ -202,6 +259,12 @@ export function buildCardHtml({
     : (card.statusStamp === 'accepted'
       ? '✓'
       : (card.statusStamp === 'rejected' ? '✗' : '☆'));
+
+  const truncatedHtml = card.docContentTruncated
+    ? `<div class="bridge-warn" title="存储上限 ${card.docContentTruncated.kept} 字符">正文超出存储上限，只保留了 ${card.docContentTruncated.kept} / ${card.docContentTruncated.original} 字符</div>`
+    : (card.stagedAttachmentsDropped
+      ? `<div class="bridge-warn">附件过多，有 ${card.stagedAttachmentsDropped} 个没有保存</div>`
+      : '');
 
   const hasChildren = typeof childCount === 'number' && childCount > 0;
   const isCollapsed = Boolean(card.isCollapsed);
@@ -261,6 +324,7 @@ export function buildCardHtml({
       </div>
     </div>
     ${sourceRefHtml}
+    ${truncatedHtml}
 
     <div class="card-body" id="body-${card.id}">
       ${messagesHtml}
