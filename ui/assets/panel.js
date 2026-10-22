@@ -25,6 +25,7 @@ import { createDocumentUi } from './panel-document-ui.js';
 import { createCardGestures } from './panel-card-gestures.js';
 import { createCardEvents } from './panel-card-events.js';
 import { createRenderer } from './panel-renderer.js';
+import { createSearchController } from './panel-search-controller.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
@@ -551,96 +552,30 @@ function bindCardEvents(cardEl, card) {
 }
 
 // 全局卡片搜索控制器 (Ctrl+F)
-let searchMatches = [];
-let currentSearchIndex = -1;
-let searchDebounceTimer = null;
-
-function clearSearchHighlights() {
-  cards.forEach(c => {
-    const el = document.getElementById(`dom-${c.id}`);
-    el?.classList.remove('is-search-match', 'is-search-active');
-  });
-}
-
-function focusSearchMatch(index) {
-  // 搜索结果是一份快照，卡片可能在这之后被删掉。
-  // 先剔掉已经不在画布上的，否则会飞到一个不存在的位置，屏幕上啥也看不见。
-  const liveIds = new Set(cards.map(c => c.id));
-  if (searchMatches.some(c => !liveIds.has(c.id))) {
-    const kept = searchMatches.filter(c => liveIds.has(c.id));
-    const anchored = searchMatches[index];
-    searchMatches = kept;
-    if (!kept.length) { currentSearchIndex = -1; searchController?.updateCounter?.(-1, 0); return; }
-    const nextIndex = anchored ? kept.findIndex(c => c.id === anchored.id) : -1;
-    index = nextIndex >= 0 ? nextIndex : Math.min(index, kept.length - 1);
-    currentSearchIndex = index;
-  }
-  if (index < 0 || index >= searchMatches.length) return;
-  cards.forEach(c => {
-    const el = document.getElementById(`dom-${c.id}`);
-    el?.classList.remove('is-search-active');
-  });
-  const target = searchMatches[index];
-  if (target) {
-    const el = document.getElementById(`dom-${target.id}`);
-    el?.classList.add('is-search-active');
-    selectCard(target.id, false);
-    ensureCardInView(target);
-  }
-}
-
-const searchController = bindSearchBarController({
+const search = createSearchController({
+  getCards: () => cards,
+  getDocumentRef: () => document,
+  getIsDisposed: () => isDisposed,
+  selectCard: (id, focus) => selectCard(id, focus),
+  ensureCardInView: (card) => ensureCardInView(card),
+  findCardsByKeyword: (args) => findCardsByKeyword(args),
+  getNextMatchIndex: (args) => getNextMatchIndex(args),
+  bindSearchBarController: (opts) => bindSearchBarController(opts),
   searchBarEl: canvasSearchBar,
-  inputEl: canvasSearchInput,
+  searchInputEl: canvasSearchInput,
   counterEl: canvasSearchCounter,
   btnPrev: btnSearchPrev,
   btnNext: btnSearchNext,
   btnClose: btnSearchClose,
-  onSearch: (query) => {
-    // 每敲一个字就全画布扫一遍，卡片一多就明显卡顿。
-    // 空查询例外：清空要立刻见效，不能等那一下。
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-    const run = () => {
-      searchDebounceTimer = null;
-      clearSearchHighlights();
-      searchMatches = findCardsByKeyword({ cards, query });
-      if (searchMatches.length > 0) {
-        currentSearchIndex = 0;
-        searchMatches.forEach(c => {
-          const el = document.getElementById(`dom-${c.id}`);
-          el?.classList.add('is-search-match');
-        });
-        focusSearchMatch(0);
-      } else {
-        currentSearchIndex = -1;
-      }
-      searchController.updateCounter(currentSearchIndex, searchMatches.length);
-    };
-    if (!query) { run(); return; }
-    // 记进 panelTimers：面板销毁时要能一起清掉，
-    // 否则关掉画布后这个延时回调还会去摸已经没了的 DOM
-    searchDebounceTimer = setTimeout(run, 120);
-    panelTimers.add(searchDebounceTimer);
-  },
-  onNavigate: (direction) => {
-    if (searchMatches.length === 0) return;
-    currentSearchIndex = getNextMatchIndex({
-      currentIndex: currentSearchIndex,
-      totalCount: searchMatches.length,
-      direction,
-    });
-    focusSearchMatch(currentSearchIndex);
-    searchController.updateCounter(currentSearchIndex, searchMatches.length);
-  },
-  onClose: () => {
-    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); panelTimers.delete(searchDebounceTimer); searchDebounceTimer = null; }
-    clearSearchHighlights();
-    searchMatches = [];
-    currentSearchIndex = -1;
-  },
   listen,
+  setTimeoutRef: (fn, ms) => setTimeout(fn, ms),
+  clearTimeoutRef: (id) => clearTimeout(id),
+  trackTimer: (id) => panelTimers.add(id),
+  untrackTimer: (id) => panelTimers.delete(id),
 });
-
+const searchController = search.controller;
+const clearSearchHighlights = () => search.clearSearchHighlights();
+const focusSearchMatch = (index) => search.focusSearchMatch(index);
 // 全局键盘快捷键
 const unbindKeyboardShortcuts = bindKeyboardShortcuts({
   windowRef: window,
