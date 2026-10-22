@@ -98,6 +98,8 @@ export function createBridgeSend(deps = {}) {
       if (errEl) errEl.textContent = '';
       try {
         const data = await bridgeRequest('/api/bridge/sessions');
+        // 这里保持宽松：字段缺失就当没有会话。抛错会被 open 的 catch 捕获写进错误框，
+        // 反而盖掉更重要的"目标与正文已冻结"提示——那是用户此刻真正要知道的事。
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
         if (sel) {
           sel.innerHTML = sessions
@@ -115,8 +117,10 @@ export function createBridgeSend(deps = {}) {
       const updateMeta = () => {
         if (checkDisposed()) return;
         const box = getEl('bridge-send-text');
-        const currentBlob = BlobRef || (typeof Blob !== 'undefined' ? Blob : null);
-        const byteSize = currentBlob ? new currentBlob([box?.value || '']).size : (box?.value || '').length;
+        // 字节数必须按 UTF-8 真实字节算。拿字符串 length 顶替会把中文和 emoji 算少，
+        // 显示一个偏小的数字比不显示更糟，所以没有 Blob 就干脆不显示。
+        if (!BlobRef) return;
+        const byteSize = new BlobRef([box?.value || '']).size;
         if (meta) meta.textContent = `${byteSize} 字节 / 上限 65536`;
       };
       const box = getEl('bridge-send-text');
@@ -218,7 +222,7 @@ export function createBridgeSend(deps = {}) {
     const dialog = getDialog();
     if (dialog) {
       listenFn(dialog, 'cancel', (event) => {
-        if (bridgeSendBusy) event?.preventDefault?.();
+        if (bridgeSendBusy && event) event.preventDefault();
       });
     }
     const confirmBtn = getEl('btn-bridge-send-confirm');

@@ -20,6 +20,7 @@ import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, f
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
 import { createBridgeSend } from './panel-bridge-send.js';
+import { createBridgeIntents } from './panel-bridge-intents.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
@@ -1445,144 +1446,111 @@ async function loadOutboxList() {
   }
 }
 
-let pollBridgeIntentsBusy = false;
 let bridgeInitialized = false;
-const ownedBridgeClaims = new Set();
-function releaseBridgeClaim(intentId) {
-  if (!ownedBridgeClaims.delete(intentId)) return Promise.resolve();
-  return requestHost(hana, `/api/bridge/intents/${encodeURIComponent(intentId)}/release`, {
-    method: 'POST', body: JSON.stringify({ claimer: canvasId }), keepalive: true,
-  }).catch(() => {});
+
+async function deliverIntent(intent, { preview, messages, generation, release }) {
+  // 精准区分：消息级导入（精确匹配 intent.messageId）还是全会话历史导入
+  const targetMsg = intent.messageId ? messages.find((m) => m.entryId === intent.messageId) : null;
+  // 带 messageId 却找不到：说明那条消息在预览范围外（更早、或另一条分支）。
+  // 这时不能悄悄退化成"导入整段历史" —— 用户点的是那条消息，
+  // 范围被悄悄放大后，后面的分支会把没打算要的内容一起喂给模型。
+  if (intent.messageId && !targetMsg) {
+    await release();
+    flashMessage('那条消息不在这次能读到的范围里（可能更早或属于别的分支），没有导入。');
+    return;
+  }
+  let cardTitle = '';
+  let text = '';
+  let importKind = 'history';
+  let importEntryIds = [];
+  let importedCount = 0;
+
+  if (targetMsg) {
+    importKind = 'message';
+    importEntryIds = [targetMsg.entryId].filter(Boolean);
+    cardTitle = intent.title ? `消息切片 · ${intent.title}` : `消息切片 · ${shortId(intent.sessionId)}`;
+    text = `# ${cardTitle}\n\n> 本体导入快照（单条消息）。只读摘录，不代表原会话仍在同步。\n\n【${targetMsg.role === 'user' ? '用户' : '助手'}】${targetMsg.text}`;
+    importedCount = 1;
+  } else {
+    importKind = 'history';
+    importEntryIds = messages.map((m) => m.entryId).filter(Boolean);
+    cardTitle = intent.title || preview.session?.title || '本体会话';
+    const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
+    text = `# ${cardTitle}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+    importedCount = messages.length;
+  }
+
+  const sourceRef = {
+    version: 1,
+    kind: 'hana-session',
+    sessionId: intent.sessionId,
+    entryIds: importEntryIds,
+    leafId: preview.leafId || null,
+    titleAtImport: intent.title || preview.session?.title || '',
+    importedAt: new Date().toISOString(),
+    contentHash: '',
+    importKind,
+  };
+
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const hashTarget = targetMsg ? `${targetMsg.role}:${targetMsg.text}` : messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
+  for (let i = 0; i < hashTarget.length; i += 1) {
+    const code = hashTarget.charCodeAt(i);
+    h1 = (h1 ^ code) >>> 0;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 = (h2 + code * (i + 1)) >>> 0;
+  }
+  sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+
+  const imported = createBridgeDocCard({
+    title: cardTitle,
+    text,
+    sourceRef,
+    messageCount: importedCount,
+  });
+
+  if (!imported || !canMutateCanvas(generation)) { await release(); return; }
+  // 先落盘再 ACK：ACK 一旦发出，这条凭条就没了。
+  // 如果卡片只在内存里、随后的自动保存又因配额或磁盘错误失败，
+  // 就会变成「凭条已消费、内容没存下」的静默丢失。
+  try {
+    await sessionController.flush(true);
+  } catch (saveErr) {
+    await release();
+    flashMessage(`导入没能落盘（${safeDetail(saveErr?.message || String(saveErr))}），凭条已释放，可以重试。`);
+    return;
+  }
+  await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({ claimer: canvasId }),
+  });
+
+  getOwnedClaims().delete(intent.intentId);
+  const flashDesc = targetMsg ? `单条消息快照` : `《${cardTitle}》（${messages.length} 条记录）`;
+  flashMessage(`已自动从本体导入${flashDesc}到画布。`);
 }
 
-/** 本体那边点的导入请求（右键 / 消息图标）：自动认领并直接铸造成卡片置入画布 */
-async function pollBridgeIntents() {
-  if (!canMutateCanvas() || pollBridgeIntentsBusy) return;
-  const generation = sessionController.generation;
-  pollBridgeIntentsBusy = true;
-  try {
-    const data = await bridgeRequest('/api/bridge/intents');
-    const list = Array.isArray(data?.intents) ? data.intents : [];
-    if (!canMutateCanvas(generation) || !list.length) return;
+const bridgeIntents = createBridgeIntents({
+  hana,
+  requestHost,
+  bridgeRequest: (path, init) => bridgeRequest(path, init),
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  getGeneration: () => sessionController?.generation,
+  getCanvasId: () => canvasId,
+  deliverIntent: (intent, context) => deliverIntent(intent, context),
+});
 
-    for (const intent of list) {
-      if (!canMutateCanvas(generation)) break;
-      if (!intent?.intentId || intent.consumed) continue;
-      // 抢占凭条：使用当前窗口全局唯一的 canvasId 作为 claimer，实现真正的多窗口并发抢占与隔离
-      try {
-        // Observe late claim receipts even after disposal, then release our ownership.
-        const claimed = await requestHost(hana, `/api/bridge/intents/${encodeURIComponent(intent.intentId)}/claim`, {
-          method: 'POST', body: JSON.stringify({ claimer: canvasId }),
-        });
-        await claimed.json();
-        ownedBridgeClaims.add(intent.intentId);
-        if (!canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); break; }
-      } catch {
-        continue;
-      }
+function getOwnedClaims() {
+  return bridgeIntents.getOwnedClaims();
+}
 
-      try {
-        const previewData = await bridgeRequest('/api/bridge/preview', {
-          method: 'POST',
-          body: JSON.stringify({ sessionId: intent.sessionId, kind: 'history', limit: 100 }),
-        });
-        if (!canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); break; }
-        const preview = previewData?.preview;
-        const messages = Array.isArray(preview?.messages) ? preview.messages : [];
-        if (!messages.length) {
-          await releaseBridgeClaim(intent.intentId);
-          continue;
-        }
+function releaseBridgeClaim(intentId) {
+  return bridgeIntents.releaseBridgeClaim(intentId);
+}
 
-        // 精准区分：消息级导入（精确匹配 intent.messageId）还是全会话历史导入
-        const targetMsg = intent.messageId ? messages.find((m) => m.entryId === intent.messageId) : null;
-        // 带 messageId 却找不到：说明那条消息在预览范围外（更早、或另一条分支）。
-        // 这时不能悄悄退化成"导入整段历史" —— 用户点的是那条消息，
-        // 范围被悄悄放大后，后面的分支会把没打算要的内容一起喂给模型。
-        if (intent.messageId && !targetMsg) {
-          await releaseBridgeClaim(intent.intentId);
-          flashMessage('那条消息不在这次能读到的范围里（可能更早或属于别的分支），没有导入。');
-          continue;
-        }
-        let cardTitle = '';
-        let text = '';
-        let importKind = 'history';
-        let importEntryIds = [];
-        let importedCount = 0;
-
-        if (targetMsg) {
-          importKind = 'message';
-          importEntryIds = [targetMsg.entryId].filter(Boolean);
-          cardTitle = intent.title ? `消息切片 · ${intent.title}` : `消息切片 · ${shortId(intent.sessionId)}`;
-          text = `# ${cardTitle}\n\n> 本体导入快照（单条消息）。只读摘录，不代表原会话仍在同步。\n\n【${targetMsg.role === 'user' ? '用户' : '助手'}】${targetMsg.text}`;
-          importedCount = 1;
-        } else {
-          importKind = 'history';
-          importEntryIds = messages.map((m) => m.entryId).filter(Boolean);
-          cardTitle = intent.title || preview.session?.title || '本体会话';
-          const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
-          text = `# ${cardTitle}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
-          importedCount = messages.length;
-        }
-
-        const sourceRef = {
-          version: 1,
-          kind: 'hana-session',
-          sessionId: intent.sessionId,
-          entryIds: importEntryIds,
-          leafId: preview.leafId || null,
-          titleAtImport: intent.title || preview.session?.title || '',
-          importedAt: new Date().toISOString(),
-          contentHash: '',
-          importKind,
-        };
-
-        let h1 = 0x811c9dc5;
-        let h2 = 0x01000193;
-        const hashTarget = targetMsg ? `${targetMsg.role}:${targetMsg.text}` : messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
-        for (let i = 0; i < hashTarget.length; i += 1) {
-          const code = hashTarget.charCodeAt(i);
-          h1 = (h1 ^ code) >>> 0;
-          h1 = Math.imul(h1, 0x01000193) >>> 0;
-          h2 = (h2 + code * (i + 1)) >>> 0;
-        }
-        sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
-
-        const imported = createBridgeDocCard({
-          title: cardTitle,
-          text,
-          sourceRef,
-          messageCount: importedCount,
-        });
-
-        if (!imported || !canMutateCanvas(generation)) { await releaseBridgeClaim(intent.intentId); continue; }
-        // 先落盘再 ACK：ACK 一旦发出，这条凭条就没了。
-        // 如果卡片只在内存里、随后的自动保存又因配额或磁盘错误失败，
-        // 就会变成「凭条已消费、内容没存下」的静默丢失。
-        try {
-          await sessionController.flush(true);
-        } catch (saveErr) {
-          await releaseBridgeClaim(intent.intentId);
-          flashMessage(`导入没能落盘（${safeDetail(saveErr?.message || String(saveErr))}），凭条已释放，可以重试。`);
-          continue;
-        }
-        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
-          method: 'POST',
-          body: JSON.stringify({ claimer: canvasId }),
-        });
-
-        ownedBridgeClaims.delete(intent.intentId);
-        const flashDesc = targetMsg ? `单条消息快照` : `《${cardTitle}》（${messages.length} 条记录）`;
-        flashMessage(`已自动从本体导入${flashDesc}到画布。`);
-      } catch (err) {
-        await releaseBridgeClaim(intent.intentId);
-      }
-    }
-  } catch {
-    // 没权限或宿主不支持都不影响画布
-  } finally {
-    pollBridgeIntentsBusy = false;
-  }
+function pollBridgeIntents() {
+  return bridgeIntents.pollBridgeIntents();
 }
 
 function initSessionBridge() {
@@ -1998,7 +1966,7 @@ function disposePanel() {
   panelTimers.clear();
   bus.onmessage = null;
   try { bus.close?.(); } catch {}
-  for (const intentId of ownedBridgeClaims) void releaseBridgeClaim(intentId);
+  for (const intentId of getOwnedClaims()) void releaseBridgeClaim(intentId);
   btnUseLastPrompt.onclick = null;
   const sendText = document.getElementById('bridge-send-text');
   if (sendText) sendText.oninput = null;
