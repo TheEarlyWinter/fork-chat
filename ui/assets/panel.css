@@ -1174,3 +1174,236 @@ body.is-card-resizing.resizing-se {
   word-break: break-word;
   font-family: var(--font-mono);
 }
+
+/* —— 本体会话桥接 —— */
+
+.bridge-dialog {
+  margin: auto;
+  width: min(640px, calc(100vw - 36px));
+  max-height: calc(100vh - 60px);
+  padding: 22px 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  overflow: auto;
+}
+
+.bridge-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.bridge-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.bridge-dialog-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.bridge-dialog-close {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.bridge-dialog-desc {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  margin-bottom: 14px;
+}
+
+.bridge-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 14px;
+}
+
+.bridge-tab {
+  border: none;
+  background: transparent;
+  padding: 7px 2px;
+  margin-right: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.bridge-tab.is-active {
+  color: var(--text-main);
+  border-bottom-color: var(--text-main);
+}
+
+.bridge-field {
+  margin-bottom: 12px;
+}
+
+.bridge-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+
+.bridge-select,
+.bridge-textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text-main);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.bridge-textarea {
+  resize: vertical;
+  line-height: 1.7;
+}
+
+.bridge-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.bridge-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bridge-radios {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.bridge-radios label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.bridge-preview {
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  background: #fafaf8;
+  margin-bottom: 14px;
+}
+
+.bridge-placeholder {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.bridge-msg {
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.bridge-msg:last-child {
+  border-bottom: none;
+}
+
+.bridge-msg-role {
+  display: inline-block;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 2px;
+  margin-right: 6px;
+  background: #ecebe6;
+  color: var(--text-muted);
+  vertical-align: 1px;
+}
+
+.bridge-msg-role.is-user {
+  background: #e6ecf0;
+  color: #3c5a70;
+}
+
+.bridge-warn {
+  font-size: 11px;
+  color: #8a5a2b;
+  margin-top: 6px;
+}
+
+.bridge-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.bridge-dialog-error {
+  color: #a33a2e;
+  font-size: 11.5px;
+  margin-top: 10px;
+  min-height: 16px;
+}
+
+/* 卡片上的来源徽标 */
+.source-ref-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: #f7f6f2;
+}
+
+.source-ref-badge button {
+  border: none;
+  background: transparent;
+  color: #3c5a70;
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.bridge-outbox-item {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+  font-size: 11.5px;
+}
+
+.bridge-outbox-item:last-child {
+  border-bottom: none;
+}
+
+.bridge-state {
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: #ecebe6;
+}
+
+.bridge-state.is-ok { background: #e3ebdf; color: #3f6b4f; }
+.bridge-state.is-bad { background: #f2e2dd; color: #8c4436; }
+.bridge-state.is-unknown { background: #f0e8d8; color: #8a6a2b; }

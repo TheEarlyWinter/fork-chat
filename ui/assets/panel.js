@@ -987,6 +987,12 @@ function renderCards(preserve = true) {
         </div>
         <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
       </div>
+      ${card.sourceRef ? `
+        <div class="source-ref-badge" title="导入时的会话标题快照：${escapeHtml(card.sourceRef.titleAtImport || '')}">
+          本体导入快照 · ${escapeHtml(card.sourceRef.titleAtImport || card.sourceRef.sessionId)}
+          <button type="button" data-action="jump-source">跳回本体</button>
+        </div>
+      ` : ''}
 
       <div class="card-body" id="body-${card.id}">
         ${card.messages.map(m => `
@@ -1070,6 +1076,16 @@ function bindCardEvents(cardEl, card) {
   const btnSend = cardEl.querySelector('[data-action="send"]');
   const btnBattle = cardEl.querySelector('[data-action="battle"]');
   const btnClose = cardEl.querySelector('[data-action="close"]');
+  // 跳回本体：只定位会话，不声称定位到具体某条消息
+  cardEl.querySelector('[data-action="jump-source"]')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!card.sourceRef?.sessionId) return;
+    try {
+      await hana.sessions.focus({ sessionId: card.sourceRef.sessionId });
+    } catch (err) {
+      flashMessage(`跳回失败：${safeDetail(err?.message || String(err))}`);
+    }
+  });
   const btnBranch = cardEl.querySelector('[data-action="branch"]');
   const btnBranchBattle = cardEl.querySelector('[data-action="branch-battle"]');
   const btnCancel = cardEl.querySelector('[data-action="cancel"]');
@@ -1814,6 +1830,400 @@ function flashMessage(text) {
   el.style.opacity = '1';
   clearTimeout(flashMessage._timer);
   flashMessage._timer = setTimeout(() => { el.style.opacity = '0'; }, 4600);
+}
+
+// ===== 本体会话桥接：导入、来源、回传 =====
+
+const bridgeDialogEl = document.getElementById('bridge-dialog');
+const bridgeSendDialogEl = document.getElementById('bridge-send-dialog');
+const bridgeSessionSelect = document.getElementById('bridge-session-select');
+const bridgeLeafSelect = document.getElementById('bridge-leaf-select');
+const bridgeLeafField = document.getElementById('bridge-leaf-field');
+const bridgePreviewEl = document.getElementById('bridge-preview');
+const bridgeErrorEl = document.getElementById('bridge-dialog-error');
+const bridgeImportBtn = document.getElementById('btn-bridge-import');
+const bridgeActiveHint = document.getElementById('bridge-active-hint');
+
+let bridgePreviewCache = null;
+let bridgeTargetSessionId = null;
+
+async function bridgeRequest(path, init) {
+  const res = await requestHost(hana, path, init);
+  return res.json();
+}
+
+function bridgeFail(el, err) {
+  if (el) el.textContent = safeDetail(err?.message || String(err));
+}
+
+function bridgeClearError() {
+  if (bridgeErrorEl) bridgeErrorEl.textContent = '';
+}
+
+/** 会话尾号：同名会话靠这个区分 */
+function shortId(id) {
+  const text = String(id || '');
+  return text.length > 8 ? text.slice(-6) : text;
+}
+
+async function loadBridgeSessions() {
+  bridgeClearError();
+  if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">正在读取…</option>';
+  try {
+    const data = await bridgeRequest('/api/bridge/sessions');
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    if (!bridgeSessionSelect) return;
+    if (!sessions.length) {
+      bridgeSessionSelect.innerHTML = '<option value="">没有可读的本体会话</option>';
+      return;
+    }
+    bridgeSessionSelect.innerHTML = ['<option value="">请选择…</option>']
+      .concat(sessions.map((s) => {
+        const count = s.messageCount == null ? '' : `（${s.messageCount} 条）`;
+        // 同名会话不光靠标题区分，带上尾号
+        return `<option value="${escapeHtml(s.sessionId)}">${escapeHtml(s.title || s.sessionId)}${count} · ${escapeHtml(shortId(s.sessionId))}</option>`;
+      }))
+      .join('');
+  } catch (err) {
+    if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">读取失败</option>';
+    bridgeFail(bridgeErrorEl, err);
+  }
+}
+
+async function bindActiveSession() {
+  bridgeClearError();
+  try {
+    const active = await hana.sessions.getActive();
+    if (!active?.sessionId) {
+      bridgeActiveHint.textContent = '当前窗口没有选中会话';
+      return;
+    }
+    bridgeTargetSessionId = active.sessionId;
+    bridgeActiveHint.textContent = `已绑定：${active.title || active.sessionId}`;
+    if (bridgeSessionSelect) bridgeSessionSelect.value = active.sessionId;
+  } catch {
+    bridgeActiveHint.textContent = '当前窗口不支持读取本体会话';
+  }
+}
+
+async function runBridgePreview() {
+  bridgeClearError();
+  bridgePreviewCache = null;
+  if (bridgeImportBtn) bridgeImportBtn.disabled = true;
+  const sessionId = bridgeSessionSelect?.value;
+  if (!sessionId) {
+    bridgeFail(bridgeErrorEl, new Error('先选一个会话'));
+    return;
+  }
+  const kind = document.querySelector('input[name="bridge-kind"]:checked')?.value === 'tree-path' ? 'tree-path' : 'history';
+  if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取中…</p>';
+  try {
+    const payload = { sessionId, kind };
+    if (kind === 'tree-path' && bridgeLeafSelect?.value) payload.leafId = bridgeLeafSelect.value;
+    const data = await bridgeRequest('/api/bridge/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const preview = data.preview;
+    bridgePreviewCache = preview;
+
+    if (kind === 'tree-path' && Array.isArray(preview.branches)) {
+      if (bridgeLeafField) bridgeLeafField.hidden = false;
+      if (bridgeLeafSelect) {
+        bridgeLeafSelect.innerHTML = preview.branches
+          .map((b) => `<option value="${escapeHtml(b.leafId)}">${escapeHtml(b.lastText || b.leafId)}（${b.messageCount} 条）</option>`)
+          .join('');
+        if (preview.leafId) bridgeLeafSelect.value = preview.leafId;
+      }
+      if (preview.needsLeafChoice) {
+        bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">这个会话有多个分支，选一个末端再看预览。</p>';
+        return;
+      }
+    }
+
+    const messages = Array.isArray(preview.messages) ? preview.messages : [];
+    if (!messages.length) {
+      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">这段范围里没有可导入的正文。</p>';
+      return;
+    }
+    const rows = messages.map((m) => `
+      <div class="bridge-msg">
+        <span class="bridge-msg-role ${m.role === 'user' ? 'is-user' : ''}">${m.role === 'user' ? '用户' : '助手'}</span>
+        ${escapeHtml(m.text.slice(0, 600))}${m.text.length > 600 ? '…' : ''}
+      </div>
+    `).join('');
+    const warn = [];
+    if (preview.truncated) warn.push(`历史已截断，只读了最近 ${messages.length} 条`);
+    if (preview.droppedCount) warn.push(`${preview.droppedCount} 条不可见条目未导入`);
+    if (preview.status?.unknown) warn.push('运行状态未知');
+    if (preview.status?.isStreaming) warn.push('该会话正在生成');
+    bridgePreviewEl.innerHTML = rows + (warn.length ? `<div class="bridge-warn">${escapeHtml(warn.join('；'))}</div>` : '');
+    if (bridgeImportBtn) bridgeImportBtn.disabled = false;
+  } catch (err) {
+    bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取失败。</p>';
+    bridgeFail(bridgeErrorEl, err);
+  }
+}
+
+/** 导入成一张只读来源资料卡，并写下来源引用便于跳回与去重 */
+function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
+  // 去重只看内容与导入类型：同内容的快照生成两张一模一样的卡没有意义，
+  // 即使两个来源会话标题相同也定位回已有卡片。
+  const existing = cards.find((c) => c.sourceRef
+    && c.sourceRef.contentHash
+    && c.sourceRef.contentHash === sourceRef.contentHash
+    && c.sourceRef.importKind === sourceRef.importKind);
+  if (existing) {
+    selectCard(existing.id, false);
+    const sameSession = existing.sourceRef.sessionId === sourceRef.sessionId;
+    flashMessage(sameSession
+      ? '这段内容已经导入过了，已定位到原卡片。'
+      : `这段内容已作为《${existing.title}》导入过（来源是另一个会话 ${shortId(existing.sourceRef.sessionId)}），没重复建卡。`);
+    return existing;
+  }
+  const rootCount = cards.filter((c) => !c.parentId).length + 1;
+  const newCard = {
+    id: uniqueId('doc'),
+    parentId: null,
+    title,
+    isDoc: true,
+    docContent: text,
+    sourceRef,
+    docMeta: { name: title, size: text.length, extension: '.md', charCount: text.length, lineCount: text.split('\n').length },
+    x: 80 + (rootCount - 1) * 40,
+    y: 100 + (rootCount - 1) * 60,
+    width: 360,
+    messages: [{
+      role: 'assistant',
+      localOnly: true,
+      text: `【本体导入快照】已从本体会话《${title}》导入 ${messageCount} 条正文（${text.length} 字）。\n\n这是只读摘录，不会随原会话变化。点上方徽标可跳回原会话。`,
+      docPreview: text.slice(0, 1500),
+      docMeta: { name: title, size: text.length, lineCount: text.split('\n').length, charCount: text.length },
+    }],
+  };
+  cards.push(newCard);
+  renderCards();
+  sessionController?.scheduleSave();
+  selectCard(newCard.id, false);
+  return newCard;
+}
+
+async function importBridgePreview() {
+  if (!bridgePreviewCache) return;
+  bridgeClearError();
+  const preview = bridgePreviewCache;
+  const messages = Array.isArray(preview.messages) ? preview.messages : [];
+  if (!messages.length) return;
+  const kindUp = document.querySelector('input[name="bridge-kind"]:checked')?.value === 'tree-path' ? 'tree-path' : 'history';
+  const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
+  const text = `# ${preview.session.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+  const sourceRef = {
+    version: 1,
+    kind: 'hana-session',
+    sessionId: preview.session.sessionId,
+    entryIds: messages.map((m) => m.entryId).filter(Boolean),
+    leafId: preview.leafId || null,
+    titleAtImport: preview.session.title || '',
+    importedAt: new Date().toISOString(),
+    contentHash: '',
+    importKind: kindUp === 'tree-path' ? 'tree-path' : 'history',
+  };
+  // 内容哈希用与服务端同一套规则，保证去重键一致
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const payload = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
+  for (let i = 0; i < payload.length; i += 1) {
+    const code = payload.charCodeAt(i);
+    h1 = (h1 ^ code) >>> 0;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 = (h2 + code * (i + 1)) >>> 0;
+  }
+  sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+
+  createBridgeDocCard({
+    title: preview.session.title || '本体会话',
+    text,
+    sourceRef,
+    messageCount: messages.length,
+  });
+  bridgeDialogEl?.close();
+}
+
+async function loadOutboxList() {
+  const box = document.getElementById('bridge-outbox-list');
+  if (!box) return;
+  try {
+    const data = await bridgeRequest('/api/bridge/actions');
+    const actions = Array.isArray(data.actions) ? data.actions : [];
+    if (!actions.length) {
+      box.innerHTML = '<p class="bridge-placeholder">还没有回传记录。</p>';
+      return;
+    }
+    box.innerHTML = actions.map((a) => {
+      const tone = a.state === 'failed' ? 'is-bad' : (a.state === 'unknown' ? 'is-unknown' : 'is-ok');
+      return `<div class="bridge-outbox-item">
+        <span class="bridge-state ${tone}">${escapeHtml(a.state)}</span>
+        ${escapeHtml(a.kind === 'send-text' ? '文本' : 'Markdown 文件')}
+        · ${escapeHtml(a.targetSessionId)}
+        ${a.errorCode ? ` · ${escapeHtml(a.errorCode)}` : ''}
+      </div>`;
+    }).join('');
+  } catch (err) {
+    box.innerHTML = `<p class="bridge-placeholder">${escapeHtml(safeDetail(err?.message || String(err)))}</p>`;
+  }
+}
+
+async function openBridgeSendDialog() {
+  if (!bridgeSendDialogEl) return;
+  const sel = document.getElementById('bridge-send-target');
+  const meta = document.getElementById('bridge-send-meta');
+  const errEl = document.getElementById('bridge-send-error');
+  if (errEl) errEl.textContent = '';
+  try {
+    const data = await bridgeRequest('/api/bridge/sessions');
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    if (sel) {
+      sel.innerHTML = sessions
+        .map((s) => `<option value="${escapeHtml(s.sessionId)}">${escapeHtml(s.title || s.sessionId)} · ${escapeHtml(shortId(s.sessionId))}</option>`)
+        .join('');
+      if (bridgeTargetSessionId && sessions.some((s) => s.sessionId === bridgeTargetSessionId)) {
+        sel.value = bridgeTargetSessionId;
+      }
+    }
+  } catch (err) {
+    if (errEl) errEl.textContent = safeDetail(err?.message || String(err));
+  }
+  const updateMeta = () => {
+    const box = document.getElementById('bridge-send-text');
+    if (meta) meta.textContent = `${new Blob([box?.value || '']).size} 字节 / 上限 65536`;
+  };
+  document.getElementById('bridge-send-text')?.addEventListener('input', updateMeta);
+  // 从当前选中卡片带一段确定性模板，不调模型生成摘要
+  const box = document.getElementById('bridge-send-text');
+  const selected = cards.find((c) => c.id === selectedCardId);
+  if (box && selected && !box.value.trim()) {
+    const lastAssistant = [...(selected.messages || [])].reverse().find((m) => m.role === 'assistant' && m.text);
+    const excerpt = lastAssistant?.text ? lastAssistant.text.slice(0, 4000) : (selected.docContent || '').slice(0, 4000);
+    box.value = `> 来自「分叉对话」的梅理，原卡片：${selected.title || '未命名'}\n\n${excerpt}`;
+  }
+  updateMeta();
+  bridgeSendDialogEl.showModal();
+}
+
+async function confirmBridgeSend() {
+  const sel = document.getElementById('bridge-send-target');
+  const text = document.getElementById('bridge-send-text');
+  const errEl = document.getElementById('bridge-send-error');
+  if (errEl) errEl.textContent = '';
+  try {
+    const prepared = await bridgeRequest('/api/bridge/prepare', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: sel?.value, kind: 'send-text', text: text?.value || '' }),
+    });
+    const result = await bridgeRequest('/api/bridge/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ actionId: prepared.action.actionId }),
+    });
+    bridgeSendDialogEl.close();
+    const state = result.action?.state;
+    if (state === 'accepted' || state === 'delivered') {
+      flashMessage('已投递给本体会话（已接纳 ≠ 助手已回完）。');
+    } else {
+      flashMessage(`投递状态：${state}。结果不确定，不会自动重发。`);
+    }
+  } catch (err) {
+    if (errEl) errEl.textContent = safeDetail(err?.message || String(err));
+  }
+}
+
+/** 本体那边点的导入请求：有就提示一次，具体导入仍要用户确认 */
+async function pollBridgeIntents() {
+  try {
+    const data = await bridgeRequest('/api/bridge/intents');
+    const list = Array.isArray(data.intents) ? data.intents : [];
+    if (!list.length) return;
+    const intent = list[0];
+    if (pollBridgeIntents.lastShown === intent.intentId) return;
+    pollBridgeIntents.lastShown = intent.intentId;
+    flashMessage(`本体有一条导入请求待确认（${intent.title || intent.sessionId}），打开「连接本体」处理。`);
+  } catch {
+    // 没权限或宿主不支持都不影响画布
+  }
+}
+
+function initSessionBridge() {
+  if (!bridgeDialogEl) return;
+  // 裁剪过的宿主（或测试里的假 document）没有这些方法，就让桥接安静退场
+  if (typeof document.querySelectorAll !== 'function') return;
+  document.getElementById('btn-bridge-open')?.addEventListener('click', async () => {
+    bridgeDialogEl.showModal();
+    await loadBridgeSessions();
+    await loadOutboxList();
+  });
+  document.getElementById('btn-bridge-close')?.addEventListener('click', () => bridgeDialogEl.close());
+  document.getElementById('btn-bridge-bind-active')?.addEventListener('click', bindActiveSession);
+  document.getElementById('btn-bridge-preview')?.addEventListener('click', runBridgePreview);
+  bridgeImportBtn?.addEventListener('click', importBridgePreview);
+  document.getElementById('btn-bridge-refresh-outbox')?.addEventListener('click', loadOutboxList);
+
+  bridgeSessionSelect?.addEventListener('change', () => {
+    if (bridgeLeafField) bridgeLeafField.hidden = true;
+    if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">选好会话后点「读取预览」。</p>';
+    if (bridgeImportBtn) bridgeImportBtn.disabled = true;
+    bridgePreviewCache = null;
+  });
+  bridgeLeafSelect?.addEventListener('change', () => {
+    if (bridgeLeafSelect.value) void runBridgePreview();
+  });
+  document.querySelectorAll('input[name="bridge-kind"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      if (bridgeLeafField) bridgeLeafField.hidden = input.value !== 'tree-path';
+      if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">点「读取预览」开始。</p>';
+      if (bridgeImportBtn) bridgeImportBtn.disabled = true;
+      bridgePreviewCache = null;
+    });
+  });
+
+  document.getElementById('bridge-tab-import')?.addEventListener('click', () => {
+    document.getElementById('bridge-pane-import').hidden = false;
+    document.getElementById('bridge-pane-outbox').hidden = true;
+    document.getElementById('bridge-tab-import').classList.add('is-active');
+    document.getElementById('bridge-tab-outbox').classList.remove('is-active');
+  });
+  document.getElementById('bridge-tab-outbox')?.addEventListener('click', () => {
+    document.getElementById('bridge-pane-import').hidden = true;
+    document.getElementById('bridge-pane-outbox').hidden = false;
+    document.getElementById('bridge-tab-outbox').classList.add('is-active');
+    document.getElementById('bridge-tab-import').classList.remove('is-active');
+    void loadOutboxList();
+  });
+
+  document.getElementById('btn-bridge-send')?.addEventListener('click', openBridgeSendDialog);
+  document.getElementById('btn-bridge-send-close')?.addEventListener('click', () => bridgeSendDialogEl?.close());
+  document.getElementById('btn-bridge-send-cancel')?.addEventListener('click', () => bridgeSendDialogEl?.close());
+  document.getElementById('btn-bridge-send-confirm')?.addEventListener('click', confirmBridgeSend);
+
+  void pollBridgeIntents();
+  if (typeof setInterval === 'function') {
+    setInterval(() => { void pollBridgeIntents(); }, 25000);
+  }
+  // 前台会话切换只更新提示，不改已绑定目标
+  try {
+    hana.sessions.onActiveChanged?.((change) => {
+      if (!bridgeActiveHint) return;
+      bridgeActiveHint.textContent = change?.sessionId
+        ? `当前会话：${change.title || change.sessionId}`
+        : '当前窗口没有选中会话';
+    });
+  } catch {
+    // 窗口不支持就静默
+  }
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initSessionBridge, { once: true });
+} else {
+  initSessionBridge();
 }
 
 async function createDocumentCard(file, targetCoord = null) {

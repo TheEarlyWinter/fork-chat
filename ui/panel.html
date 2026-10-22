@@ -20,6 +20,8 @@
       </div>
       <div class="header-right">
         <button class="btn btn-outline" id="btn-import-doc" title="导入本地文档/资料生成独立卡片">+ 导入资料</button>
+        <button class="btn btn-outline" id="btn-bridge-open" title="从 Hana 本体会话导入，或把内容回传过去">连接本体</button>
+        <button class="btn btn-outline" id="btn-bridge-send" title="把当前选中卡片的内容回传到本体会话">回传</button>
         <button class="btn btn-outline" id="btn-auto-tidy" title="自动整理树状排版 (Shift+A)">整理</button>
         <button class="btn btn-outline" id="btn-reset-view">居中视野</button>
         <button class="btn btn-primary" id="btn-new-root">+ 新对话卡片</button>
@@ -66,6 +68,92 @@
       </div>
     </main>
   </div>
+
+  <dialog class="bridge-dialog" id="bridge-dialog" aria-labelledby="bridge-dialog-title">
+    <div class="bridge-dialog-header">
+      <h2 id="bridge-dialog-title">连接本体会话</h2>
+      <button class="bridge-dialog-close" id="btn-bridge-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <p class="bridge-dialog-desc">从本体会话取一段只读快照，导入成资料卡。不会同步、不会自动摘要、不会改动原会话。</p>
+
+    <div class="bridge-tabs" role="tablist">
+      <button class="bridge-tab is-active" id="bridge-tab-import" type="button" role="tab">导入到画布</button>
+      <button class="bridge-tab" id="bridge-tab-outbox" type="button" role="tab">回传记录</button>
+    </div>
+
+    <section id="bridge-pane-import" class="bridge-pane">
+      <div class="bridge-row">
+        <button class="btn btn-outline" id="btn-bridge-bind-active" type="button">绑定当前会话</button>
+        <span class="bridge-hint" id="bridge-active-hint">未绑定</span>
+      </div>
+
+      <div class="bridge-field">
+        <label class="bridge-label" for="bridge-session-select">选择会话</label>
+        <select class="bridge-select" id="bridge-session-select">
+          <option value="">正在读取…</option>
+        </select>
+      </div>
+
+      <div class="bridge-field">
+        <label class="bridge-label">读取范围</label>
+        <div class="bridge-radios">
+          <label><input type="radio" name="bridge-kind" value="history" checked> 最近历史</label>
+          <label><input type="radio" name="bridge-kind" value="tree-path"> 选一条分支</label>
+        </div>
+      </div>
+
+      <div class="bridge-field" id="bridge-leaf-field" hidden>
+        <label class="bridge-label" for="bridge-leaf-select">分支末端</label>
+        <select class="bridge-select" id="bridge-leaf-select"></select>
+      </div>
+
+      <div class="bridge-preview" id="bridge-preview">
+        <p class="bridge-placeholder">选好会话后点「读取预览」。</p>
+      </div>
+
+      <div class="bridge-dialog-actions">
+        <button class="btn btn-outline" id="btn-bridge-preview" type="button">读取预览</button>
+        <button class="btn btn-primary" id="btn-bridge-import" type="button" disabled>导入为资料卡</button>
+      </div>
+    </section>
+
+    <section id="bridge-pane-outbox" class="bridge-pane" hidden>
+      <div class="bridge-preview" id="bridge-outbox-list">
+        <p class="bridge-placeholder">还没有回传记录。</p>
+      </div>
+      <div class="bridge-dialog-actions">
+        <button class="btn btn-outline" id="btn-bridge-refresh-outbox" type="button">刷新</button>
+      </div>
+    </section>
+
+    <div class="bridge-dialog-error" id="bridge-dialog-error" role="alert"></div>
+  </dialog>
+
+  <dialog class="bridge-dialog" id="bridge-send-dialog" aria-labelledby="bridge-send-title">
+    <div class="bridge-dialog-header">
+      <h2 id="bridge-send-title">回传到本体会话</h2>
+      <button class="bridge-dialog-close" id="btn-bridge-send-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <p class="bridge-dialog-desc" id="bridge-send-desc">确认目标与内容后才会真正投递。这一下可能会消耗模型额度。</p>
+
+    <div class="bridge-field">
+      <label class="bridge-label" for="bridge-send-target">目标会话</label>
+      <select class="bridge-select" id="bridge-send-target"></select>
+    </div>
+
+    <div class="bridge-field">
+      <label class="bridge-label" for="bridge-send-text">发送内容</label>
+      <textarea class="bridge-textarea" id="bridge-send-text" rows="8"></textarea>
+      <div class="bridge-hint" id="bridge-send-meta"></div>
+    </div>
+
+    <div class="bridge-dialog-error" id="bridge-send-error" role="alert"></div>
+
+    <div class="bridge-dialog-actions">
+      <button class="btn btn-outline" id="btn-bridge-send-cancel" type="button">取消</button>
+      <button class="btn btn-primary" id="btn-bridge-send-confirm" type="button">确认投递</button>
+    </div>
+  </dialog>
 
   <dialog class="session-delete-dialog" id="delete-session-dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-desc">
     <h2 id="delete-dialog-title">删除会话？</h2>

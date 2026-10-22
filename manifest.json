@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "timeline-reverser",
   "name": "分叉对话",
-  "version": "1.7.2",
+  "version": "1.8.1",
   "minAppVersion": "0.1050.9",
   "description": "打破线性聊天。树状多分支对话与模型推导工作台，支持向右分叉追问、独立回溯与真实模型流式推导。",
   "entry": "index.js",
@@ -14,7 +14,10 @@
     "app/ui.clipboard-write",
     "app/runtime.execute",
     "app/runtime.native",
-    "app/runtime.network"
+    "app/runtime.network",
+    "app/sessions.manage",
+    "app/session.start-turn",
+    "app/session.stage-file"
   ],
   "network": {
     "allowedHosts": [
@@ -51,6 +54,24 @@
           "route": "/function-panel.html"
         }
       }
-    ]
+    ],
+    "ui": {
+      "messageActions": [
+        {
+          "id": "bridge-send-to-fork",
+          "title": "送到分叉对话",
+          "toolName": "bridge_import",
+          "messages": "all"
+        }
+      ],
+      "contextMenus": [
+        {
+          "id": "bridge-import-session",
+          "title": "导入到分叉对话",
+          "surface": "hana/session.contextMenu",
+          "toolName": "bridge_import"
+        }
+      ]
+    }
   }
 }

@@ -5,6 +5,8 @@ import { parseDocumentSmart } from "./lib/parse-router.js";
 import { resolveMineruOptions } from "./lib/mineru-parse.js";
 import { createAppSettings } from "./lib/app-settings.js";
 import { createDocumentService } from "./lib/document-service.js";
+import { createBridgeService } from "./lib/bridge-service.js";
+import { createBridgeIntents } from "./lib/bridge-intents.js";
 import { parserError } from "./lib/parser-network.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -260,6 +262,9 @@ export default defineApp(async (sdk) => {
   const hostFetch = sdk.network?.fetch ? (input, init) => sdk.network.fetch(input, init) : null;
 
   const documents = createDocumentService({ sdk, dataDir, getConfig });
+  /** 本体会话桥：只读优先，投递走 Outbox 的 prepare / confirm */
+  const bridgeIntents = createBridgeIntents({ dataDir, logger: sdk.logger });
+  const bridgeService = createBridgeService({ sdk, dataDir, intents: bridgeIntents });
 
   /** 脱敏 token：只露头尾，够用户认出是哪一把 */
   const maskToken = (token) => {
@@ -349,9 +354,55 @@ export default defineApp(async (sdk) => {
     );
   }
 
+  // 工具：把本体的一条消息/一个会话送进画布（先存凭条，不直接导入）
+  if (sdk.tools?.register) {
+    const reply = (payload) => ({ content: [{ type: "text", text: JSON.stringify(payload) }] });
+    await sdk.tools.register({
+      name: "bridge_import",
+      description: [
+        "把当前这条消息或这个会话登记为「分叉对话」的待确认导入。",
+        "不会发送消息、不会调用模型、不会读隐藏推理。",
+        "调用后用户需在分叉对话里选画布并确认，导入才会发生。",
+      ].join(" "),
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      execute: async (args) => {
+        const context = args?.context || {};
+        const sessionPath = typeof context.sessionPath === "string" ? context.sessionPath : null;
+        if (!sessionPath) return reply({ ok: false, code: "surface_unsupported", error: "当前入口没有会话上下文" });
+        try {
+          // 不信任参数里自报的身份：用宿主给的 sessionPath 反查真实 sessionId
+          const found = await sdk.bus.request("session:get", { sessionPath, scope: "all" });
+          const session = found?.session;
+          const sessionId = session?.sessionId;
+          if (!sessionId) return reply({ ok: false, code: "session_not_addressable", error: "无法确定会话身份" });
+          if (session.ownerPluginId) {
+            return reply({ ok: false, code: "session_not_addressable", error: "不支持把其他应用私有会话导入" });
+          }
+          const intent = await bridgeIntents.enqueue({
+            sessionId,
+            messageId: typeof context.messageId === "string" ? context.messageId : null,
+            title: session.title || session.firstMessage || "",
+            origin: context.messageId ? "message-action" : "context-menu",
+          });
+          return reply({
+            ok: true,
+            intentId: intent.intentId,
+            hint: "导入请求已准备。打开「分叉对话」后可选择画布并确认。",
+          });
+        } catch (err) {
+          const message = String(err?.message || err);
+          const code = /permission|denied|403/i.test(message) ? "permission_missing" : "invalid_request";
+          return reply({ ok: false, code, error: message.slice(0, 200) });
+        }
+      },
+    });
+  }
+
   // 注册 HTTP API 路由：提供模型池与助手列表查询、流式推理接口与取消接口
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
+      documents.register(app);
+      bridgeService.register(app);
       // 1. 获取系统助手列表接口 (包含人格与绑定模型及思考能力契约)
       app.get("/api/agents", async (c) => {
         try {

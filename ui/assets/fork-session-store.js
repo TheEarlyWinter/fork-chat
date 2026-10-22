@@ -322,6 +322,32 @@ export function normalizeForkSnapshot(input) {
         lineCount: typeof rawCard.docMeta.lineCount === 'number' ? rawCard.docMeta.lineCount : 0,
       };
     }
+    // 本体来源引用：可选字段，旧快照没有就照常工作。
+    // 坏数据一律当没有，不让它污染画布；也不持久化 token 或正文。
+    if (rawCard.sourceRef && typeof rawCard.sourceRef === 'object') {
+      const ref = rawCard.sourceRef;
+      const REF_KINDS = new Set(['message', 'history', 'tree-path']);
+      const safeId = (value) => {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return /^[\w.:@~+-]{1,200}$/.test(trimmed) ? trimmed : null;
+      };
+      const sessionId = safeId(ref.sessionId);
+      const importKind = REF_KINDS.has(ref.importKind) ? ref.importKind : null;
+      if (ref.version === 1 && ref.kind === 'hana-session' && sessionId && importKind) {
+        normCard.sourceRef = {
+          version: 1,
+          kind: 'hana-session',
+          sessionId,
+          entryIds: (Array.isArray(ref.entryIds) ? ref.entryIds : []).map(safeId).filter(Boolean).slice(0, 512),
+          leafId: safeId(ref.leafId),
+          titleAtImport: typeof ref.titleAtImport === 'string' ? ref.titleAtImport.slice(0, 300) : '',
+          importedAt: typeof ref.importedAt === 'string' ? ref.importedAt.slice(0, 40) : '',
+          contentHash: typeof ref.contentHash === 'string' ? ref.contentHash.slice(0, 32) : '',
+          importKind,
+        };
+      }
+    }
     if (Array.isArray(rawCard.parentIds)) {
       const validParentIds = [];
       for (const pid of rawCard.parentIds) {
