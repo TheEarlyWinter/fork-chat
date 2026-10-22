@@ -204,8 +204,21 @@ export default defineApp(async (sdk) => {
               });
             } catch {}
           }
+          // 同名模型可能同时挂在两个 provider 下，只按 id 匹配会把 B 的助手配上 A 的思考能力。
+          // 先用规范化 provider/model 精确命中，再退到唯一无歧义的旧 ID。
+          const modelFor = (agent) => {
+            // 规范化后的字段是 id，不是 model。之前写成 m.model 永远匹配不上，
+            // 精确分支形同虚设，最后靠"唯一才用"的兜底碰运气。
+            const exact = models.find(m => m.provider && agent.provider
+              && m.provider === agent.provider && m.id === agent.model);
+            if (exact) return exact;
+            const ref = models.find(m => m.ref === `${agent.provider}/${agent.model}`);
+            if (ref) return ref;
+            const byId = models.filter(m => m.id === agent.model || m.ref === agent.model);
+            return byId.length === 1 ? byId[0] : null;
+          };
           const enrichedAgents = agents.map(a => {
-            const matchedModel = models.find(m => m.id === a.model || m.ref === `${a.provider}/${a.model}` || m.ref === a.model);
+            const matchedModel = modelFor(a);
             return {
               ...a,
               reasoning: matchedModel ? matchedModel.reasoning : Boolean(a.reasoning),
@@ -285,18 +298,21 @@ export default defineApp(async (sdk) => {
       app.post("/api/mineru/settings", async (c) => {
         try {
           const body = await c.req.json();
-          if (typeof body.enabled === "boolean") setConfig("mineruEnabled", body.enabled);
+          const patch = {};
+          if (typeof body.enabled === "boolean") patch.mineruEnabled = body.enabled;
           // 只有传了非空字符串才覆盖 token：留空表示“别动我原来那把”
           if (typeof body.token === "string" && body.token.trim()) {
-            setConfig("mineruApiToken", body.token.trim());
+            patch.mineruApiToken = body.token.trim();
           }
-          if (body.clearToken === true) setConfig("mineruApiToken", "");
-          if (typeof body.modelVersion === "string") setConfig("mineruModelVersion", body.modelVersion);
-          if (typeof body.language === "string") setConfig("mineruLanguage", body.language);
-          if (typeof body.enableFormula === "boolean") setConfig("mineruEnableFormula", body.enableFormula);
-          if (typeof body.enableTable === "boolean") setConfig("mineruEnableTable", body.enableTable);
-          if (typeof body.isOcr === "boolean") setConfig("mineruIsOcr", body.isOcr);
-          if (Number.isFinite(body.timeoutSeconds)) setConfig("mineruTimeoutSeconds", body.timeoutSeconds);
+          if (body.clearToken === true) patch.mineruApiToken = "";
+          if (typeof body.modelVersion === "string") patch.mineruModelVersion = body.modelVersion;
+          if (typeof body.language === "string") patch.mineruLanguage = body.language;
+          if (typeof body.enableFormula === "boolean") patch.mineruEnableFormula = body.enableFormula;
+          if (typeof body.enableTable === "boolean") patch.mineruEnableTable = body.enableTable;
+          if (typeof body.isOcr === "boolean") patch.mineruIsOcr = body.isOcr;
+          if (Number.isFinite(body.timeoutSeconds)) patch.mineruTimeoutSeconds = body.timeoutSeconds;
+          // 一次批量、等落盘。写不进去就如实返回错误，不能回一句"已保存"
+          if (Object.keys(patch).length) await appSettings.setMany(patch);
 
           const options = resolveMineruOptions(getConfig);
           return c.json({

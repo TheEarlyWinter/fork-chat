@@ -129,13 +129,16 @@ export async function createParserService({ dataDir, authToken, generation = 'te
         if (typeof input.options?.token !== 'string' || !input.options.token || input.options.token.length > 8192) throw new Error('缺少有效 MinerU 配置');
         const api = assertMineruUrl(input.options.apiBase || 'https://mineru.net/api/v4');
         if (!(api.hostname === 'mineru.net' || api.hostname.endsWith('.mineru.net'))) throw new Error('API 域名无效');
-        if (!String(input.filename || '').toLowerCase().endsWith('.pdf')) throw new Error('云端只支持 PDF');
+        if (typeof input.filename !== 'string' || !input.filename.toLowerCase().endsWith('.pdf')) throw new Error('云端只支持 PDF');
+        // 先算文件名再开文件：path.basename 对非字符串会抛错，
+        // 而那一步原本发生在文件已打开、名额已占用之后，异常会把名额永久漏掉。
+        const safeFilename = path.basename(input.filename).slice(0, 200);
         const file = await openCheckedFile(uploadsRoot, path.join(uploadsRoot, input.fileId), MAX_FILE);
         if (active >= 2) { await file.handle.close(); return send(res, 429, { ok: false, error: '助手正在忙' }); }
         // Reserve after every await, before starting asynchronous work.
         active++;
         const id = randomUUID().replaceAll('-', '');
-        const job = { id, file, sha256: input.sha256, filename: path.basename(input.filename).slice(0, 200), options: { ...input.options, apiBase: api.href.replace(/\/$/, '') }, controller: new AbortController(), streams: new Set(), status: 'running', stage: '准备解析', startedAt: Date.now(), settled: false };
+        const job = { id, file, sha256: input.sha256, filename: safeFilename, options: { ...input.options, apiBase: api.href.replace(/\/$/, '') }, controller: new AbortController(), streams: new Set(), status: 'running', stage: '准备解析', startedAt: Date.now(), settled: false };
         jobs.set(id, job);
         if (jobs.size > 64) for (const [oldId, old] of jobs) if (old.settled && oldId !== id) {
           jobs.delete(oldId); clearTimeout(old.expiry);
