@@ -14,12 +14,36 @@ import { createCanvasViewController } from './panel-canvas-view.js';
 import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
 import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
+import { createChatEngine } from './panel-chat-engine.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
+
+// 流式引擎：请求、回调、迟到丢弃都在这个模块里，画布只管画。
+// 依赖里凡是"晚于这里才知道是什么"的一律包成箭头，避免模块求值时就把它算死。
+const chatEngine = createChatEngine({
+  hana, runChat, ChatError, safeDetail,
+  activeRequests,
+  uniqueId,
+  getIsDisposed: () => isDisposed,
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  cardParentIds: (card) => cardParentIds(card),
+  buildChainContext: (card) => buildChainContext(card),
+  paintMessage: (message) => paintMessage(message),
+  renderCards: () => renderCards(),
+  getAgentReasoningEffort: (id) => getAgentReasoningEffort(id),
+  getCards: () => cards,
+  getSession: () => sessionController,
+  getAgent: () => currentAgent,
+  getReasoningEffort: () => currentReasoningEffort,
+  scheduleSave: () => sessionController?.scheduleSave(),
+  documentRef: document,
+});
+function chainIsBusy(card) { return chatEngine.chainIsBusy(card); }
+function sendCardPrompt(card, text, options) { return chatEngine.sendCardPrompt(card, text, options); }
 let sessionController = null;
 let deleteIntent = null, deleteInProgress = false;
 const activeRenameCommands = new Set();
@@ -85,17 +109,6 @@ function waitForParser(delay, signal) {
   });
 }
 
-function chainIsBusy(card) {
-  if (!canMutateCanvas()) return true;
-  const seen = new Set();
-  function visit(current) {
-    if (!current || seen.has(current.id)) return false;
-    seen.add(current.id);
-    if (activeRequests.has(current.id)) return true;
-    return cardParentIds(current).some(parentId => visit(cards.find(item => item.id === parentId)));
-  }
-  return visit(card);
-}
 const paintMessage = createMessagePainter({
   documentRef: () => document,
   isDisposed: () => isDisposed,
@@ -344,128 +357,6 @@ historyManager.recordSnapshot(cards, null);
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
 const buildChainContext = targetCard => buildContext({ cards, targetCard });
 
-// 通用卡片流式推导发送引擎（支持单卡发送与多模型横向并发推导）
-async function sendCardPrompt(card, text, options = {}) {
-  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return;
-  const trimmed = typeof text === 'string' ? text.trim() : '';
-  const attachments = Array.isArray(options.attachments) && options.attachments.length > 0 ? options.attachments : undefined;
-  if (!trimmed && !attachments) return;
-
-  const userMsg = {
-    role: 'user',
-    text: trimmed || (attachments ? `[已附带 ${attachments.length} 份文档资料]` : ''),
-    ...(attachments ? { attachments } : {}),
-  };
-  card.messages.push(userMsg);
-
-  // 祖先链路完整上下文
-  const contextMessages = buildChainContext(card);
-
-  // 新增 assistant 占位消息并进入流式态
-  const requestId = uniqueId('req');
-  const requestGeneration = sessionController.generation;
-  const targetAgent = options.agent ? { ...options.agent } : { ...currentAgent };
-  const targetEffort = options.reasoningEffort !== undefined
-    ? options.reasoningEffort
-    : (getAgentReasoningEffort(targetAgent.id) || currentReasoningEffort || null);
-
-  const asstMsg = {
-    role: 'assistant',
-    agentId: targetAgent.id,
-    agentName: targetAgent.name || 'Assistant',
-    requestId,
-    text: '',
-    status: 'waiting',
-    streaming: true,
-  };
-  const active = { requestId, controller: new AbortController(), message: asstMsg, terminalSeen: false };
-  activeRequests.set(card.id, active);
-  card.messages.push(asstMsg);
-  card.scrollToEnd = true;
-  renderCards();
-  sessionController.scheduleSave();
-
-  try {
-    const result = await runChat(hana, {
-      requestId,
-      cardId: card.id,
-      agentId: targetAgent.id,
-      modelRef: targetAgent.provider && targetAgent.model ? `${targetAgent.provider}/${targetAgent.model}` : targetAgent.model,
-      messages: contextMessages,
-      ...(targetEffort && targetEffort !== 'default' ? { reasoningEffort: targetEffort } : {}),
-    }, {
-      signal: active.controller.signal,
-      onWaiting() {
-        if (sessionController.generation === requestGeneration) {
-          asstMsg.waitingLong = true;
-          paintMessage(asstMsg);
-        }
-      },
-      onCancelResult(confirmed, detail) {
-        if (sessionController.generation !== requestGeneration) return;
-        asstMsg.cancelConfirmed = confirmed;
-        asstMsg.cancelError = detail;
-        paintMessage(asstMsg);
-        // 这个回执也要落盘，否则刷新之后"服务端到底确认没确认取消"就没了
-        sessionController.scheduleSave();
-      },
-      onEvent(event) {
-        if (sessionController.generation !== requestGeneration || activeRequests.get(card.id) !== active || !cards.includes(card)) return;
-        if (event.type === 'start') {
-          const effortTag = event.reasoningEffort ? ` · 思考 ${event.reasoningEffort}` : '';
-          asstMsg.modelRef = `${event.provider}/${event.model}${effortTag}`;
-        }
-        if (event.type === 'text-delta') {
-          asstMsg.text += event.delta;
-          if (event.delta) asstMsg.status = 'generating';
-        }
-        if (['done', 'error', 'cancelled'].includes(event.type)) active.terminalSeen = true;
-        paintMessage(asstMsg);
-        sessionController.scheduleSave();
-        const body = document.getElementById(`body-${card.id}`);
-        if (body) body.scrollTop = body.scrollHeight;
-      },
-    });
-    if (sessionController.generation !== requestGeneration) return;
-    asstMsg.text = result.text;
-    if (!parseAssistantOutput(result.text).body.trim()) {
-      throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
-    }
-    asstMsg.status = 'completed';
-  } catch (error) {
-    if (sessionController.generation !== requestGeneration) return;
-    const parsed = parseAssistantOutput(asstMsg.text || '');
-    const isHostConverterError = (error.message && error.message.includes('The model provider could not complete the request'))
-      || error.code === 'APP_MODEL_PROVIDER_ERROR';
-
-    // 容错只留给一个已确认的窄场景：宿主校验空思考签名报错。
-    // 以前这里把整个 APP_MODEL_PROVIDER_ERROR 类别都判成成功，
-    // 于是普通的连接失败只要溢出几个字，也会被当成完整回答，
-    // 还会跟着分支一起进下一轮上下文。
-    const looksLikeThinkingSignatureIssue = isHostConverterError
-      && /signature|thinking|reasoning/i.test(error.message || '');
-
-    if (parsed.body.trim() && looksLikeThinkingSignatureIssue && error.code !== 'REQUEST_CANCELLED') {
-      asstMsg.failed = false;
-      asstMsg.status = 'completed';
-      asstMsg.error = '';
-    } else {
-      asstMsg.failed = true;
-      asstMsg.status = error.code === 'REQUEST_CANCELLED' ? 'cancelled' : 'failed';
-      asstMsg.error = safeDetail(`${error.code || 'REQUEST_FAILED'}: ${error.message}`);
-      // 已经吐出来的内容留在卡上供人看，但不能冒充完整回答。
-      if (parsed.body.trim()) asstMsg.partial = true;
-    }
-  } finally {
-    if (!isDisposed && sessionController.generation === requestGeneration) asstMsg.streaming = false;
-    if (activeRequests.get(card.id) === active) activeRequests.delete(card.id);
-    if (canMutateCanvas(requestGeneration) && cards.includes(card)) {
-      card.scrollToEnd = true;
-      renderCards();
-      sessionController.scheduleSave();
-    }
-  }
-}
 
 // 对比推导弹窗控制器 (Battle Dialog Controller)
 const battleController = bindBattleDialogController({
@@ -2163,13 +2054,7 @@ function applySnapshot(snapshot) {
 }
 function cancelSessionRequests(reason) {
   documentPipeline.abortAll();
-  for (const active of activeRequests.values()) {
-    active.message.status = 'cancelled'; active.message.failed = true; active.message.streaming = false;
-    active.message.error = `REQUEST_INTERRUPTED: ${reason}，回复未完成。`;
-    paintMessage(active.message);
-    active.controller.abort(new ChatError('REQUEST_CANCELLED', reason));
-  }
-  activeRequests.clear();
+  chatEngine.cancelAll(reason);
 }
 function publishSessionState(targetPanelId) {
   if (isDisposed || !sessionController) return;
