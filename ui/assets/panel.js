@@ -21,10 +21,29 @@ import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
 import { createBridgeSend } from './panel-bridge-send.js';
 import { createBridgeIntents } from './panel-bridge-intents.js';
+import { createDocumentUi } from './panel-document-ui.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
+
+// 文档上传的界面动作：选文件、拖进卡片、拖到画布
+const documentUi = createDocumentUi({
+  extractDocumentFile: (file, cardId) => extractDocumentFile(file, cardId),
+  flashMessage: (msg) => flashMessage(msg),
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  getCards: () => cards,
+  getSession: () => sessionController,
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  createDocumentCard: (file, coord) => createDocumentCard(file, coord),
+  getView: () => view,
+  getViewport: () => viewport,
+  getDropIndicator: () => canvasDropIndicator,
+  getIsDisposed: () => isDisposed,
+  later: (fn, ms) => later(fn, ms),
+  cancelLater: (id) => cancelLater(id),
+});
 
 // 流式引擎：请求、回调、迟到丢弃都在这个模块里，画布只管画。
 // 依赖里凡是"晚于这里才知道是什么"的一律包成箭头，避免模块求值时就把它算死。
@@ -616,42 +635,17 @@ function bindCardEvents(cardEl, card) {
   });
 
   on(fileInput, 'change', async (e) => {
-    if (!canMutateCanvas() || !cards.includes(card)) return;
-    const generation = sessionController.generation;
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    for (const file of files) {
-      const parsed = await extractDocumentFile(file, card.id);
-      if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
-      if (!parsed.ok) {
-        flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
-        continue;
-      }
-      card.stagedAttachments = (card.stagedAttachments || []).concat({
-        name: parsed.filename,
-        size: parsed.size,
-        extension: parsed.extension,
-        charCount: parsed.charCount,
-        lineCount: parsed.lineCount,
-        content: parsed.text,
-        preview: parsed.preview,
-      });
-    }
-    fileInput.value = '';
-    renderCards();
-    sessionController?.scheduleSave();
+    fileInput.value = ''; // 先清空，同一个文件再选一次也要能触发 change
+    await documentUi.attachFilesToCard(card, files);
   });
 
   on(stagedBar, 'click', (e) => {
     const removeBtn = e.target.closest('[data-action="remove-attachment"]');
     if (!removeBtn) return;
     e.stopPropagation();
-    const index = parseInt(removeBtn.getAttribute('data-index'), 10);
-    if (!isNaN(index) && Array.isArray(card.stagedAttachments)) {
-      card.stagedAttachments.splice(index, 1);
-      renderCards();
-      sessionController?.scheduleSave();
-    }
+    documentUi.removeStagedAttachment(card, parseInt(removeBtn.getAttribute('data-index'), 10));
   });
 
   // 卡片级文件拖拽支持
@@ -671,34 +665,12 @@ function bindCardEvents(cardEl, card) {
 
   on(cardEl, 'drop', async (e) => {
     if (!canMutateCanvas() || !cards.includes(card)) return;
-    const generation = sessionController.generation;
-    if (e.dataTransfer?.files?.length) {
-      e.preventDefault();
-      e.stopPropagation();
-      cardEl.classList.remove('card-drop-active');
-      if (canvasDropIndicator) canvasDropIndicator.hidden = true;
-      cancelLater(dragOverTimer);
-
-      for (const file of Array.from(e.dataTransfer.files)) {
-        const parsed = await extractDocumentFile(file, card.id);
-        if (!canMutateCanvas(generation) || !cards.includes(card) || parsed.cancelled) return;
-        if (!parsed.ok) {
-          flashMessage(`《${parsed.filename}》没读出来（${parsed.stage || '未知'}阶段）：${parsed.error}`);
-          continue;
-        }
-        card.stagedAttachments = (card.stagedAttachments || []).concat({
-          name: parsed.filename,
-          size: parsed.size,
-          extension: parsed.extension,
-          charCount: parsed.charCount,
-          lineCount: parsed.lineCount,
-          content: parsed.text,
-          preview: parsed.preview,
-        });
-      }
-      renderCards();
-      sessionController?.scheduleSave();
-    }
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cardEl.classList.remove('card-drop-active');
+    documentUi.hideDropIndicator();
+    await documentUi.attachFilesToCard(card, Array.from(e.dataTransfer.files));
   });
 
   // 1. 卡片拖拽移动
@@ -1358,40 +1330,20 @@ listen(viewport, 'dragover', (e) => {
   if (e.dataTransfer?.types?.includes('Files')) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    if (canvasDropIndicator) canvasDropIndicator.hidden = false;
-    cancelLater(dragOverTimer);
-    dragOverTimer = later(() => {
-      if (canvasDropIndicator) canvasDropIndicator.hidden = true;
-    }, 400);
+    documentUi.showDropIndicator();
   }
 });
 
 listen(viewport, 'dragleave', (e) => {
   if (e.target === viewport || e.target === canvasDropIndicator) {
-    if (canvasDropIndicator) canvasDropIndicator.hidden = true;
+    documentUi.hideDropIndicator();
   }
 });
 
 listen(viewport, 'drop', async (e) => {
-  if (e.dataTransfer?.files?.length) {
-    e.preventDefault();
-    if (canvasDropIndicator) canvasDropIndicator.hidden = true;
-    cancelLater(dragOverTimer);
-    const files = Array.from(e.dataTransfer.files);
-    const rect = viewport.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const canvasX = Math.round((mouseX - view.x) / view.scale);
-    const canvasY = Math.round((mouseY - view.y) / view.scale);
-
-    for (let i = 0; i < files.length; i++) {
-      const coord = {
-        x: canvasX + i * 40,
-        y: canvasY + i * 60,
-      };
-      await createDocumentCard(files[i], coord);
-    }
-  }
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  await documentUi.dropFilesOnViewport(Array.from(e.dataTransfer.files), e.clientX, e.clientY);
 });
 
 function initialSnapshot() {
