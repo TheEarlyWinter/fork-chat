@@ -32,6 +32,17 @@ export function formatFileSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+export function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    // 引号必须转：这个函数的结果会进 title="..." / value="..." 这类属性上下文，
+    // 漏掉一个双引号就能闭合属性挂上事件处理器。
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * 第 index 张根卡片的落点（index 从 1 开始）。
  *

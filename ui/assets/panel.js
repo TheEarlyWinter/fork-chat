@@ -10,7 +10,9 @@ import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewpo
 import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js';
 import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
 import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
-import { formatFileSize, rootSlotPosition } from './panel-format.js';
+import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
+import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
+import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
 import { createHistoryManager } from './panel-history.js';
@@ -82,15 +84,6 @@ function waitForParser(delay, signal) {
   });
 }
 
-function cardParentIds(card) {
-  return Array.from(new Set([
-    ...(card?.parentId ? [card.parentId] : []),
-    ...(Array.isArray(card?.parentIds) ? card.parentIds : []),
-  ]));
-}
-function cardHasParent(card, parentId) {
-  return cardParentIds(card).includes(parentId);
-}
 function chainIsBusy(card) {
   if (!canMutateCanvas()) return true;
   const seen = new Set();
@@ -102,70 +95,10 @@ function chainIsBusy(card) {
   }
   return visit(card);
 }
-function statusText(message) {
-  if (!message.requestId) return '';
-  const labels = { waiting: message.waitingLong ? '仍在等待模型响应，可取消' : '等待模型响应…', generating: '生成中…', completed: '已完成', cancelled: '已停止接收', failed: '失败' };
-  const error = message.error ? ` · ${message.error}` : '';
-  const cancellation = message.cancelConfirmed === false && ['cancelled', 'failed'].includes(message.status) ? ` · 服务端取消未确认${message.cancelError ? `：${message.cancelError}` : ''}` : '';
-  return `${labels[message.status] || '等待'}${error}${cancellation} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
-}
-// message.text remains the raw model reply, including explicit mood tags.
-// Presentation is a projection only: never execute generated HTML or rewrite personas.
-function outputFor(message) {
-  return message.role === 'assistant' && !message.localOnly
-    ? parseAssistantOutput(message.text || '', { streaming: Boolean(message.streaming) })
-    : { body: message.text || '', blocks: [] };
-}
-function asidesText(output, message) {
-  return output.blocks.map(block => {
-    const label = { mood: '心境', pulse: '心绪', reflect: '沉思' }[block.type] || '心境';
-    const state = block.closed ? '' : message.streaming ? ' · 生成中' : ' · 未闭合';
-    return `${label}${state}\n${block.text}`;
-  }).join('\n\n');
-}
-function messageMarkup(message) {
-  const output = outputFor(message);
-  const replyId = message.requestId ? `id="reply-${message.requestId}"` : '';
-  const bubble = `<div class="msg-bubble" ${replyId} ${output.body.trim() ? '' : 'hidden'}>${escapeHtml(output.body)}</div>`;
-  const docPreviewHtml = message.docPreview ? `
-    <details class="doc-content-preview">
-      <summary>查看文档内容提取预览 (${message.docMeta?.lineCount || 0} 行 · ${message.docMeta?.charCount || 0} 字)</summary>
-      <pre class="doc-content-body">${escapeHtml(message.docPreview)}</pre>
-    </details>
-  ` : '';
-  const attachmentsHtml = Array.isArray(message.attachments) && message.attachments.length > 0 ? `
-    <div class="msg-attachments-list">
-      ${message.attachments.map(att => `
-        <details class="msg-attachment-item">
-          <summary class="msg-attachment-header">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-            <span class="msg-attachment-name">${escapeHtml(att.name)}</span>
-            <span class="msg-attachment-meta">${formatFileSize(att.size)} · ${att.charCount || 0} 字</span>
-          </summary>
-          <pre class="msg-attachment-preview">${escapeHtml(att.preview || att.content?.slice(0, 1500) || '')}</pre>
-        </details>
-      `).join('')}
-    </div>
-  ` : '';
-  if (!message.requestId || message.role !== 'assistant') return `${attachmentsHtml}${bubble}${docPreviewHtml}`;
-  return `${attachmentsHtml}${bubble}${docPreviewHtml}
-    <details class="assistant-asides" id="asides-${message.requestId}" ${message.asidesOpen ? 'open' : ''} ${output.blocks.length ? '' : 'hidden'}>
-      <summary id="asides-toggle-${message.requestId}">心境 / 沉思</summary>
-      <div class="assistant-asides-text" id="asides-text-${message.requestId}">${escapeHtml(asidesText(output, message))}</div>
-    </details>`;
-}
-function paintMessage(message) {
-  if (isDisposed) return;
-  const output = outputFor(message);
-  const bubble = document.getElementById(`reply-${message.requestId}`);
-  if (bubble) { bubble.textContent = output.body; bubble.hidden = !output.body.trim(); }
-  const asides = document.getElementById(`asides-${message.requestId}`);
-  if (asides) asides.hidden = output.blocks.length === 0;
-  const asideText = document.getElementById(`asides-text-${message.requestId}`);
-  if (asideText) asideText.textContent = asidesText(output, message);
-  const status = document.getElementById(`status-${message.requestId}`);
-  if (status) status.textContent = statusText(message);
-}
+const paintMessage = createMessagePainter({
+  documentRef: () => document,
+  isDisposed: () => isDisposed,
+});
 
 // 画布视图状态
 const view = {
@@ -428,66 +361,7 @@ async function loadAvailableAgents() {
 }
 
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
-function buildChainContext(targetCard) {
-  const chain = [];
-  const added = new Set();
-  const visiting = new Set();
-  function visit(card) {
-    if (!card || added.has(card.id)) return;
-    if (visiting.has(card.id)) return;
-    visiting.add(card.id);
-    for (const parentId of cardParentIds(card)) {
-      visit(cards.find(item => item.id === parentId));
-    }
-    visiting.delete(card.id);
-    added.add(card.id);
-    chain.push(card);
-  }
-  visit(targetCard);
-  const msgs = [];
-  chain.forEach(c => {
-    if (c.isDoc && c.docContent) {
-      msgs.push({
-        role: 'user',
-        content: `【前置参考资料：《${c.title}》】\n${c.docContent}`,
-      });
-      msgs.push({
-        role: 'assistant',
-        content: `已阅读并完全解析前置资料《${c.title}》。将以此文档为事实基座回答后续分析推导。`,
-      });
-    }
-    c.messages.forEach(m => {
-      if (!m.text && (!m.attachments || m.attachments.length === 0)) return;
-      if (m.localOnly || m.streaming || m.failed || (m.status && m.status !== 'completed')) return;
-
-      let content = outputFor(m).body;
-      if (m.role === 'user' && Array.isArray(m.attachments) && m.attachments.length > 0) {
-        const attSections = m.attachments.map(att =>
-          `【附件资料：《${att.name}》】\n${att.content || ''}`
-        ).join('\n\n');
-        content = attSections ? `${attSections}\n\n${content}` : content;
-      }
-
-      msgs.push({
-        role: m.role,
-        content,
-      });
-    });
-  });
-  // 收尾：失败的助手回复被剔掉后，它对应的那条提问也不能留着。
-  // 否则同一张卡里重试时会拼出两条连续的 user 消息，
-  // 严格校验轮次的模型接口会直接 400，这张卡就永远发不出去了。
-  const balanced = [];
-  for (const m of msgs) {
-    const prev = balanced[balanced.length - 1];
-    // 两条 user 挨着，说明前一条的回复没留下来（失败或被中断）：把前一条去掉。
-    // 只做这一件事，其余结构原样保留。
-    if (m.role === 'user' && prev && prev.role === 'user') balanced.pop();
-    balanced.push(m);
-  }
-  return balanced;
-
-}
+const buildChainContext = targetCard => buildContext({ cards, targetCard });
 
 // 通用卡片流式推导发送引擎（支持单卡发送与多模型横向并发推导）
 async function sendCardPrompt(card, text, options = {}) {
@@ -2560,17 +2434,6 @@ listen(viewport, 'drop', async (e) => {
     }
   }
 });
-
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    // 引号必须转：这个函数的结果会进 title="..." / value="..." 这类属性上下文，
-    // 漏掉一个双引号就能闭合属性挂上事件处理器。
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 function initialSnapshot() {
   return {
