@@ -15,7 +15,8 @@ import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter 
 import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
-import { createHistoryManager } from './panel-history.js';
+import { createHistoryController } from './panel-history-controller.js';
+import { createCanvasActions } from './panel-canvas-actions.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
@@ -131,54 +132,6 @@ function initialCards() { return [
 let cards = initialCards();
 let selectedCardId = null;
 let isSpacePressed = false;
-/**
- * 最近被删除的卡片内容。
- * 撤销删除时优先从这里取，而不是用布局快照里那份可能是很久以前的副本。
- * 有界，超出就丢最老的。
- */
-const removedCardArchive = new Map();
-function rememberRemovedCard(card) {
-  removedCardArchive.set(card.id, JSON.parse(JSON.stringify(card)));
-  while (removedCardArchive.size > 30) {
-    removedCardArchive.delete(removedCardArchive.keys().next().value);
-  }
-}
-
-const historyManager = createHistoryManager({
-  maxDepth: 30,
-  onRestore: (restoredCards, restoredSelectedId) => {
-    if (isDisposed) return;
-    // 布局撤销只回填几何与结构字段。
-    // 业务内容（messages、docContent、附件、标记）一律以现存卡为准，
-    // 否则一次撤销就会把旧快照里的空消息数组盖回去，连之后的问答一起吐掉。
-    // statusStamp 也要在这里：盖戳本身会被 recordSnapshot，撤销时却回填不到，
-    // 点了盖戳再 Ctrl+Z 就变成什么都没发生。
-    const LIVE_KEYS = ['x', 'y', 'width', 'height', 'isCollapsed', 'zIndex', 'parentId', 'parentIds', 'statusStamp'];
-    const liveById = new Map((cards || []).map(c => [c.id, c]));
-    const merged = [];
-    for (const snap of restoredCards) {
-      const live = liveById.get(snap.id);
-      if (!live) {
-        // 快照里有、现在没有：这张卡是被删掉的。
-        // 先用删除时留档的完整内容，实在没有才退回快照。
-        const remembered = removedCardArchive.get(snap.id);
-        merged.push(remembered ? { ...remembered } : snap);
-        continue;
-      }
-      for (const key of LIVE_KEYS) {
-        if (snap[key] !== undefined) live[key] = snap[key];
-      }
-      liveById.delete(snap.id);
-      merged.push(live);
-    }
-    cards = merged;
-    selectedCardId = restoredSelectedId && cards.some(c => c.id === restoredSelectedId) ? restoredSelectedId : null;
-    renderCards();
-    renderConnectors();
-    sessionController?.scheduleSave();
-  },
-});
-historyManager.recordSnapshot(cards, null);
 
 // DOM 元素引用
 const viewport = document.getElementById('viewport');
@@ -336,6 +289,57 @@ const focusCardInViewport = card => canvasViewController.focusCardInViewport(car
 const navigateCardFocus = direction => canvasViewController.navigateCardFocus(direction);
 const autoTidyLayout = () => canvasViewController.autoTidyLayout();
 const visibleCardsForFraming = () => canvasViewController.visibleCardsForFraming();
+
+// 画布卡片结构修改动作控制器 (Canvas Actions)
+const canvasActions = createCanvasActions({
+  getCards: () => cards,
+  setCards: next => { cards = next; },
+  getSelectedCardId: () => selectedCardId,
+  setSelectedCardId: id => { selectedCardId = id; },
+  multiSelectedCardIds,
+  canMutateCanvas: () => canMutateCanvas(),
+  chainIsBusy: card => chainIsBusy(card),
+  isBusy: () => Boolean(!sessionController?.state.ready || sessionController?.state.busy),
+  isModalOpen: () => Boolean(battleDialog?.open || deleteDialog?.open || bridgeDialogEl?.open || bridgeSendDialogEl?.open),
+  abortActiveRequest: id => {
+    activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
+  },
+  abortDocumentTasksFor: id => abortDocumentTasksFor(id),
+  calculateBranchYPositions: (parent, count, targetX) => calculateBranchYPositions(parent, count, targetX),
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (c, sId) => historyManager?.recordSnapshot(c, sId),
+  selectCard: (id, focus) => selectCard(id, focus),
+  ensureCardInView: card => ensureCardInView(card),
+  focusCardInViewport: card => focusCardInViewport(card),
+  flashMessage: msg => flashMessage(msg),
+  getSessionController: () => sessionController,
+  initialSnapshot: () => initialSnapshot(),
+  uniqueId,
+  isDisposed: () => isDisposed,
+});
+
+const rememberRemovedCard = card => canvasActions.rememberRemovedCard(card);
+const removedCardArchive = canvasActions.removedCardArchive;
+const createRootCard = () => canvasActions.createRootCard();
+const createBranchCard = (card, opts) => canvasActions.createBranchCard(card, opts);
+const closeCardHierarchy = card => canvasActions.closeCardHierarchy(card);
+const createBridgeDocCard = opts => canvasActions.createBridgeDocCard(opts);
+
+// 画布历史撤销与重做控制器 (History Controller)
+const historyManager = createHistoryController({
+  getCards: () => cards,
+  setCards: next => { cards = next; },
+  getSelectedCardId: () => selectedCardId,
+  setSelectedCardId: id => { selectedCardId = id; },
+  getRemovedCardArchive: () => canvasActions.removedCardArchive,
+  renderCards: () => renderCards(),
+  renderConnectors: () => renderConnectors(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  isDisposed: () => isDisposed,
+  maxDepth: 30,
+});
+historyManager.recordSnapshot(cards, null);
 
 // 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
 const buildChainContext = targetCard => buildContext({ cards, targetCard });
@@ -626,89 +630,6 @@ async function createMergeCardFromSelected() {
   const prompt = synthesizeMergePrompt(selectedCards);
   void sendCardPrompt(mergeCard, prompt);
   return mergeCard;
-}
-
-function createBranchCard(card, { autoFocus = true } = {}) {
-  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return null;
-  const existingChildren = cards.filter(c => cardHasParent(c, card.id));
-  const branchIndex = existingChildren.length + 1;
-  const newId = uniqueId('branch');
-
-  const lastMessage = card.messages.filter(message => !message.failed && !message.localOnly && (!message.status || message.status === 'completed')).at(-1);
-  const lastMsg = lastMessage ? outputFor(lastMessage).body.trim() || '父级卡片' : '父级卡片';
-  const snippet = lastMsg.length > 20 ? lastMsg.slice(0, 20) + '...' : lastMsg;
-
-  const targetX = card.x + (card.width || 340) + 120;
-  const yPositions = calculateBranchYPositions(card, 1, targetX);
-
-  const isDocParent = Boolean(card.isDoc);
-  const branchTitle = isDocParent
-    ? `分析 #${branchIndex} (${card.title.slice(0, 10)})`
-    : `追问 #${branchIndex} (${card.title.split(' ')[0]})`;
-
-  const initText = isDocParent
-    ? `【承袭前置资料】\n已承袭《${card.title}》（${formatFileSize(card.docMeta?.size || 0)}）作为推导背景。\n你可以在此提出专项分析问题，绝不污染源文档。`
-    : `【承袭前置上下文】\n已从「${card.title}」成功拉出新分支。\n前置结论锚点：“${snippet}”\n你可以在此提出分支问题，绝不污染父卡片。`;
-
-  const newCard = {
-    id: newId,
-    parentId: card.id,
-    title: branchTitle,
-    x: targetX,
-    y: yPositions[0],
-    width: 340,
-    messages: [
-      {
-        role: 'assistant',
-        localOnly: true,
-        text: initText,
-      }
-    ]
-  };
-
-  cards.push(newCard);
-  renderCards();
-  sessionController.scheduleSave();
-  historyManager.recordSnapshot(cards, newCard.id);
-
-  selectCard(newCard.id, autoFocus);
-  ensureCardInView(newCard);
-
-  return newCard;
-}
-
-function closeCardHierarchy(card) {
-  if (isDisposed || !sessionController?.state.ready || sessionController.state.busy) return;
-  if (battleDialog?.open || deleteDialog?.open || bridgeDialogEl?.open || bridgeSendDialogEl?.open) return;
-  const idsToDelete = new Set([card.id]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    cards.forEach(c => {
-      if (cardParentIds(c).some(parentId => idsToDelete.has(parentId)) && !idsToDelete.has(c.id)) {
-        idsToDelete.add(c.id);
-        changed = true;
-      }
-    });
-  }
-  for (const id of idsToDelete) {
-    activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
-    abortDocumentTasksFor(id);
-    // 被关掉的卡也要从多选集合里退出来，否则合并工具条会一直悬着点不动
-    multiSelectedCardIds.delete(id);
-  }
-  // 记住删掉的内容。撤销删除时快照里只有那一刻的旧数据，
-  // 直接拿它重建会把删除前的对话整段丢掉。
-  for (const card of cards) {
-    if (idsToDelete.has(card.id)) rememberRemovedCard(card);
-  }
-  cards = cards.filter(c => !idsToDelete.has(c.id));
-  if (selectedCardId && idsToDelete.has(selectedCardId)) {
-    selectedCardId = null;
-  }
-  renderCards();
-  sessionController.scheduleSave();
-  historyManager.recordSnapshot(cards, selectedCardId);
 }
 
 // 渲染所有卡片
@@ -1352,26 +1273,7 @@ listen(btnResetView, 'click', () => {
 
 // 新建主线根卡片
 listen(btnNewRoot, 'click', async () => {
-  if (!canMutateCanvas()) return;
-  if (!sessionController.state.activeId) {
-    await sessionController.newSession(initialSnapshot());
-    return;
-  }
-  const rootCount = cards.filter(c => cardParentIds(c).length === 0).length + 1;
-  const newRoot = {
-    id: uniqueId('card'),
-    parentId: null,
-    title: `主线对话 #${rootCount.toString().padStart(2, '0')}`,
-    ...rootSlotPosition(rootCount),
-    width: 340,
-    messages: [
-      { role: 'assistant', localOnly: true, text: '全新主线节点已创建。在下方输入问题开启推导。' }
-    ]
-  };
-  cards.push(newRoot);
-  renderCards();
-  sessionController.scheduleSave();
-  historyManager.recordSnapshot(cards, newRoot.id);
+  await createRootCard();
 });
 
 // 文档解析管线的宿主依赖：文件读取、上传、进度提示都在那个模块里
@@ -1629,60 +1531,6 @@ async function runBridgePreview() {
     bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取快照失败。</p>';
     bridgeFail(bridgeErrorEl, err);
   }
-}
-
-/** 导入成一张只读来源资料卡，并写下来源引用便于跳回与去重 */
-function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
-  if (!canMutateCanvas()) return null;
-  // 去重只看内容与导入类型：同内容的快照生成两张一模一样的卡没有意义，
-  // 即使两个来源会话标题相同也定位回已有卡片。
-  const existing = cards.find((c) => c.sourceRef
-    && c.sourceRef.contentHash
-    && c.sourceRef.contentHash === sourceRef.contentHash
-    && c.sourceRef.importKind === sourceRef.importKind);
-  if (existing) {
-    selectCard(existing.id, false);
-    focusCardInViewport(existing);
-    const sameSession = existing.sourceRef.sessionId === sourceRef.sessionId;
-    flashMessage(sameSession
-      ? '这段内容已经导入过了，已定位到原卡片。'
-      : `这段内容已作为《${existing.title}》导入过（来源是另一个会话 ${shortId(existing.sourceRef.sessionId)}），没重复建卡。`);
-    return existing;
-  }
-
-  let posX = 80;
-  let posY = 100;
-  if (cards.length > 0) {
-    const maxY = Math.max(...cards.map((c) => c.y));
-    posY = maxY + 420;
-  }
-
-  const newCard = {
-    id: uniqueId('doc'),
-    parentId: null,
-    title,
-    isDoc: true,
-    docContent: text,
-    sourceRef,
-    docMeta: { name: title, size: text.length, extension: '.md', charCount: text.length, lineCount: text.split('\n').length },
-    x: posX,
-    y: posY,
-    width: 360,
-    messages: [{
-      role: 'assistant',
-      localOnly: true,
-      text: `【本体导入快照】已从本体会话《${title}》导入 ${messageCount} 条正文（${text.length} 字）。\n\n这是只读摘录，不会随原会话变化。点上方徽标可跳回原会话。`,
-      docPreview: text.length > 50000 ? text.slice(0, 50000) : text,
-      docMeta: { name: title, size: text.length, lineCount: text.split('\n').length, charCount: text.length },
-    }],
-  };
-  cards.push(newCard);
-  renderCards();
-  sessionController?.scheduleSave();
-  selectCard(newCard.id, false);
-  focusCardInViewport(newCard);
-  historyManager.recordSnapshot(cards, newCard.id);
-  return newCard;
 }
 
 async function importBridgePreview() {
@@ -2299,7 +2147,7 @@ function applySnapshot(snapshot) {
   // 换了会话就丢掉上一份删除留档。
   // 卡片 id 在新会话里会从头复用（card-1、card-2……），
   // 留着旧留档，撤销时可能把别的会话的内容塞进本会话的同 id 卡片。
-  removedCardArchive.clear();
+  canvasActions.clearRemovedCardArchive();
   if (!snapshot) {
     cards = [];
     view.x = 60; view.y = 40; view.scale = 1; view.isDragging = false;
