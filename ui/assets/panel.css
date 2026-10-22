@@ -250,6 +250,23 @@ html, body {
   box-shadow: 0 0 0 1px #18181b, 0 4px 12px rgba(0, 0, 0, 0.06);
 }
 
+@keyframes imported-card-pulse {
+  0% {
+    box-shadow: 0 0 0 4px rgba(24, 24, 27, 0.25), 0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(24, 24, 27, 0.12), 0 12px 30px rgba(0, 0, 0, 0.16);
+  }
+  100% {
+    box-shadow: 0 0 0 1px #18181b, 0 4px 12px rgba(0, 0, 0, 0.06);
+  }
+}
+
+.chat-card.is-imported-pulse {
+  animation: imported-card-pulse 1.8s ease-out;
+  border-color: #18181b !important;
+}
+
 .chat-card:hover {
   border-color: #a1a1aa;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);

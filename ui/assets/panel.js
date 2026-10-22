@@ -820,6 +820,27 @@ function ensureCardInView(card) {
   if (adjust) updateTransform();
 }
 
+function focusCardInViewport(card) {
+  if (!card) return;
+  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
+  const vpWidth = vpRect.width || 1000;
+  const vpHeight = vpRect.height || 700;
+  const cardW = card.width || 360;
+  const cardH = 340;
+
+  view.x = Math.round(vpWidth / 2 - (card.x + cardW / 2) * view.scale);
+  view.y = Math.round(vpHeight / 2 - (card.y + cardH / 2) * view.scale);
+  updateTransform();
+
+  const el = document.getElementById(`dom-${card.id}`);
+  if (el) {
+    el.classList.add('is-imported-pulse');
+    setTimeout(() => {
+      el.classList.remove('is-imported-pulse');
+    }, 2000);
+  }
+}
+
 function navigateCardFocus(direction) {
   const current = cards.find(c => c.id === selectedCardId) || cards[0];
   if (!current) return;
@@ -1894,24 +1915,42 @@ function shortId(id) {
   return text.length > 8 ? text.slice(-6) : text;
 }
 
-async function loadBridgeSessions() {
+async function loadBridgeSessions(preferSessionId = null) {
   bridgeClearError();
   if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">正在读取…</option>';
   try {
-    const data = await bridgeRequest('/api/bridge/sessions');
-    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const [data, active] = await Promise.all([
+      bridgeRequest('/api/bridge/sessions'),
+      (typeof hana !== 'undefined' && hana?.sessions?.getActive)
+        ? hana.sessions.getActive().catch(() => null)
+        : null,
+    ]);
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
     if (!bridgeSessionSelect) return;
     if (!sessions.length) {
       bridgeSessionSelect.innerHTML = '<option value="">没有可读的本体会话</option>';
+      if (bridgeImportBtn) bridgeImportBtn.disabled = true;
       return;
     }
-    bridgeSessionSelect.innerHTML = ['<option value="">请选择…</option>']
-      .concat(sessions.map((s) => {
-        const count = s.messageCount == null ? '' : `（${s.messageCount} 条）`;
-        // 同名会话不光靠标题区分，带上尾号
-        return `<option value="${escapeHtml(s.sessionId)}">${escapeHtml(s.title || s.sessionId)}${count} · ${escapeHtml(shortId(s.sessionId))}</option>`;
-      }))
-      .join('');
+    const activeSessionId = active?.sessionId || null;
+    const targetId = preferSessionId || activeSessionId || sessions[0]?.sessionId || '';
+
+    bridgeSessionSelect.innerHTML = sessions.map((s) => {
+      const count = s.messageCount == null ? '' : `（${s.messageCount} 条）`;
+      const isTarget = s.sessionId === targetId;
+      const isCur = s.sessionId === activeSessionId ? ' [当前活跃]' : '';
+      return `<option value="${escapeHtml(s.sessionId)}"${isTarget ? ' selected' : ''}>${escapeHtml(s.title || s.sessionId)}${isCur}${count} · ${escapeHtml(shortId(s.sessionId))}</option>`;
+    }).join('');
+
+    if (targetId) {
+      bridgeSessionSelect.value = targetId;
+      bridgeTargetSessionId = targetId;
+      if (bridgeActiveHint) {
+        bridgeActiveHint.textContent = `已自动绑定：${active?.title || targetId}`;
+      }
+      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
+      void runBridgePreview();
+    }
   } catch (err) {
     if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">读取失败</option>';
     bridgeFail(bridgeErrorEl, err);
@@ -1923,31 +1962,34 @@ async function bindActiveSession() {
   try {
     const active = await hana.sessions.getActive();
     if (!active?.sessionId) {
-      bridgeActiveHint.textContent = '当前窗口没有选中会话';
+      if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口没有选中会话';
       return;
     }
     bridgeTargetSessionId = active.sessionId;
-    bridgeActiveHint.textContent = `已绑定：${active.title || active.sessionId}`;
-    if (bridgeSessionSelect) bridgeSessionSelect.value = active.sessionId;
+    if (bridgeActiveHint) bridgeActiveHint.textContent = `已绑定：${active.title || active.sessionId}`;
+    if (bridgeSessionSelect) {
+      bridgeSessionSelect.value = active.sessionId;
+      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
+      void runBridgePreview();
+    }
   } catch {
-    bridgeActiveHint.textContent = '当前窗口不支持读取本体会话';
+    if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口不支持读取本体会话';
   }
 }
 
 async function runBridgePreview() {
   bridgeClearError();
   bridgePreviewCache = null;
-  if (bridgeImportBtn) bridgeImportBtn.disabled = true;
   const sessionId = bridgeSessionSelect?.value;
   if (!sessionId) {
-    bridgeFail(bridgeErrorEl, new Error('先选一个会话'));
+    if (bridgeImportBtn) bridgeImportBtn.disabled = true;
     return;
   }
-  const kind = document.querySelector('input[name="bridge-kind"]:checked')?.value === 'tree-path' ? 'tree-path' : 'history';
-  if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取中…</p>';
+  if (bridgeImportBtn) bridgeImportBtn.disabled = false;
+  const kind = 'history';
+  if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">正在读取最新对话快照…</p>';
   try {
     const payload = { sessionId, kind };
-    if (kind === 'tree-path' && bridgeLeafSelect?.value) payload.leafId = bridgeLeafSelect.value;
     const data = await bridgeRequest('/api/bridge/preview', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -1955,23 +1997,9 @@ async function runBridgePreview() {
     const preview = data.preview;
     bridgePreviewCache = preview;
 
-    if (kind === 'tree-path' && Array.isArray(preview.branches)) {
-      if (bridgeLeafField) bridgeLeafField.hidden = false;
-      if (bridgeLeafSelect) {
-        bridgeLeafSelect.innerHTML = preview.branches
-          .map((b) => `<option value="${escapeHtml(b.leafId)}">${escapeHtml(b.lastText || b.leafId)}（${b.messageCount} 条）</option>`)
-          .join('');
-        if (preview.leafId) bridgeLeafSelect.value = preview.leafId;
-      }
-      if (preview.needsLeafChoice) {
-        bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">这个会话有多个分支，选一个末端再看预览。</p>';
-        return;
-      }
-    }
-
     const messages = Array.isArray(preview.messages) ? preview.messages : [];
     if (!messages.length) {
-      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">这段范围里没有可导入的正文。</p>';
+      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">该会话暂无可见消息。</p>';
       return;
     }
     const rows = messages.map((m) => `
@@ -1981,14 +2009,13 @@ async function runBridgePreview() {
       </div>
     `).join('');
     const warn = [];
-    if (preview.truncated) warn.push(`历史已截断，只读了最近 ${messages.length} 条`);
-    if (preview.droppedCount) warn.push(`${preview.droppedCount} 条不可见条目未导入`);
-    if (preview.status?.unknown) warn.push('运行状态未知');
-    if (preview.status?.isStreaming) warn.push('该会话正在生成');
+    if (preview.truncated) warn.push(`已截取最近 ${messages.length} 条记录`);
+    if (preview.droppedCount) warn.push(`${preview.droppedCount} 条不可见条目已过滤`);
+    if (preview.status?.isStreaming) warn.push('该会话正在生成中');
     bridgePreviewEl.innerHTML = rows + (warn.length ? `<div class="bridge-warn">${escapeHtml(warn.join('；'))}</div>` : '');
     if (bridgeImportBtn) bridgeImportBtn.disabled = false;
   } catch (err) {
-    bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取失败。</p>';
+    bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取快照失败。</p>';
     bridgeFail(bridgeErrorEl, err);
   }
 }
@@ -2003,13 +2030,21 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
     && c.sourceRef.importKind === sourceRef.importKind);
   if (existing) {
     selectCard(existing.id, false);
+    focusCardInViewport(existing);
     const sameSession = existing.sourceRef.sessionId === sourceRef.sessionId;
     flashMessage(sameSession
       ? '这段内容已经导入过了，已定位到原卡片。'
       : `这段内容已作为《${existing.title}》导入过（来源是另一个会话 ${shortId(existing.sourceRef.sessionId)}），没重复建卡。`);
     return existing;
   }
-  const rootCount = cards.filter((c) => !c.parentId).length + 1;
+
+  let posX = 80;
+  let posY = 100;
+  if (cards.length > 0) {
+    const maxY = Math.max(...cards.map((c) => c.y));
+    posY = maxY + 420;
+  }
+
   const newCard = {
     id: uniqueId('doc'),
     parentId: null,
@@ -2018,8 +2053,8 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
     docContent: text,
     sourceRef,
     docMeta: { name: title, size: text.length, extension: '.md', charCount: text.length, lineCount: text.split('\n').length },
-    x: 80 + (rootCount - 1) * 40,
-    y: 100 + (rootCount - 1) * 60,
+    x: posX,
+    y: posY,
     width: 360,
     messages: [{
       role: 'assistant',
@@ -2033,48 +2068,77 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
   renderCards();
   sessionController?.scheduleSave();
   selectCard(newCard.id, false);
+  focusCardInViewport(newCard);
   return newCard;
 }
 
 async function importBridgePreview() {
-  if (!bridgePreviewCache) return;
-  bridgeClearError();
-  const preview = bridgePreviewCache;
-  const messages = Array.isArray(preview.messages) ? preview.messages : [];
-  if (!messages.length) return;
-  const kindUp = document.querySelector('input[name="bridge-kind"]:checked')?.value === 'tree-path' ? 'tree-path' : 'history';
-  const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
-  const text = `# ${preview.session.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
-  const sourceRef = {
-    version: 1,
-    kind: 'hana-session',
-    sessionId: preview.session.sessionId,
-    entryIds: messages.map((m) => m.entryId).filter(Boolean),
-    leafId: preview.leafId || null,
-    titleAtImport: preview.session.title || '',
-    importedAt: new Date().toISOString(),
-    contentHash: '',
-    importKind: kindUp === 'tree-path' ? 'tree-path' : 'history',
-  };
-  // 内容哈希用与服务端同一套规则，保证去重键一致
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  const payload = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
-  for (let i = 0; i < payload.length; i += 1) {
-    const code = payload.charCodeAt(i);
-    h1 = (h1 ^ code) >>> 0;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 = (h2 + code * (i + 1)) >>> 0;
+  const sessionId = bridgeSessionSelect?.value;
+  if (!sessionId) {
+    bridgeFail(bridgeErrorEl, new Error('请先选择一个会话'));
+    return;
   }
-  sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+  bridgeClearError();
+  if (bridgeImportBtn) {
+    bridgeImportBtn.disabled = true;
+    bridgeImportBtn.textContent = '正在导入…';
+  }
+  try {
+    let preview = bridgePreviewCache;
+    // 如果还没拉取完成，或者切换了会话，立即按需拉取
+    if (!preview || preview.session?.sessionId !== sessionId) {
+      const data = await bridgeRequest('/api/bridge/preview', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId, kind: 'history' }),
+      });
+      preview = data?.preview;
+      bridgePreviewCache = preview;
+    }
+    const messages = Array.isArray(preview?.messages) ? preview.messages : [];
+    if (!messages.length) {
+      flashMessage('该会话没有可导入的对话记录。');
+      return;
+    }
+    const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
+    const text = `# ${preview.session.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+    const sourceRef = {
+      version: 1,
+      kind: 'hana-session',
+      sessionId: preview.session.sessionId,
+      entryIds: messages.map((m) => m.entryId).filter(Boolean),
+      leafId: preview.leafId || null,
+      titleAtImport: preview.session.title || '',
+      importedAt: new Date().toISOString(),
+      contentHash: '',
+      importKind: 'history',
+    };
+    // 内容哈希用与服务端同一套规则，保证去重键一致
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    const payload = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
+    for (let i = 0; i < payload.length; i += 1) {
+      const code = payload.charCodeAt(i);
+      h1 = (h1 ^ code) >>> 0;
+      h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 = (h2 + code * (i + 1)) >>> 0;
+    }
+    sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 
-  createBridgeDocCard({
-    title: preview.session.title || '本体会话',
-    text,
-    sourceRef,
-    messageCount: messages.length,
-  });
-  bridgeDialogEl?.close();
+    createBridgeDocCard({
+      title: preview.session.title || '本体会话',
+      text,
+      sourceRef,
+      messageCount: messages.length,
+    });
+    bridgeDialogEl?.close();
+  } catch (err) {
+    bridgeFail(bridgeErrorEl, err);
+  } finally {
+    if (bridgeImportBtn) {
+      bridgeImportBtn.disabled = false;
+      bridgeImportBtn.textContent = '导入到画布';
+    }
+  }
 }
 
 async function loadOutboxList() {
@@ -2214,18 +2278,93 @@ async function confirmBridgeSend() {
   }
 }
 
-/** 本体那边点的导入请求：有就提示一次，具体导入仍要用户确认 */
+let pollBridgeIntentsBusy = false;
+
+/** 本体那边点的导入请求（右键 / 消息图标）：自动认领并直接铸造成卡片置入画布 */
 async function pollBridgeIntents() {
+  if (pollBridgeIntentsBusy) return;
+  pollBridgeIntentsBusy = true;
   try {
     const data = await bridgeRequest('/api/bridge/intents');
-    const list = Array.isArray(data.intents) ? data.intents : [];
+    const list = Array.isArray(data?.intents) ? data.intents : [];
     if (!list.length) return;
-    const intent = list[0];
-    if (pollBridgeIntents.lastShown === intent.intentId) return;
-    pollBridgeIntents.lastShown = intent.intentId;
-    flashMessage(`本体有一条导入请求待确认（${intent.title || intent.sessionId}），打开「连接本体」处理。`);
+
+    for (const intent of list) {
+      if (!intent?.intentId || intent.consumed) continue;
+      // 抢占凭条，防多窗口竞争
+      try {
+        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/claim`, {
+          method: 'POST',
+          body: JSON.stringify({ claimer: 'primary' }),
+        });
+      } catch {
+        continue;
+      }
+
+      try {
+        const previewData = await bridgeRequest('/api/bridge/preview', {
+          method: 'POST',
+          body: JSON.stringify({ sessionId: intent.sessionId, kind: 'history' }),
+        });
+        const preview = previewData?.preview;
+        const messages = Array.isArray(preview?.messages) ? preview.messages : [];
+        if (!messages.length) {
+          await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
+            method: 'POST',
+            body: JSON.stringify({ claimer: 'primary' }),
+          }).catch(() => {});
+          continue;
+        }
+
+        const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
+        const text = `# ${intent.title || preview.session?.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
+        const sourceRef = {
+          version: 1,
+          kind: 'hana-session',
+          sessionId: intent.sessionId,
+          entryIds: messages.map((m) => m.entryId).filter(Boolean),
+          leafId: preview.leafId || null,
+          titleAtImport: intent.title || preview.session?.title || '',
+          importedAt: new Date().toISOString(),
+          contentHash: '',
+          importKind: 'history',
+        };
+
+        let h1 = 0x811c9dc5;
+        let h2 = 0x01000193;
+        const payloadStr = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
+        for (let i = 0; i < payloadStr.length; i += 1) {
+          const code = payloadStr.charCodeAt(i);
+          h1 = (h1 ^ code) >>> 0;
+          h1 = Math.imul(h1, 0x01000193) >>> 0;
+          h2 = (h2 + code * (i + 1)) >>> 0;
+        }
+        sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+
+        createBridgeDocCard({
+          title: intent.title || preview.session?.title || '本体会话',
+          text,
+          sourceRef,
+          messageCount: messages.length,
+        });
+
+        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
+          method: 'POST',
+          body: JSON.stringify({ claimer: 'primary' }),
+        });
+
+        flashMessage(`已自动从本体导入《${intent.title || preview.session?.title || '会话'}》（${messages.length} 条记录）到画布。`);
+      } catch (err) {
+        await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/release`, {
+          method: 'POST',
+          body: JSON.stringify({ claimer: 'primary' }),
+        }).catch(() => {});
+      }
+    }
   } catch {
     // 没权限或宿主不支持都不影响画布
+  } finally {
+    pollBridgeIntentsBusy = false;
   }
 }
 
@@ -2239,27 +2378,21 @@ function initSessionBridge() {
     await loadOutboxList();
   });
   document.getElementById('btn-bridge-close')?.addEventListener('click', () => bridgeDialogEl.close());
+  document.getElementById('btn-bridge-cancel')?.addEventListener('click', () => bridgeDialogEl.close());
   document.getElementById('btn-bridge-bind-active')?.addEventListener('click', bindActiveSession);
   document.getElementById('btn-bridge-preview')?.addEventListener('click', runBridgePreview);
   bridgeImportBtn?.addEventListener('click', importBridgePreview);
   document.getElementById('btn-bridge-refresh-outbox')?.addEventListener('click', loadOutboxList);
 
   bridgeSessionSelect?.addEventListener('change', () => {
-    if (bridgeLeafField) bridgeLeafField.hidden = true;
-    if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">选好会话后点「读取预览」。</p>';
-    if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-    bridgePreviewCache = null;
-  });
-  bridgeLeafSelect?.addEventListener('change', () => {
-    if (bridgeLeafSelect.value) void runBridgePreview();
-  });
-  document.querySelectorAll('input[name="bridge-kind"]').forEach((input) => {
-    input.addEventListener('change', () => {
-      if (bridgeLeafField) bridgeLeafField.hidden = input.value !== 'tree-path';
-      if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">点「读取预览」开始。</p>';
+    const val = bridgeSessionSelect.value;
+    if (val) {
+      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
+      void runBridgePreview();
+    } else {
       if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-      bridgePreviewCache = null;
-    });
+      if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">请选择要导入的会话。</p>';
+    }
   });
 
   document.getElementById('bridge-tab-import')?.addEventListener('click', () => {
@@ -2287,7 +2420,15 @@ function initSessionBridge() {
 
   void pollBridgeIntents();
   if (typeof setInterval === 'function') {
-    setInterval(() => { void pollBridgeIntents(); }, 25000);
+    setInterval(() => { void pollBridgeIntents(); }, 5000);
+  }
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('focus', () => void pollBridgeIntents());
+  }
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) void pollBridgeIntents();
+    });
   }
   // 前台会话切换只更新提示，不改已绑定目标
   try {
