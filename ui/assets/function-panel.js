@@ -1062,7 +1062,11 @@ function setParserStatus(text, tone = '') {
 
 function setParserBadge(enabled, ready) {
   if (!parserEls.state) return;
-  parserEls.state.textContent = !enabled ? '关' : ready ? '就绪' : '缺 Token';
+  const text = !enabled ? '关' : ready ? '就绪' : '缺 Token';
+  parserEls.state.textContent = text;
+  try {
+    localStorage.setItem('fork_chat_parser_badge', text);
+  } catch {}
 }
 
 async function loadParserSettings() {
@@ -1128,13 +1132,62 @@ async function saveParserSettings() {
 }
 
 parserEls.save?.addEventListener('click', saveParserSettings);
-// 展开时才去读，避免每次开侧边栏都多一次请求
+
+// 分组折叠偏好记忆（localStorage）
+const agentGroupEl = document.getElementById('agent-group');
+const sessionGroupEl = document.getElementById('session-group');
+const parserGroupEl = document.getElementById('parser-group');
+
+function initGroupAccordionState() {
+  if (agentGroupEl) {
+    const saved = localStorage.getItem('fork_chat_agent_group_open');
+    // 默认收起（false），除非用户主动展开过
+    agentGroupEl.open = saved !== null ? saved === 'true' : false;
+    agentGroupEl.addEventListener('toggle', () => {
+      try {
+        localStorage.setItem('fork_chat_agent_group_open', String(agentGroupEl.open));
+      } catch {}
+    });
+  }
+
+  if (sessionGroupEl) {
+    const saved = localStorage.getItem('fork_chat_session_group_open');
+    // 会话列表默认展开（true）
+    sessionGroupEl.open = saved !== null ? saved === 'true' : true;
+    sessionGroupEl.addEventListener('toggle', () => {
+      try {
+        localStorage.setItem('fork_chat_session_group_open', String(sessionGroupEl.open));
+      } catch {}
+    });
+  }
+
+  if (parserGroupEl) {
+    const saved = localStorage.getItem('fork_chat_parser_group_open');
+    parserGroupEl.open = saved !== null ? saved === 'true' : false;
+    parserGroupEl.addEventListener('toggle', () => {
+      try {
+        localStorage.setItem('fork_chat_parser_group_open', String(parserGroupEl.open));
+      } catch {}
+    });
+  }
+
+  try {
+    const savedBadge = localStorage.getItem('fork_chat_parser_badge');
+    if (savedBadge && parserEls.state) {
+      parserEls.state.textContent = savedBadge;
+    }
+  } catch {}
+}
+
+// 展开时刷新设置
 document.getElementById('parser-group')?.addEventListener('toggle', (event) => {
   if (event.target.open) loadParserSettings();
 });
 
 // 初始化
+initGroupAccordionState();
 hana.ready();
 loadAgents();
 sendHello();
 loadSessions();
+loadParserSettings();
