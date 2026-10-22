@@ -4,6 +4,12 @@
 >
 > **最终结论（2026-10-21 定稿）：PDF 交给 pdf.js（unpdf 打包版），纯 JS 单引擎，不起子进程、不调宿主助手。**
 > 本文档前面几节记录了探索过程中核实的宿主链路能力与失败点，留作复盘；当前实现在第 6 节。
+>
+> **2026-10-22 补记两处已经过时的说法：**
+> 1. 第 3 节起的 L2「宿主 Agent 后台解析」方案**已从代码删除**，留作决策记录，不要当现状读。
+>    当前链路是 `lib/parse-router.js`：本地解析优先，云端只接受 PDF，非 PDF 一律本地返回。
+> 2. 本文下方写的「已移除 `app/sessions.manage`、`app/session.start-turn`、`app/session.stage-file`」**已不成立**。
+>    1.8.x 的本体会话桥接重新声明并在使用这三项，见 `manifest.json` 与 `lib/bridge-service.js`。
 
 ---
 
