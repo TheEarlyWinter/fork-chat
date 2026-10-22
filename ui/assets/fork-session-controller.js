@@ -14,7 +14,18 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   async function refresh() {
     const sequence = ++refreshing;
     const list = await store.list();
-    if (sequence === refreshing) { sessions = list.sessions; notify(); }
+    if (sequence === refreshing) {
+      sessions = list.sessions;
+      if (active && !sessions.some(item => item.id === active.id)) {
+        if (list.activeId) {
+          const replacement = await store.get(list.activeId).catch(() => null);
+          if (sequence === refreshing && !closed) await install(replacement);
+        } else {
+          await install(null);
+        }
+      }
+      notify();
+    }
     return list;
   }
   function scheduleSave() {
@@ -61,10 +72,10 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     return job;
   }
   async function install(record) {
-    active = record;
+    active = record || null;
     changed = saved = 0;
     // The live canvas must not mutate the durable comparison baseline.
-    await apply(JSON.parse(JSON.stringify(record.snapshot)));
+    await apply(record ? JSON.parse(JSON.stringify(record.snapshot)) : null);
   }
   async function init() {
     if (busy || closed) return;

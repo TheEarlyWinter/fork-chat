@@ -137,6 +137,8 @@ const canvasDropIndicator = document.getElementById('canvas-drop-indicator');
 const sessionStatusEl = document.getElementById('session-status');
 const btnRetrySave = document.getElementById('btn-retry-save');
 const btnSaveCopy = document.getElementById('btn-save-copy');
+const canvasEmptyState = document.getElementById('canvas-empty-state');
+const btnEmptyNewSession = document.getElementById('btn-empty-new-session');
 const deleteDialog = document.getElementById('delete-session-dialog');
 const deleteTargetTitle = document.getElementById('delete-target-title');
 const deleteDialogError = document.getElementById('delete-dialog-error');
@@ -1089,6 +1091,7 @@ function renderCards(preserve = true) {
   const branchCount = cards.filter(c => c.parentId).length;
   badgeStats.textContent = `${cards.length} 卡片 · ${branchCount} 追问分支`;
   renderConnectors();
+  if (canvasEmptyState) canvasEmptyState.hidden = cards.length > 0;
 }
 
 function bindCardEvents(cardEl, card) {
@@ -1650,8 +1653,12 @@ btnResetView.addEventListener('click', () => {
 });
 
 // 新建主线根卡片
-btnNewRoot.addEventListener('click', () => {
+btnNewRoot.addEventListener('click', async () => {
   if (!sessionController?.state.ready || sessionController.state.busy) return;
+  if (!sessionController.state.activeId) {
+    await sessionController.newSession(initialSnapshot());
+    return;
+  }
   const rootCount = cards.filter(c => !c.parentId).length + 1;
   const newRoot = {
     id: uniqueId('card'),
@@ -2451,6 +2458,9 @@ if (document.readyState === 'loading') {
 
 async function createDocumentCard(file, targetCoord = null) {
   if (!sessionController?.state.ready || sessionController.state.busy || !file) return null;
+  if (!sessionController.state.activeId) {
+    await sessionController.newSession(initialSnapshot());
+  }
   const result = await extractDocumentFile(file);
   if (!result.ok) {
     flashMessage(`《${result.filename}》没读出来（${result.stage || '未知'}阶段）：${result.error}`);
@@ -2601,6 +2611,12 @@ function captureSnapshot() {
   }));
 }
 function applySnapshot(snapshot) {
+  if (!snapshot) {
+    cards = [];
+    view.x = 60; view.y = 40; view.scale = 1; view.isDragging = false;
+    updateHeaderStatus(); updateTransform(); renderCards(false);
+    return;
+  }
   cards = snapshot.cards;
   Object.assign(view, snapshot.view, { isDragging: false });
   currentAgent = { ...currentAgent, ...snapshot.agent };
@@ -2685,7 +2701,7 @@ async function openDeleteConfirmation(message) {
     deleteDialogProgress.textContent = changedElsewhere
       ? '已保存版本较本窗口记录更新（可能来自其他窗口）。确认后会删除最新已保存版本，以及本窗口未保存的内容。'
       : isCurrent && activeRequests.size ? '当前仍在生成，确认删除后会先停止请求。'
-      : '删除后将切换到其他会话；最后一个会话删除后会新建空白会话。';
+      : '确认后将永久删除该会话及其全部卡片记录。';
     btnDeleteConfirm.disabled = false;
   } catch (err) {
     if (deleteIntent === intent) deleteDialogError.textContent = safeDetail(err.message);
@@ -2717,7 +2733,9 @@ sessionController = createForkSessionController({
   store: sessionStore, capture: captureSnapshot, apply: applySnapshot, cancelPending: cancelSessionRequests,
   onChange(state) {
     sessionStatusEl.textContent = state.error ? `${state.dirty ? '未保存' : '会话操作失败'} · ${safeDetail(state.error)}`
-      : !state.ready ? '正在恢复会话…' : `${state.title} · ${state.busy ? '正在切换…' : state.saving ? '保存中…' : state.dirty ? '待保存' : '已保存'}`;
+      : !state.ready ? '正在恢复会话…'
+      : !state.activeId ? '暂无会话 · 可点击新建会话'
+      : `${state.title} · ${state.busy ? '正在切换…' : state.saving ? '保存中…' : state.dirty ? '待保存' : '已保存'}`;
     sessionStatusEl.title = sessionStatusEl.textContent;
     btnRetrySave.hidden = !state.error;
     btnSaveCopy.hidden = !state.error || !state.ready;
@@ -2727,6 +2745,9 @@ sessionController = createForkSessionController({
     if (lastPhase !== phase) { lastPhase = phase; renderCards(); }
     publishSessionState();
   },
+});
+btnEmptyNewSession?.addEventListener('click', () => {
+  void sessionController?.newSession(initialSnapshot()).catch(() => {});
 });
 btnRetrySave.addEventListener('click', () => { void (sessionController.state.ready ? sessionController.flush() : sessionController.init()).catch(() => {}); });
 btnSaveCopy.addEventListener('click', () => { void sessionController.saveCopy().catch(() => {}); });

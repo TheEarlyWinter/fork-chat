@@ -465,10 +465,14 @@ export function createForkSessionStore(hana, options = {}) {
         version: 1,
         activeId: null,
         sessions: [],
+        initialized: false,
       };
     }
     const doc = deepClone(val);
     validateStoreDoc(doc);
+    if (doc.initialized === undefined) {
+      doc.initialized = true;
+    }
     return doc;
   }
 
@@ -512,7 +516,12 @@ export function createForkSessionStore(hana, options = {}) {
           return deepClone(doc.sessions[0]);
         }
 
-        // 无记录时才创建首条会话（避免双窗口首次打开并发重复创建）
+        // 若已被初始化过（即用户此前操作过并删空了所有会话），不自动重生会话，保持空状态
+        if (doc.initialized) {
+          return null;
+        }
+
+        // 仅在首次打开（存储中从未写入过会话库）时，才创建首条默认会话
         const normalized = normalizeForkSnapshot(snapshot);
         const title = generateAutoTitle(normalized);
         const currentTime = now();
@@ -528,6 +537,7 @@ export function createForkSessionStore(hana, options = {}) {
 
         doc.sessions.push(newRecord);
         doc.activeId = newRecord.id;
+        doc.initialized = true;
         await writeDoc(doc);
         return deepClone(newRecord);
       });
@@ -674,7 +684,7 @@ export function createForkSessionStore(hana, options = {}) {
     },
 
     /**
-     * 删除会话：比对 expectedRevision，若删最后一个则原子单事务建空白新会话，若删全局 active 选剩余最近 updatedAt 记录
+     * 删除会话：比对 expectedRevision，若删最后一个则会话清空（activeId 为 null），若删全局 active 选剩余最近 updatedAt 记录
      */
     async remove(id, expectedRevision, fallbackSnapshot) {
       return await withLock(async () => {
@@ -692,34 +702,22 @@ export function createForkSessionStore(hana, options = {}) {
           );
         }
 
-        // 若删最后一个：使用 normalizeForkSnapshot(fallbackSnapshot) 建空白新会话并设 activeId，同一事务内单 set 杜绝中间空库
-        if (doc.sessions.length === 1) {
-          const normalized = normalizeForkSnapshot(fallbackSnapshot);
-          const currentTime = now();
-          const newRecord = {
-            id: idFactory(),
-            title: generateAutoTitle(normalized),
-            revision: 1,
-            createdAt: currentTime,
-            updatedAt: currentTime,
-            manualTitle: false,
-            snapshot: normalized,
-          };
+        // 删除目标记录
+        doc.sessions.splice(index, 1);
+        doc.initialized = true;
 
-          doc.sessions = [newRecord];
-          doc.activeId = newRecord.id;
+        // 若会话已被全部删空：activeId 置 null，返回 null session
+        if (doc.sessions.length === 0) {
+          doc.activeId = null;
           await writeDoc(doc);
           return {
             deletedId: id,
-            activeId: doc.activeId,
-            session: deepClone(newRecord),
+            activeId: null,
+            session: null,
           };
         }
 
-        // 存在多个会话时删除目标记录
-        doc.sessions.splice(index, 1);
-
-        // 若删全局 active 选择剩余最近 updatedAt 记录
+        // 存在剩余会话时：若删的是全局 active，则选择剩余中最近 updatedAt 记录
         if (doc.activeId === id) {
           let latest = doc.sessions[0];
           for (let i = 1; i < doc.sessions.length; i++) {
