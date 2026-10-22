@@ -8,10 +8,10 @@
 |---|---|
 | 仓库 | `/home/theearlywinter/Desktop/OH-WorkSpace/OH-Works/Projects/fork-chat` |
 | 分支 | `main`，最新提交见 `git log -1` |
-| 测试 | `node --experimental-vm-modules --test tests/*.test.mjs` → **453 通过 / 0 失败** |
-| panel.js | 3087 行 → **2074 行** |
-| 已拆模块 | 12 个 |
-| 版本 | manifest 1.9.3 |
+| 测试 | `node --experimental-vm-modules --test tests/*.test.mjs` → **460 通过 / 0 失败** |
+| panel.js | 3087 行 → **1171 行** |
+| 已拆模块 | 28 个（panel-*.js） |
+| 版本 | manifest 1.9.4 |
 
 跑测试要留够时间，全量大约两分钟。`tests/` 和 `*.test.mjs` 在 `.gitignore` 里，测试改动不会进版本库。
 
