@@ -15,6 +15,7 @@ import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter 
 import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
 import { createChatEngine } from './panel-chat-engine.js';
+import { createBattleFlow } from './panel-battle-flow.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
@@ -358,77 +359,31 @@ historyManager.recordSnapshot(cards, null);
 const buildChainContext = targetCard => buildContext({ cards, targetCard });
 
 
-// 对比推导弹窗控制器 (Battle Dialog Controller)
-const battleController = bindBattleDialogController({
-  dialog: battleDialog,
-  promptInput: battlePromptInput,
-  agentsList: battleAgentsList,
-  selectedCountEl: battleSelectedCount,
-  errorEl: battleDialogError,
-  btnClose: btnBattleClose,
-  btnCancel: btnBattleCancel,
-  btnSubmit: btnBattleSubmit,
-  btnUseLastPrompt,
-  loadAgents: loadAvailableAgents,
-  getReasoningEffort: getAgentReasoningEffort,
-  onSubmit: ({ targetCard, prompt, selectedAgentIds }) => {
-    const agents = agentController.getAvailableAgents().filter(a => selectedAgentIds.has(a.id));
-    if (targetCard && cards.includes(targetCard)) {
-      void runBattleBranches(targetCard, prompt, agents);
-    }
-  },
-  listen: (target, type, handler, options) => listen(target, type, handler, options, battleCleanups),
-  documentRef: document,
+// 对比推导：弹窗、选择、并发开分支
+const battleFlow = createBattleFlow({
+  battleDialog, battlePromptInput, battleAgentsList, battleSelectedCount,
+  battleDialogError, btnBattleClose, btnBattleCancel, btnBattleSubmit, btnUseLastPrompt,
+  listen, documentRef: document,
+  getAgentReasoningEffort: (id) => getAgentReasoningEffort(id),
+  getAvailableAgents: () => agentController.getAvailableAgents(),
+  loadAvailableAgents: () => agentController.loadAvailableAgents(),
+  chainIsBusy: (card) => chainIsBusy(card),
+  getCards: () => cards,
+  getSession: () => sessionController,
+  getIsDisposed: () => isDisposed,
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  cardHasParent: (card, id) => cardHasParent(card, id),
+  calculateBranchYPositions: (...args) => calculateBranchYPositions(...args),
+  fitViewportToCluster: (...args) => fitViewportToCluster(...args),
+  renderCards: () => renderCards(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (list, id) => historyManager.recordSnapshot(list, id),
+  getSelectedCardId: () => selectedCardId,
+  sendCardPrompt: (card, text, options) => sendCardPrompt(card, text, options),
+  uniqueId: (...args) => uniqueId(...args),
+  cleanups: battleCleanups,
 });
-
-function closeBattleDialog() {
-  battleController.close();
-}
-
-async function openBattleDialog(card, initialPromptText = '') {
-  if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return;
-  const generation = sessionController.generation;
-  await battleController.open(card, initialPromptText);
-  if (!canMutateCanvas(generation) || !cards.includes(card)) {
-    battleController.close();
-  }
-}
-
-async function runBattleBranches(parentCard, prompt, selectedAgents) {
-  if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
-  const existingChildren = cards.filter(c => cardHasParent(c, parentCard.id));
-  const startBranchIndex = existingChildren.length + 1;
-  const total = selectedAgents.length;
-  const targetX = parentCard.x + (parentCard.width || 340) + 120;
-  const yPositions = calculateBranchYPositions(parentCard, total, targetX);
-
-  const newCards = buildBattleBranchCards({
-    parentCard,
-    selectedAgents,
-    startBranchIndex,
-    targetX,
-    yPositions,
-    getReasoningEffort: getAgentReasoningEffort,
-    uniqueId,
-  });
-
-  cards.push(...newCards);
-  renderCards();
-  sessionController.scheduleSave();
-  historyManager.recordSnapshot(cards, selectedCardId);
-
-  if (newCards.length > 0) {
-    fitViewportToCluster([parentCard, ...newCards]);
-  }
-
-  const sendPromises = newCards.map((childCard, i) => {
-    const agent = selectedAgents[i];
-    const effort = getAgentReasoningEffort(agent.id);
-    return sendCardPrompt(childCard, prompt, { agent, reasoningEffort: effort });
-  });
-
-  await Promise.allSettled(sendPromises);
-}
+const { closeBattleDialog, openBattleDialog, runBattleBranches } = battleFlow;
 
 function toggleMultiSelectCard(cardId) {
   if (!canMutateCanvas()) return;
@@ -2215,7 +2170,7 @@ function disposePanel() {
   btnUseLastPrompt.onclick = null;
   const sendText = document.getElementById('bridge-send-text');
   if (sendText) sendText.oninput = null;
-  battleController.cleanup();
+  battleFlow.controller.cleanup();
   canvasViewController.cleanup();
   view.isDragging = false;
   isSpacePressed = false;
@@ -2258,6 +2213,7 @@ if (typeof window !== 'undefined') {
     buildChainContext,
     loadAvailableAgents,
     getAvailableAgents: () => agentController.getAvailableAgents(),
+  loadAvailableAgents: () => agentController.loadAvailableAgents(),
     getCards: () => cards,
     getView: () => view,
     openBattleDialog,
