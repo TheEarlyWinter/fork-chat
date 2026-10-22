@@ -8,6 +8,9 @@ import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js'
 import { renderConnectorsLayer } from './panel-connectors.js';
 import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewportToCluster as fitViewportToClusterLayout, computeAutoTidyPositions } from './panel-layout.js';
 import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js';
+import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
+import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
+import { clampCardWidth, clampCardHeight, buildCardHtml } from './panel-cards.js';
 
 const activeRequests = new Map();
 let sessionController = null;
@@ -312,11 +315,8 @@ bus.onmessage = (e) => {
 // 更新画布平移与缩放矩阵
 function updateTransform() {
   if (isDisposed) return;
-  surface.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
-  zoomText.textContent = `${Math.round(view.scale * 100)}%`;
+  applyViewportTransform({ surface, viewport, zoomText, view, isDisposed });
   sessionController?.scheduleSave();
-  viewport.style.backgroundPosition = `${view.x}px ${view.y}px`;
-  viewport.style.backgroundSize = `${24 * view.scale}px ${24 * view.scale}px`;
 }
 
 // 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
@@ -530,99 +530,39 @@ async function sendCardPrompt(card, text, options = {}) {
   }
 }
 
-function updateBattleSelectedCount() {
-  if (battleSelectedCount) {
-    battleSelectedCount.textContent = `已选 ${battleSelectedAgentIds.size} 个`;
-  }
-}
-
-function renderBattleAgentsList(agents) {
-  if (isDisposed || !battleAgentsList) return;
-  drain(battleCleanups);
-  const on = (target, type, handler, options) => listen(target, type, handler, options, battleCleanups);
-  battleAgentsList.innerHTML = '';
-
-  agents.forEach(agent => {
-    const item = document.createElement('div');
-    const isChecked = battleSelectedAgentIds.has(agent.id);
-    item.className = `battle-agent-item ${isChecked ? 'is-selected' : ''}`;
-    item.id = `battle-agent-${agent.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-
-    const effort = getAgentReasoningEffort(agent.id);
-    const effortText = effort && effort !== 'default' ? `思考 ${effort}` : '默认思考';
-
-    item.innerHTML = `
-      <div class="battle-agent-item-left">
-        <input type="checkbox" id="chk-battle-${agent.id.replace(/[^a-zA-Z0-9_-]/g, '_')}" ${isChecked ? 'checked' : ''} tabindex="-1">
-        <span class="battle-agent-name">${escapeHtml(agent.name || agent.id)}</span>
-      </div>
-      <div class="battle-agent-item-right">
-        <span class="battle-agent-model mono">${escapeHtml(agent.model || 'default')}</span>
-        <span class="battle-agent-effort-badge mono">${escapeHtml(effortText)}</span>
-      </div>
-    `;
-
-    on(item, 'click', (e) => {
-      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-      const chk = item.querySelector('input[type="checkbox"]');
-      const nowChecked = !battleSelectedAgentIds.has(agent.id);
-      if (nowChecked) {
-        battleSelectedAgentIds.add(agent.id);
-      } else {
-        battleSelectedAgentIds.delete(agent.id);
-      }
-      if (chk) chk.checked = nowChecked;
-      if (nowChecked) item.classList.add('is-selected');
-      else item.classList.remove('is-selected');
-      updateBattleSelectedCount();
-    });
-
-    battleAgentsList.appendChild(item);
-  });
-}
+// 对比推导弹窗控制器 (Battle Dialog Controller)
+const battleController = bindBattleDialogController({
+  dialog: battleDialog,
+  promptInput: battlePromptInput,
+  agentsList: battleAgentsList,
+  selectedCountEl: battleSelectedCount,
+  errorEl: battleDialogError,
+  btnClose: btnBattleClose,
+  btnCancel: btnBattleCancel,
+  btnSubmit: btnBattleSubmit,
+  btnUseLastPrompt,
+  loadAgents: loadAvailableAgents,
+  getReasoningEffort: getAgentReasoningEffort,
+  onSubmit: ({ targetCard, prompt, selectedAgentIds }) => {
+    const agents = cachedAgents.filter(a => selectedAgentIds.has(a.id));
+    if (targetCard && cards.includes(targetCard)) {
+      void runBattleBranches(targetCard, prompt, agents);
+    }
+  },
+  listen: (target, type, handler, options) => listen(target, type, handler, options, battleCleanups),
+  documentRef: document,
+});
 
 function closeBattleDialog() {
-  if (typeof battleDialog?.close === 'function') battleDialog.close();
-  battleTargetCard = null;
+  battleController.close();
 }
 
 async function openBattleDialog(card, initialPromptText = '') {
   if (isDisposed || chainIsBusy(card) || !cards.includes(card)) return;
-  battleTargetCard = card;
-  if (battleDialogError) battleDialogError.textContent = '';
-
-  const lastUserMsg = card.messages.filter(m => m.role === 'user' && !m.failed).at(-1)?.text || '';
-  const prompt = (typeof initialPromptText === 'string' && initialPromptText.trim())
-    ? initialPromptText.trim()
-    : (card.draft || lastUserMsg);
-
-  if (battlePromptInput) {
-    battlePromptInput.value = prompt;
-  }
-  if (btnUseLastPrompt) {
-    btnUseLastPrompt.onclick = () => {
-      if (isDisposed) return;
-      if (lastUserMsg && battlePromptInput) battlePromptInput.value = lastUserMsg;
-    };
-  }
-
   const generation = sessionController.generation;
-  const agents = await loadAvailableAgents();
-  if (!canMutateCanvas(generation) || !cards.includes(card)) return;
-  battleSelectedAgentIds.clear();
-
-  if (agents.length <= 2) {
-    agents.forEach(a => battleSelectedAgentIds.add(a.id));
-  } else {
-    agents.slice(0, 2).forEach(a => battleSelectedAgentIds.add(a.id));
-  }
-
-  renderBattleAgentsList(agents);
-  updateBattleSelectedCount();
-
-  if (typeof battleDialog?.showModal === 'function') {
-    battleDialog.showModal();
-    battlePromptInput?.focus?.({ preventScroll: true });
+  await battleController.open(card, initialPromptText);
+  if (!canMutateCanvas(generation) || !cards.includes(card)) {
+    battleController.close();
   }
 }
 
@@ -644,27 +584,17 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   const targetX = parentCard.x + (parentCard.width || 340) + 120;
   const yPositions = calculateBranchYPositions(parentCard, total, targetX);
 
-  const newCards = [];
-  selectedAgents.forEach((agent, i) => {
-    const branchIndex = startBranchIndex + i;
-    const newId = uniqueId('battle_branch');
-    const effort = getAgentReasoningEffort(agent.id);
-    const effortLabel = effort && effort !== 'default' ? ` · 思考 ${effort}` : '';
-
-    const childCard = {
-      id: newId,
-      parentId: parentCard.id,
-      isBattle: true,
-      title: `对比 #${branchIndex} (${agent.name || agent.id}${effortLabel})`,
-      x: targetX,
-      y: yPositions[i],
-      width: 340,
-      messages: [],
-    };
-    newCards.push(childCard);
-    cards.push(childCard);
+  const newCards = buildBattleBranchCards({
+    parentCard,
+    selectedAgents,
+    startBranchIndex,
+    targetX,
+    yPositions,
+    getReasoningEffort: getAgentReasoningEffort,
+    uniqueId,
   });
 
+  cards.push(...newCards);
   renderCards();
   sessionController.scheduleSave();
 
@@ -793,46 +723,36 @@ function selectCard(cardId, focusInput = false) {
 }
 
 function ensureCardInView(card) {
-  if (isDisposed) return;
+  if (isDisposed || !card) return;
   const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const vpWidth = vpRect.width || 1000;
-  const vpHeight = vpRect.height || 700;
-
-  const screenX = card.x * view.scale + view.x;
-  const screenY = card.y * view.scale + view.y;
-  const cardScreenWidth = (card.width || 340) * view.scale;
-  const cardScreenHeight = 360 * view.scale;
-
-  const margin = 60;
-  let adjust = false;
-  if (screenX < margin) {
-    view.x += (margin - screenX);
-    adjust = true;
-  } else if (screenX + cardScreenWidth > vpWidth - margin) {
-    view.x -= (screenX + cardScreenWidth - (vpWidth - margin));
-    adjust = true;
+  const next = computeEnsureCardVisible({
+    card,
+    view,
+    viewportWidth: vpRect.width || 1000,
+    viewportHeight: vpRect.height || 700,
+    margin: 60,
+  });
+  if (next.x !== view.x || next.y !== view.y) {
+    view.x = next.x;
+    view.y = next.y;
+    updateTransform();
   }
-  if (screenY < margin) {
-    view.y += (margin - screenY);
-    adjust = true;
-  } else if (screenY + cardScreenHeight > vpHeight - margin) {
-    view.y -= (screenY + cardScreenHeight - (vpHeight - margin));
-    adjust = true;
-  }
-  if (adjust) updateTransform();
 }
 
 function focusCardInViewport(card) {
-  if (isDisposed) return;
-  if (!card) return;
+  if (isDisposed || !card) return;
   const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const vpWidth = vpRect.width || 1000;
-  const vpHeight = vpRect.height || 700;
   const cardW = card.width || 360;
   const cardH = 340;
+  const next = computeCenterOnCard({
+    card: { ...card, width: cardW, height: cardH },
+    viewportWidth: vpRect.width || 1000,
+    viewportHeight: vpRect.height || 700,
+    scale: view.scale,
+  });
 
-  view.x = Math.round(vpWidth / 2 - (card.x + cardW / 2) * view.scale);
-  view.y = Math.round(vpHeight / 2 - (card.y + cardH / 2) * view.scale);
+  view.x = next.x;
+  view.y = next.y;
   updateTransform();
 
   const el = document.getElementById(`dom-${card.id}`);
@@ -901,9 +821,7 @@ function createBranchCard(card, { autoFocus = true } = {}) {
   sessionController.scheduleSave();
 
   selectCard(newCard.id, autoFocus);
-  view.x = -newCard.x + 300;
-  view.y = -newCard.y + 140;
-  updateTransform();
+  ensureCardInView(newCard);
 
   return newCard;
 }
@@ -979,73 +897,19 @@ function renderCards(preserve = true) {
     } else if (card.id === selectedCardId) {
       cardEl.classList.add('is-selected-card');
     }
-    cardEl.innerHTML = `
-      <div class="card-header" data-drag-handle="true">
-        <div class="card-title-box">
-          <div class="card-dot" style="${isDoc ? 'background-color: #18181b; border-radius: 1px;' : (isMerge ? 'background-color: #18181b; border-radius: 2px;' : (isBattle ? 'background-color: #18181b;' : (isBranch ? 'background-color: #71717a;' : '')))}"></div>
-          <span class="card-title">${escapeHtml(card.title)}</span>
-          ${isDoc ? '<span class="card-origin-tag tag-doc">[资料源]</span>' : (isMerge ? '<span class="card-origin-tag tag-merge">[合并总结]</span>' : (isBattle ? '<span class="card-origin-tag tag-battle">[对比推导]</span>' : (isBranch ? '<span class="card-origin-tag">[追问分支]</span>' : '')))}
-        </div>
-        <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
-      </div>
-      ${card.sourceRef ? `
-        <div class="source-ref-badge" title="导入时的会话标题快照：${escapeHtml(card.sourceRef.titleAtImport || '')}">
-          本体导入快照 · ${escapeHtml(card.sourceRef.titleAtImport || card.sourceRef.sessionId)}
-          <button type="button" data-action="jump-source">跳回本体</button>
-        </div>
-      ` : ''}
-
-      <div class="card-body" id="body-${card.id}">
-        ${card.messages.map(m => `
-          <div class="msg-row ${m.role === 'user' ? 'msg-user' : 'msg-asst'}">
-            <span class="msg-role">${m.role === 'user' ? 'User' : escapeHtml(m.agentName || currentAgent.name || 'Assistant')}</span>
-            ${messageMarkup(m)}
-            ${m.requestId ? `<div class="request-status" id="status-${m.requestId}" role="status">${escapeHtml(statusText(m))}</div>` : ''}
-          </div>
-        `).join('')}
-      </div>
-
-      <div class="card-footer">
-        ${Array.isArray(card.stagedAttachments) && card.stagedAttachments.length > 0 ? `
-          <div class="staged-attachments-bar">
-            ${card.stagedAttachments.map((att, idx) => `
-              <div class="staged-att-chip" title="${escapeHtml(att.name)} (${formatFileSize(att.size)})">
-                <span class="staged-att-name">${escapeHtml(att.name)}</span>
-                <span class="staged-att-size">${formatFileSize(att.size)}</span>
-                <button class="staged-att-remove" data-action="remove-attachment" data-index="${idx}" title="移除附件">×</button>
-              </div>
-            `).join('')}
-          </div>
-        ` : ''}
-        <div class="card-input-row">
-          <button class="btn-card-attach" data-action="attach" title="添加文档资料附件" ${chainBusy ? 'disabled' : ''}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          </button>
-          <input type="text" class="card-input" placeholder="${isDoc ? '输入关于此文档的问题...' : '输入对话或追问...'}" id="input-${card.id}" ${!sessionController?.state.ready || sessionController.state.busy ? 'disabled' : ''}>
-          <button class="card-send-btn" data-action="send" ${chainBusy ? 'disabled' : ''}>发送</button>
-          <button class="card-send-btn btn-card-battle" data-action="battle" ${chainBusy ? 'disabled' : ''} title="多模型横向推导 / 对抗">对比 ▾</button>
-          <button class="card-send-btn" data-action="cancel" ${busy ? '' : 'hidden'}>取消</button>
-        </div>
-        <input type="file" id="file-${card.id}" class="card-file-input" style="display: none;" accept=".md,.markdown,.txt,.docx,.pdf,.json,.csv,.py,.js,.ts,.html,.css,.yml,.yaml,.xml,.sh,.sql" multiple>
-      </div>
-
-      <!-- 右侧连线追问与对比锚点组 -->
-      <div class="branch-anchors-group">
-        <div class="branch-anchor-btn" data-action="branch" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : (isDoc ? '从此资料开辟分析' : '从这里开辟追问分支')}">
-          +
-          <div class="branch-tooltip">${isDoc ? '从此资料开辟分析' : '从此拉出追问'}</div>
-        </div>
-        <div class="branch-anchor-btn btn-anchor-battle" data-action="branch-battle" role="button" aria-disabled="${chainBusy}" title="${chainBusy ? '请等待当前路径请求结束后再分叉' : '多模型横向对比分支'}">
-          ⑂
-          <div class="branch-tooltip">对比分支</div>
-        </div>
-      </div>
-
-      <!-- 2D 自由拉伸手柄组：右边缘(宽)、底边缘(高)、右下角(宽高对角) -->
-      <div class="card-resize-handle handle-right" data-action="resize-card" data-direction="right" title="按住拖拽调整卡片宽度"></div>
-      <div class="card-resize-handle handle-bottom" data-action="resize-card" data-direction="bottom" title="按住拖拽调整卡片高度"></div>
-      <div class="card-resize-handle handle-corner" data-action="resize-card" data-direction="corner" title="按住拖拽同时调整宽高"></div>
-    `;
+    cardEl.innerHTML = buildCardHtml({
+      card,
+      currentAgent,
+      isSelected: card.id === selectedCardId,
+      isMultiSelected: multiSelectedCardIds.has(card.id),
+      isBusy: busy,
+      chainBusy,
+      escapeHtml,
+      messageMarkup,
+      statusText,
+      formatFileSize,
+      isReady: Boolean(sessionController?.state.ready) && !sessionController.state.busy,
+    });
 
     bindCardEvents(cardEl, card);
     cardsLayer.appendChild(cardEl);
@@ -1380,40 +1244,27 @@ function bindCardEvents(cardEl, card) {
   });
 }
 
-// 画布视口拖拽平移 (Pan)
-listen(viewport, 'mousedown', (e) => {
-  if (e.button !== 0) return;
-  if (isSpacePressed) {
-    view.isDragging = true;
-    view.dragStartX = e.clientX - view.x;
-    view.dragStartY = e.clientY - view.y;
-    viewport.classList.add('is-dragging-canvas');
-    e.preventDefault();
-    return;
-  }
-  if (e.target.closest('.chat-card') || e.target.closest('.floating-zoom-bar') || e.target.closest('.canvas-header') || e.target.closest('.floating-merge-toolbar')) {
-    return;
-  }
-  clearMultiSelect();
-  selectCard(null);
-  view.isDragging = true;
-  view.dragStartX = e.clientX - view.x;
-  view.dragStartY = e.clientY - view.y;
-  viewport.classList.add('is-dragging-canvas');
-});
-
-listen(window, 'mousemove', (e) => {
-  if (!view.isDragging) return;
-  view.x = e.clientX - view.dragStartX;
-  view.y = e.clientY - view.dragStartY;
-  updateTransform();
-});
-
-listen(window, 'mouseup', () => {
-  if (view.isDragging) {
-    view.isDragging = false;
-    viewport.classList.remove('is-dragging-canvas');
-  }
+// 画布视口平移与缩放控制器 (Viewport Controller)
+const viewportController = bindViewportController({
+  viewport,
+  surface,
+  zoomText,
+  btnZoomIn,
+  btnZoomOut,
+  view,
+  getState: () => ({
+    isDisposed,
+    isSpacePressed,
+    onCanvasMouseDown: () => {
+      clearMultiSelect();
+      selectCard(null);
+    },
+  }),
+  onTransformChange: () => {
+    sessionController?.scheduleSave();
+  },
+  listen,
+  windowRef: window,
 });
 
 // 全局键盘快捷键
@@ -1441,33 +1292,6 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
     autoTidyLayout,
     createMergeCardFromSelected,
   },
-});
-
-// 滚轮缩放 (Zoom)
-listen(viewport, 'wheel', (e) => {
-  e.preventDefault();
-  const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
-  const newScale = Math.min(Math.max(view.scale * zoomFactor, 0.4), 2.2);
-
-  const rect = viewport.getBoundingClientRect();
-  const mouseX = e.clientX - rect.left;
-  const mouseY = e.clientY - rect.top;
-
-  view.x = mouseX - (mouseX - view.x) * (newScale / view.scale);
-  view.y = mouseY - (mouseY - view.y) * (newScale / view.scale);
-  view.scale = newScale;
-
-  updateTransform();
-}, { passive: false });
-
-listen(btnZoomIn, 'click', () => {
-  view.scale = Math.min(view.scale * 1.15, 2.2);
-  updateTransform();
-});
-
-listen(btnZoomOut, 'click', () => {
-  view.scale = Math.max(view.scale * 0.85, 0.4);
-  updateTransform();
 });
 
 // 树状一键自动整理排版算法 (Auto-Tidy Engine)
@@ -2776,6 +2600,8 @@ function disposePanel() {
   btnUseLastPrompt.onclick = null;
   const sendText = document.getElementById('bridge-send-text');
   if (sendText) sendText.oninput = null;
+  battleController.cleanup();
+  viewportController.cleanup();
   view.isDragging = false;
   isSpacePressed = false;
   viewport.classList.remove('is-hand-tool', 'is-dragging-canvas');
@@ -2796,34 +2622,6 @@ function disposePanel() {
 
 listen(window, 'pagehide', () => {
   disposePanel();
-});
-
-listen(btnBattleClose, 'click', closeBattleDialog);
-listen(btnBattleCancel, 'click', closeBattleDialog);
-listen(battleDialog, 'cancel', (e) => {
-  e.preventDefault();
-  closeBattleDialog();
-});
-
-listen(btnBattleSubmit, 'click', async () => {
-  const prompt = battlePromptInput?.value?.trim() || '';
-  if (!prompt) {
-    if (battleDialogError) battleDialogError.textContent = '请输入推导问题。';
-    return;
-  }
-  if (battleSelectedAgentIds.size === 0) {
-    if (battleDialogError) battleDialogError.textContent = '请至少选择一个对比助手。';
-    return;
-  }
-  if (battleDialogError) battleDialogError.textContent = '';
-
-  const targetCard = battleTargetCard;
-  const agents = cachedAgents.filter(a => battleSelectedAgentIds.has(a.id));
-  closeBattleDialog();
-
-  if (targetCard && cards.includes(targetCard)) {
-    void runBattleBranches(targetCard, prompt, agents);
-  }
 });
 
 listen(btnMergeCancel, 'click', () => {
@@ -2870,6 +2668,7 @@ if (typeof window !== 'undefined') {
     extractDocumentFile,
     createDocumentCard,
     unbindKeyboardShortcuts: () => unbindKeyboardShortcuts?.(),
+    unbindViewportController: () => viewportController?.cleanup(),
     isDisposed: () => isDisposed,
     dispose: disposePanel,
   };
