@@ -1538,7 +1538,10 @@ const searchController = bindSearchBarController({
       searchController.updateCounter(currentSearchIndex, searchMatches.length);
     };
     if (!query) { run(); return; }
+    // 记进 panelTimers：面板销毁时要能一起清掉，
+    // 否则关掉画布后这个延时回调还会去摸已经没了的 DOM
     searchDebounceTimer = setTimeout(run, 120);
+    panelTimers.add(searchDebounceTimer);
   },
   onNavigate: (direction) => {
     if (searchMatches.length === 0) return;
@@ -1551,7 +1554,7 @@ const searchController = bindSearchBarController({
     searchController.updateCounter(currentSearchIndex, searchMatches.length);
   },
   onClose: () => {
-    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
+    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); panelTimers.delete(searchDebounceTimer); searchDebounceTimer = null; }
     clearSearchHighlights();
     searchMatches = [];
     currentSearchIndex = -1;
@@ -2603,6 +2606,10 @@ function captureSnapshot() {
 }
 function applySnapshot(snapshot) {
   if (isDisposed) return;
+  // 换了会话就丢掉上一份删除留档。
+  // 卡片 id 在新会话里会从头复用（card-1、card-2……），
+  // 留着旧留档，撤销时可能把别的会话的内容塞进本会话的同 id 卡片。
+  removedCardArchive.clear();
   if (!snapshot) {
     cards = [];
     view.x = 60; view.y = 40; view.scale = 1; view.isDragging = false;
