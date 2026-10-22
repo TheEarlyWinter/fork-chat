@@ -26,6 +26,7 @@ import { createCardGestures } from './panel-card-gestures.js';
 import { createCardEvents } from './panel-card-events.js';
 import { createRenderer } from './panel-renderer.js';
 import { createSearchController } from './panel-search-controller.js';
+import { createSessionState } from './panel-session-state.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
@@ -934,80 +935,35 @@ listen(viewport, 'drop', async (e) => {
   await documentUi.dropFilesOnViewport(Array.from(e.dataTransfer.files), e.clientX, e.clientY);
 });
 
-function initialSnapshot() {
-  return {
-    cards: initialCards(),
-    view: { x: 60, y: 40, scale: 1 },
-    agent: {
-      ...currentAgent,
-      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
-    },
-  };
-}
-function captureSnapshot() {
-  for (const card of cards) {
-    const input = document.getElementById(`input-${card.id}`);
-    if (input && typeof input.value === 'string') card.draft = input.value;
-    const body = document.getElementById(`body-${card.id}`);
-    if (typeof body?.scrollTop === 'number') card.savedScrollTop = body.scrollTop;
-    for (const message of card.messages) {
-      if (!message.requestId) continue;
-      const details = document.getElementById(`asides-${message.requestId}`);
-      if (typeof details?.open === 'boolean') message.asidesOpen = details.open;
-    }
-  }
-  const { id, name, model, provider } = currentAgent;
-  return JSON.parse(JSON.stringify({
-    cards,
-    view: { x: view.x, y: view.y, scale: view.scale },
-    agent: {
-      id, name, model, provider,
-      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
-    },
-  }));
-}
-function applySnapshot(snapshot) {
-  if (isDisposed) return;
-  // 换了会话就丢掉上一份删除留档。
-  // 卡片 id 在新会话里会从头复用（card-1、card-2……），
-  // 留着旧留档，撤销时可能把别的会话的内容塞进本会话的同 id 卡片。
-  canvasActions.clearRemovedCardArchive();
-  if (!snapshot) {
-    cards = [];
-    view.x = 60; view.y = 40; view.scale = 1; view.isDragging = false;
-    updateHeaderStatus(); updateTransform(); renderCards(false);
-    return;
-  }
-  cards = snapshot.cards;
-  Object.assign(view, snapshot.view, { isDragging: false });
-  agentController.restoreAgent(snapshot.agent);
-  updateHeaderStatus(); updateTransform(); renderCards(false);
-  historyManager.clear();
-  historyManager.recordSnapshot(cards, selectedCardId);
-}
-function cancelSessionRequests(reason) {
-  documentPipeline.abortAll();
-  chatEngine.cancelAll(reason);
-}
-function publishSessionState(targetPanelId) {
-  if (isDisposed || !sessionController) return;
-  const state = sessionController.state;
-  bus.postMessage({
-    type: 'FORK_SESSION_STATE',
-    canvasId,
-    targetPanelId,
-    activeId: state.activeId,
-    ready: state.ready,
-    busy: state.busy || Boolean(deleteIntent),
-    saving: state.saving,
-    dirty: state.dirty,
-    error: state.error,
-    agent: {
-      ...currentAgent,
-      ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
-    },
-  });
-}
+const sessionState = createSessionState({
+  documentRef: document,
+  getCards: () => cards,
+  setCards: (next) => { cards = next; },
+  getView: () => view,
+  getSelectedCardId: () => selectedCardId,
+  getCurrentAgent: () => currentAgent,
+  getReasoningEffort: () => currentReasoningEffort,
+  getIsDisposed: () => isDisposed,
+  initialCards: () => initialCards(),
+  clearRemovedCardArchive: () => canvasActions.clearRemovedCardArchive(),
+  restoreAgent: (agent) => agentController.restoreAgent(agent),
+  updateHeaderStatus: () => updateHeaderStatus(),
+  updateTransform: () => updateTransform(),
+  renderCards: (preserve) => renderCards(preserve),
+  clearHistory: () => historyManager.clear(),
+  recordSnapshot: (list, id) => historyManager.recordSnapshot(list, id),
+  abortAllDocumentTasks: () => documentPipeline.abortAll(),
+  cancelAllRequests: (reason) => chatEngine.cancelAll(reason),
+  getSessionController: () => sessionController,
+  getDeleteIntent: () => deleteIntent,
+  bus,
+  canvasId,
+});
+const initialSnapshot = () => sessionState.initialSnapshot();
+const captureSnapshot = () => sessionState.captureSnapshot();
+const applySnapshot = (snapshot) => sessionState.applySnapshot(snapshot);
+const cancelSessionRequests = (reason) => sessionState.cancelSessionRequests(reason);
+const publishSessionState = (targetPanelId) => sessionState.publishSessionState(targetPanelId);
 function replySessionCommand(message, result) {
   if (isDisposed) return;
   if (!message?.requestId || !message?.panelId) return;
