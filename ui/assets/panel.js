@@ -23,6 +23,7 @@ import { createBridgeSend } from './panel-bridge-send.js';
 import { createBridgeIntents } from './panel-bridge-intents.js';
 import { createDocumentUi } from './panel-document-ui.js';
 import { createCardGestures } from './panel-card-gestures.js';
+import { createCardEvents } from './panel-card-events.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
@@ -61,6 +62,45 @@ const documentUi = createDocumentUi({
   later: (fn, ms) => later(fn, ms),
   cancelLater: (id) => cancelLater(id),
 });
+
+// 卡片上的全部事件
+const cardEvents = createCardEvents({
+  listen: (...args) => listen(...args),
+  getCardCleanups: () => cardCleanups,
+  hana,
+  flashMessage: (msg) => flashMessage(msg),
+  safeDetail: (v) => safeDetail(v),
+  getSession: () => sessionController,
+  getCards: () => cards,
+  getIsDisposed: () => isDisposed,
+  getIsSpacePressed: () => isSpacePressed,
+  getSelectedCardId: () => selectedCardId,
+  getDocumentRef: () => document,
+  getNavigator: () => (typeof navigator !== 'undefined' ? navigator : null),
+  activeRequests,
+  paintMessage: (m) => paintMessage(m),
+  ChatError,
+  chainIsBusy: (card) => chainIsBusy(card),
+  openBattleDialog: (card, text) => openBattleDialog(card, text),
+  documentUi,
+  cardGestures,
+  createBranchCard: (card, opts) => createBranchCard(card, opts),
+  closeCardHierarchy: (card) => closeCardHierarchy(card),
+  cycleCardStatusStamp: (v) => cycleCardStatusStamp(v),
+  selectCard: (id, focus) => selectCard(id, focus),
+  toggleMultiSelectCard: (id) => toggleMultiSelectCard(id),
+  clearMultiSelect: () => clearMultiSelect(),
+  renderCards: () => renderCards(),
+  renderConnectors: () => renderConnectors(),
+  scheduleSave: () => sessionController?.scheduleSave(),
+  recordSnapshot: (list, id) => historyManager?.recordSnapshot(list, id),
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  sendCardPrompt: (card, text, opts) => sendCardPrompt(card, text, opts),
+  findCardAncestorChain: (...args) => findCardAncestorChain(...args),
+  cardParentIds: (card) => cardParentIds(card),
+  formatCardChainMarkdown: (...args) => formatCardChainMarkdown(...args),
+});
+
 
 // 流式引擎：请求、回调、迟到丢弃都在这个模块里，画布只管画。
 // 依赖里凡是"晚于这里才知道是什么"的一律包成箭头，避免模块求值时就把它算死。
@@ -570,238 +610,7 @@ function renderCards(preserve = true) {
 }
 
 function bindCardEvents(cardEl, card) {
-  const on = (target, type, handler, options) => listen(target, type, handler, options, cardCleanups);
-  const header = cardEl.querySelector('[data-drag-handle="true"]');
-  const inputEl = cardEl.querySelector(`#input-${card.id}`);
-  const btnSend = cardEl.querySelector('[data-action="send"]');
-  const btnBattle = cardEl.querySelector('[data-action="battle"]');
-  const btnClose = cardEl.querySelector('[data-action="close"]');
-  // 跳回本体：只定位会话，不声称定位到具体某条消息
-  on(cardEl.querySelector('[data-action="jump-source"]'), 'click', async (e) => {
-    e.stopPropagation();
-    if (!card.sourceRef?.sessionId) return;
-    try {
-      await hana.sessions.focus({ sessionId: card.sourceRef.sessionId });
-    } catch (err) {
-      flashMessage(`跳回失败：${safeDetail(err?.message || String(err))}`);
-    }
-  });
-  const btnBranch = cardEl.querySelector('[data-action="branch"]');
-  const btnBranchBattle = cardEl.querySelector('[data-action="branch-battle"]');
-  const btnCancel = cardEl.querySelector('[data-action="cancel"]');
-  for (const message of card.messages) {
-    if (!message.requestId) continue;
-    const asides = cardEl.querySelector(`#asides-${message.requestId}`);
-    if (!asides) continue;
-    asides.open = Boolean(message.asidesOpen);
-    on(asides, 'toggle', () => {
-      if (message.asidesOpen !== asides.open) { message.asidesOpen = asides.open; sessionController?.scheduleSave(); }
-    });
-  }
-  on(cardEl, 'mousedown', (e) => {
-    if (isSpacePressed) return;
-    if (!e.target?.closest?.('input, textarea, button, [contenteditable="true"]')) {
-      const active = document.activeElement;
-      if (active && active !== document.body && typeof active.blur === 'function') {
-        active.blur();
-      }
-    }
-    if (e.shiftKey) {
-      e.stopPropagation();
-      toggleMultiSelectCard(card.id);
-      return;
-    }
-    clearMultiSelect();
-    selectCard(card.id, false);
-  });
-  on(inputEl, 'focus', () => {
-    selectCard(card.id, true);
-  });
-
-  inputEl.value = card.draft || '';
-  on(inputEl, 'input', () => { card.draft = inputEl.value; sessionController?.scheduleSave(); });
-  on(btnCancel, 'click', () => {
-    const active = activeRequests.get(card.id);
-    if (!active || active.terminalSeen) return;
-    if (document.activeElement === btnCancel) inputEl.focus({ preventScroll: true });
-    active.controller.abort(new ChatError('REQUEST_CANCELLED', '用户取消了本次等待。'));
-    active.message.status = 'cancelled';
-    active.message.failed = true;
-    paintMessage(active.message);
-  });
-
-  on(btnBattle, 'click', (e) => {
-    e.stopPropagation();
-    if (chainIsBusy(card) || !cards.includes(card)) return;
-    void openBattleDialog(card, inputEl.value.trim());
-  });
-  on(btnBranchBattle, 'click', (e) => {
-    e.stopPropagation();
-    if (chainIsBusy(card) || !cards.includes(card)) return;
-    void openBattleDialog(card, inputEl.value.trim());
-  });
-
-  const btnAttach = cardEl.querySelector('[data-action="attach"]');
-  const fileInput = cardEl.querySelector(`#file-${card.id}`);
-  const stagedBar = cardEl.querySelector('.staged-attachments-bar');
-
-  on(btnAttach, 'click', (e) => {
-    e.stopPropagation();
-    if (chainIsBusy(card) || !cards.includes(card)) return;
-    fileInput?.click();
-  });
-
-  on(fileInput, 'change', async (e) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    fileInput.value = ''; // 先清空，同一个文件再选一次也要能触发 change
-    await documentUi.attachFilesToCard(card, files);
-  });
-
-  on(stagedBar, 'click', (e) => {
-    const removeBtn = e.target.closest('[data-action="remove-attachment"]');
-    if (!removeBtn) return;
-    e.stopPropagation();
-    documentUi.removeStagedAttachment(card, parseInt(removeBtn.getAttribute('data-index'), 10));
-  });
-
-  // 卡片级文件拖拽支持
-  on(cardEl, 'dragover', (e) => {
-    if (e.dataTransfer?.types?.includes('Files')) {
-      e.preventDefault();
-      e.stopPropagation();
-      cardEl.classList.add('card-drop-active');
-    }
-  });
-
-  on(cardEl, 'dragleave', (e) => {
-    if (e.target === cardEl || !cardEl.contains(e.relatedTarget)) {
-      cardEl.classList.remove('card-drop-active');
-    }
-  });
-
-  on(cardEl, 'drop', async (e) => {
-    if (!canMutateCanvas() || !cards.includes(card)) return;
-    if (!e.dataTransfer?.files?.length) return;
-    e.preventDefault();
-    e.stopPropagation();
-    cardEl.classList.remove('card-drop-active');
-    documentUi.hideDropIndicator();
-    await documentUi.attachFilesToCard(card, Array.from(e.dataTransfer.files));
-  });
-
-  // 1. 卡片拖拽移动
-  on(header, 'mousedown', (e) => {
-    cardGestures.beginCardDrag({ card, cardEl, event: e });
-  });
-
-  // 1.1 卡片 2D 自由拖拽缩放（右侧宽、底部高、右下角宽高对角）
-  cardGestures.bindResizeHandles({ card, cardEl });
-
-  // 2. 发送消息并执行打字机流式推理
-  const doSend = async () => {
-    if (chainIsBusy(card) || !cards.includes(card)) return;
-    const text = inputEl.value.trim();
-    const hasStaged = Array.isArray(card.stagedAttachments) && card.stagedAttachments.length > 0;
-    if (!text && !hasStaged) return;
-    const staged = hasStaged ? [...card.stagedAttachments] : [];
-    card.stagedAttachments = [];
-    if (document.activeElement === btnSend) inputEl.focus({ preventScroll: true });
-    inputEl.value = '';
-    card.draft = '';
-    await sendCardPrompt(card, text, { attachments: staged });
-  };
-
-  on(btnSend, 'click', doSend);
-  on(inputEl, 'keydown', (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      doSend();
-      return;
-    }
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      createBranchCard(card, { autoFocus: true });
-      return;
-    }
-    if (e.key === 'Escape') {
-      inputEl.blur();
-      return;
-    }
-  });
-
-  // 3. 点击从右侧开辟追问分支卡片
-  on(btnBranch, 'click', (e) => {
-    e.stopPropagation();
-    if (isDisposed) return;
-    createBranchCard(card, { autoFocus: true });
-  });
-
-  // 4. 关闭卡片
-  on(btnClose, 'click', (e) => {
-    e.stopPropagation();
-    closeCardHierarchy(card);
-  });
-
-  // 5. 循环切换卡片标记盖戳 (星标 / 采纳 / 否决)
-  const btnStamp = cardEl.querySelector('[data-action="cycle-stamp"]');
-  if (btnStamp) {
-    on(btnStamp, 'click', (e) => {
-      e.stopPropagation();
-      if (isDisposed) return;
-      card.statusStamp = cycleCardStatusStamp(card.statusStamp);
-      renderCards();
-      sessionController?.scheduleSave();
-      historyManager.recordSnapshot(cards, card.id);
-    });
-  }
-
-  // 6. 顺藤摸瓜：整链导出为 Markdown 并一键复制
-  const btnExportChain = cardEl.querySelector('[data-action="export-chain"]');
-  if (btnExportChain) {
-    on(btnExportChain, 'click', async (e) => {
-      e.stopPropagation();
-      if (isDisposed) return;
-      const chain = findCardAncestorChain({ cards, targetCardId: card.id, cardParentIds });
-      if (!chain || chain.length === 0) {
-        flashMessage('未找到该卡片的推导链路');
-        return;
-      }
-      const markdown = formatCardChainMarkdown(chain, { title: `链路推导：${card.title || '长文'}` });
-      try {
-        if (navigator?.clipboard?.writeText) {
-          await navigator.clipboard.writeText(markdown);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = markdown;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-        }
-        flashMessage(`已顺藤摸瓜将 ${chain.length} 个节点的完整推导长文复制到剪贴板！`);
-      } catch (err) {
-        flashMessage(`导出复制失败：${safeDetail(err?.message || String(err))}`);
-      }
-    });
-  }
-
-  // 7. 折叠/展开子分支
-  const btnCollapseList = cardEl.querySelectorAll('[data-action="toggle-collapse"]');
-  btnCollapseList.forEach(btn => {
-    on(btn, 'click', (e) => {
-      e.stopPropagation();
-      if (isDisposed) return;
-      card.isCollapsed = !card.isCollapsed;
-      renderCards();
-      renderConnectors();
-      sessionController?.scheduleSave();
-      historyManager.recordSnapshot(cards, card.id);
-    });
-  });
+  cardEvents.bindCardEvents(cardEl, card);
 }
 
 // 全局卡片搜索控制器 (Ctrl+F)
