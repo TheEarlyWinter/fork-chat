@@ -8,6 +8,7 @@
 
 import { escapeHtml as defaultEscapeHtml } from './panel-format.js';
 import { safeDetail as defaultSafeDetail } from './host-api.js';
+import { selectedBridgeKind as resolveBridgeKind } from './panel-bridge.js';
 
 /** 会话尾号辅助函数：同名会话靠这个区分 */
 function shortId(id) {
@@ -79,8 +80,7 @@ export function createBridgeSend(deps = {}) {
   }
 
   function selectedBridgeKind() {
-    const kindSelect = getKindSelect();
-    return kindSelect?.value === 'tree-path' ? 'tree-path' : 'history';
+    return resolveBridgeKind(getKindSelect());
   }
 
   async function openBridgeSendDialog() {

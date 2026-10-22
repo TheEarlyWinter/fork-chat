@@ -21,6 +21,7 @@ import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
 import { createBridgeSend } from './panel-bridge-send.js';
 import { createBridgeIntents } from './panel-bridge-intents.js';
+import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
@@ -1121,9 +1122,6 @@ const bridgeErrorEl = document.getElementById('bridge-dialog-error');
 const bridgeImportBtn = document.getElementById('btn-bridge-import');
 const bridgeActiveHint = document.getElementById('bridge-active-hint');
 
-let bridgePreviewCache = null;
-let bridgeTargetSessionId = null;
-
 async function bridgeRequest(path, init) {
   if (isDisposed) throw inactiveError();
   const res = await abortable(requestHost(hana, path, { ...init, signal: panelAbort.signal }), panelAbort.signal);
@@ -1151,9 +1149,8 @@ const bridgeSend = createBridgeSend({
   flashMessage: (text) => flashMessage(text),
   getCards: () => cards,
   getSelectedCardId: () => selectedCardId,
-  getBridgeTargetSessionId: () => bridgeTargetSessionId,
+  getBridgeTargetSessionId: () => bridge.getBridgeTargetSessionId(),
   bridgeSendDialogEl,
-  bridgeKindSelect,
   listen,
 });
 
@@ -1165,10 +1162,6 @@ function closeBridgeSendDialog() {
   return bridgeSend.closeBridgeSendDialog();
 }
 
-function selectedBridgeKind() {
-  return bridgeSend.selectedBridgeKind();
-}
-
 function openBridgeSendDialog() {
   return bridgeSend.openBridgeSendDialog();
 }
@@ -1177,358 +1170,76 @@ function confirmBridgeSend() {
   return bridgeSend.confirmBridgeSend();
 }
 
+const bridge = createBridge({
+  documentRef: () => document,
+  windowRef: () => window,
+  hana,
+  isDisposed: () => isDisposed,
+  bridgeRequest: (path, init) => bridgeRequest(path, init),
+  safeDetail,
+  escapeHtml,
+  flashMessage: (text) => flashMessage(text),
+  canMutateCanvas: (generation) => canMutateCanvas(generation),
+  getGeneration: () => sessionController?.generation,
+  createBridgeDocCard: (payload) => createBridgeDocCard(payload),
+  flushSession: () => sessionController.flush(true),
+  getCanvasId: () => canvasId,
+  getOwnedClaims: () => getOwnedClaims(),
+  bindBridgeSend: () => bridgeSend.bind(),
+  pollBridgeIntents: () => pollBridgeIntents(),
+  addCleanup: (fn) => panelCleanups.add(fn),
+  // 测试环境（VM）里没有 setInterval，拿不到就不装轮询。
+  // 原来这条守卫就在调用处，搬的时候得跟着走，不然整块桥接初始化全炸。
+  setIntervalRef: (fn, ms) => (typeof setInterval === 'function' ? setInterval(fn, ms) : null),
+  clearIntervalRef: (id) => {
+    if (id != null && typeof clearInterval === 'function') clearInterval(id);
+  },
+  listen,
+  bridgeDialogEl,
+  bridgeSessionSelect,
+  bridgeKindSelect,
+  bridgeLeafSelect,
+  bridgeLeafField,
+  bridgePreviewEl,
+  bridgeErrorEl,
+  bridgeImportBtn,
+  bridgeActiveHint,
+});
+
+function selectedBridgeKind() {
+  return bridge.selectedBridgeKind();
+}
+
 function resetBridgeLeafChoices() {
-  if (bridgeLeafField) bridgeLeafField.hidden = true;
-  if (bridgeLeafSelect) {
-    bridgeLeafSelect.disabled = true;
-    bridgeLeafSelect.innerHTML = '<option value="">选择树状导入后读取</option>';
-    bridgeLeafSelect.value = '';
-  }
+  return bridge.resetBridgeLeafChoices();
 }
 
 function renderBridgeLeafChoices(preview) {
-  const branches = Array.isArray(preview?.branches) ? preview.branches : [];
-  if (bridgeLeafField) bridgeLeafField.hidden = false;
-  if (!bridgeLeafSelect) return;
-  bridgeLeafSelect.innerHTML = branches.length
-    ? '<option value="">请选择一个叶节点</option>' + branches.map((branch, index) => {
-      const id = String(branch.leafId || '');
-      const count = Number.isFinite(branch.messageCount) ? ` · ${branch.messageCount} 条` : '';
-      const summary = branch.lastText ? ` · ${String(branch.lastText).slice(0, 80)}` : '';
-      return `<option value="${escapeHtml(id)}">分支 ${index + 1}${count}${escapeHtml(summary)}</option>`;
-    }).join('')
-    : '<option value="">该会话没有可选叶节点</option>';
-  const selected = preview?.leafId || '';
-  bridgeLeafSelect.value = selected;
-  bridgeLeafSelect.disabled = branches.length === 0;
+  return bridge.renderBridgeLeafChoices(preview);
 }
 
-/** 会话尾号：同名会话靠这个区分 */
-function shortId(id) {
-  const text = String(id || '');
-  return text.length > 8 ? text.slice(-6) : text;
+function loadBridgeSessions(preferSessionId = null) {
+  return bridge.loadBridgeSessions(preferSessionId);
 }
 
-async function loadBridgeSessions(preferSessionId = null) {
-  if (isDisposed) return;
-  bridgeClearError();
-  if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">正在读取…</option>';
-  try {
-    const [data, active] = await Promise.all([
-      bridgeRequest('/api/bridge/sessions'),
-      (typeof hana !== 'undefined' && hana?.sessions?.getActive)
-        ? hana.sessions.getActive().catch(() => null)
-        : null,
-    ]);
-    if (isDisposed) return;
-    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
-    if (!bridgeSessionSelect) return;
-    if (!sessions.length) {
-      bridgeSessionSelect.innerHTML = '<option value="">没有可读的本体会话</option>';
-      if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-      return;
-    }
-    const activeSessionId = active?.sessionId || null;
-    const targetId = preferSessionId || activeSessionId || sessions[0]?.sessionId || '';
-
-    bridgeSessionSelect.innerHTML = sessions.map((s) => {
-      const count = s.messageCount == null ? '' : `（${s.messageCount} 条）`;
-      const isTarget = s.sessionId === targetId;
-      const isCur = s.sessionId === activeSessionId ? ' [当前活跃]' : '';
-      return `<option value="${escapeHtml(s.sessionId)}"${isTarget ? ' selected' : ''}>${escapeHtml(s.title || s.sessionId)}${isCur}${count} · ${escapeHtml(shortId(s.sessionId))}</option>`;
-    }).join('');
-
-    if (targetId) {
-      bridgeSessionSelect.value = targetId;
-      bridgeTargetSessionId = targetId;
-      if (bridgeActiveHint) {
-        bridgeActiveHint.textContent = `已自动绑定：${active?.title || targetId}`;
-      }
-      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
-      void runBridgePreview();
-    }
-  } catch (err) {
-    if (isDisposed) return;
-    if (bridgeSessionSelect) bridgeSessionSelect.innerHTML = '<option value="">读取失败</option>';
-    bridgeFail(bridgeErrorEl, err);
-  }
+function bindActiveSession() {
+  return bridge.bindActiveSession();
 }
 
-async function bindActiveSession() {
-  if (isDisposed) return;
-  bridgeClearError();
-  try {
-    const active = await hana.sessions.getActive();
-    if (isDisposed) return;
-    if (!active?.sessionId) {
-      if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口没有选中会话';
-      return;
-    }
-    bridgeTargetSessionId = active.sessionId;
-    if (bridgeActiveHint) bridgeActiveHint.textContent = `已绑定：${active.title || active.sessionId}`;
-    if (bridgeSessionSelect) {
-      bridgeSessionSelect.value = active.sessionId;
-      if (bridgeImportBtn) bridgeImportBtn.disabled = false;
-      void runBridgePreview();
-    }
-  } catch {
-    if (isDisposed) return;
-    if (bridgeActiveHint) bridgeActiveHint.textContent = '当前窗口不支持读取本体会话';
-  }
+function runBridgePreview() {
+  return bridge.runBridgePreview();
 }
 
-async function runBridgePreview() {
-  if (isDisposed) return;
-  bridgeClearError();
-  bridgePreviewCache = null;
-  const sessionId = bridgeSessionSelect?.value;
-  const kind = selectedBridgeKind();
-  const leafId = kind === 'tree-path' ? (bridgeLeafSelect?.value || null) : null;
-  if (kind === 'history') resetBridgeLeafChoices();
-  else if (bridgeLeafField) bridgeLeafField.hidden = false;
-  if (!sessionId) {
-    if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-    return;
-  }
-  if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-  if (bridgePreviewEl) {
-    bridgePreviewEl.innerHTML = kind === 'tree-path'
-      ? '<p class="bridge-placeholder">正在读取分支树…</p>'
-      : '<p class="bridge-placeholder">正在读取最新对话快照…</p>';
-  }
-  try {
-    const payload = { sessionId, kind, limit: 100 };
-    if (leafId) payload.leafId = leafId;
-    const data = await bridgeRequest('/api/bridge/preview', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    const preview = data.preview;
-    bridgePreviewCache = preview;
-    if (kind === 'tree-path') renderBridgeLeafChoices(preview);
-
-    const messages = Array.isArray(preview.messages) ? preview.messages : [];
-    if (kind === 'tree-path' && preview.needsLeafChoice) {
-      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">该会话有多个分支，请选择一个叶节点后再导入。</p>';
-      return;
-    }
-    if (!messages.length) {
-      bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">该会话暂无可见消息。</p>';
-      return;
-    }
-    const rows = messages.map((m) => `
-      <div class="bridge-msg">
-        <span class="bridge-msg-role ${m.role === 'user' ? 'is-user' : ''}">${m.role === 'user' ? '用户' : '助手'}</span>
-        ${escapeHtml(String(m.text || '').slice(0, 600))}${String(m.text || '').length > 600 ? '…' : ''}
-      </div>
-    `).join('');
-    const warn = [];
-    if (preview.truncated) warn.push(`已截取最近 ${messages.length} 条记录`);
-    if (preview.droppedCount) warn.push(`${preview.droppedCount} 条不可见条目已过滤`);
-    if (preview.status?.isStreaming) warn.push('该会话正在生成中');
-    bridgePreviewEl.innerHTML = rows + (warn.length ? `<div class="bridge-warn">${escapeHtml(warn.join('；'))}</div>` : '');
-    if (bridgeImportBtn) bridgeImportBtn.disabled = false;
-  } catch (err) {
-    if (isDisposed) return;
-    bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">读取快照失败。</p>';
-    bridgeFail(bridgeErrorEl, err);
-  }
+function importBridgePreview() {
+  return bridge.importBridgePreview();
 }
 
-async function importBridgePreview() {
-  if (!canMutateCanvas()) return;
-  const generation = sessionController.generation;
-  const sessionId = bridgeSessionSelect?.value;
-  const kind = selectedBridgeKind();
-  const leafId = kind === 'tree-path' ? (bridgeLeafSelect?.value || null) : null;
-  if (!sessionId) {
-    bridgeFail(bridgeErrorEl, new Error('请先选择一个会话'));
-    return;
-  }
-  bridgeClearError();
-  if (bridgeImportBtn) {
-    bridgeImportBtn.disabled = true;
-    bridgeImportBtn.textContent = '正在导入…';
-  }
-  try {
-    let preview = bridgePreviewCache;
-    const previewMatches = preview
-      && preview.session?.sessionId === sessionId
-      && (kind === 'history'
-        ? preview.kind === 'history'
-        : preview.kind === 'tree' && Boolean(leafId) && preview.leafId === leafId);
-    if (!previewMatches) {
-      const payload = { sessionId, kind, limit: 100 };
-      if (leafId) payload.leafId = leafId;
-      const data = await bridgeRequest('/api/bridge/preview', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      if (!canMutateCanvas(generation)) return;
-      preview = data?.preview;
-      bridgePreviewCache = preview;
-    }
-    if (!canMutateCanvas(generation)) return;
-    if (preview?.needsLeafChoice) {
-      flashMessage('请先选择一个分支叶节点。');
-      return;
-    }
-    const messages = Array.isArray(preview?.messages) ? preview.messages : [];
-    if (!messages.length) {
-      flashMessage('该会话没有可导入的对话记录。');
-      return;
-    }
-    const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
-    const text = `# ${preview.session.title || '本体会话'}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
-    const sourceRef = {
-      version: 1,
-      kind: 'hana-session',
-      sessionId: preview.session.sessionId,
-      entryIds: messages.map((m) => m.entryId).filter(Boolean),
-      leafId: preview.leafId || leafId || null,
-      titleAtImport: preview.session.title || '',
-      importedAt: new Date().toISOString(),
-      contentHash: '',
-      importKind: kind,
-    };
-    // 内容哈希用与服务端同一套规则，保证去重键一致
-    let h1 = 0x811c9dc5;
-    let h2 = 0x01000193;
-    const payload = messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
-    for (let i = 0; i < payload.length; i += 1) {
-      const code = payload.charCodeAt(i);
-      h1 = (h1 ^ code) >>> 0;
-      h1 = Math.imul(h1, 0x01000193) >>> 0;
-      h2 = (h2 + code * (i + 1)) >>> 0;
-    }
-    sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
-
-    createBridgeDocCard({
-      title: preview.session.title || '本体会话',
-      text,
-      sourceRef,
-      messageCount: messages.length,
-    });
-    bridgeDialogEl?.close();
-  } catch (err) {
-    bridgeFail(bridgeErrorEl, err);
-  } finally {
-    if (!isDisposed && bridgeImportBtn) {
-      bridgeImportBtn.disabled = false;
-      bridgeImportBtn.textContent = '导入到画布';
-    }
-  }
+function loadOutboxList() {
+  return bridge.loadOutboxList();
 }
 
-async function loadOutboxList() {
-  if (isDisposed) return;
-  const box = document.getElementById('bridge-outbox-list');
-  if (!box) return;
-  try {
-    const data = await bridgeRequest('/api/bridge/actions');
-    const actions = Array.isArray(data.actions) ? data.actions : [];
-    if (!actions.length) {
-      box.innerHTML = '<p class="bridge-placeholder">还没有回传记录。</p>';
-      return;
-    }
-    box.innerHTML = actions.map((a) => {
-      const tone = a.state === 'failed' ? 'is-bad' : (a.state === 'unknown' ? 'is-unknown' : 'is-ok');
-      return `<div class="bridge-outbox-item">
-        <span class="bridge-state ${tone}">${escapeHtml(a.state)}</span>
-        ${escapeHtml(a.kind === 'send-text' ? '文本' : 'Markdown 文件')}
-        · ${escapeHtml(a.targetSessionId)}
-        ${a.errorCode ? ` · ${escapeHtml(a.errorCode)}` : ''}
-      </div>`;
-    }).join('');
-  } catch (err) {
-    if (isDisposed) return;
-    box.innerHTML = `<p class="bridge-placeholder">${escapeHtml(safeDetail(err?.message || String(err)))}</p>`;
-  }
-}
-
-let bridgeInitialized = false;
-
-async function deliverIntent(intent, { preview, messages, generation, release }) {
-  // 精准区分：消息级导入（精确匹配 intent.messageId）还是全会话历史导入
-  const targetMsg = intent.messageId ? messages.find((m) => m.entryId === intent.messageId) : null;
-  // 带 messageId 却找不到：说明那条消息在预览范围外（更早、或另一条分支）。
-  // 这时不能悄悄退化成"导入整段历史" —— 用户点的是那条消息，
-  // 范围被悄悄放大后，后面的分支会把没打算要的内容一起喂给模型。
-  if (intent.messageId && !targetMsg) {
-    await release();
-    flashMessage('那条消息不在这次能读到的范围里（可能更早或属于别的分支），没有导入。');
-    return;
-  }
-  let cardTitle = '';
-  let text = '';
-  let importKind = 'history';
-  let importEntryIds = [];
-  let importedCount = 0;
-
-  if (targetMsg) {
-    importKind = 'message';
-    importEntryIds = [targetMsg.entryId].filter(Boolean);
-    cardTitle = intent.title ? `消息切片 · ${intent.title}` : `消息切片 · ${shortId(intent.sessionId)}`;
-    text = `# ${cardTitle}\n\n> 本体导入快照（单条消息）。只读摘录，不代表原会话仍在同步。\n\n【${targetMsg.role === 'user' ? '用户' : '助手'}】${targetMsg.text}`;
-    importedCount = 1;
-  } else {
-    importKind = 'history';
-    importEntryIds = messages.map((m) => m.entryId).filter(Boolean);
-    cardTitle = intent.title || preview.session?.title || '本体会话';
-    const body = messages.map((m) => `【${m.role === 'user' ? '用户' : '助手'}】${m.text}`).join('\n\n');
-    text = `# ${cardTitle}\n\n> 本体导入快照。只读摘录，不代表原会话仍在同步。\n\n${body}`;
-    importedCount = messages.length;
-  }
-
-  const sourceRef = {
-    version: 1,
-    kind: 'hana-session',
-    sessionId: intent.sessionId,
-    entryIds: importEntryIds,
-    leafId: preview.leafId || null,
-    titleAtImport: intent.title || preview.session?.title || '',
-    importedAt: new Date().toISOString(),
-    contentHash: '',
-    importKind,
-  };
-
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  const hashTarget = targetMsg ? `${targetMsg.role}:${targetMsg.text}` : messages.map((m) => `${m.role}:${m.text}`).join('\u0000');
-  for (let i = 0; i < hashTarget.length; i += 1) {
-    const code = hashTarget.charCodeAt(i);
-    h1 = (h1 ^ code) >>> 0;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 = (h2 + code * (i + 1)) >>> 0;
-  }
-  sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
-
-  const imported = createBridgeDocCard({
-    title: cardTitle,
-    text,
-    sourceRef,
-    messageCount: importedCount,
-  });
-
-  if (!imported || !canMutateCanvas(generation)) { await release(); return; }
-  // 先落盘再 ACK：ACK 一旦发出，这条凭条就没了。
-  // 如果卡片只在内存里、随后的自动保存又因配额或磁盘错误失败，
-  // 就会变成「凭条已消费、内容没存下」的静默丢失。
-  try {
-    await sessionController.flush(true);
-  } catch (saveErr) {
-    await release();
-    flashMessage(`导入没能落盘（${safeDetail(saveErr?.message || String(saveErr))}），凭条已释放，可以重试。`);
-    return;
-  }
-  await bridgeRequest(`/api/bridge/intents/${encodeURIComponent(intent.intentId)}/ack`, {
-    method: 'POST',
-    body: JSON.stringify({ claimer: canvasId }),
-  });
-
-  getOwnedClaims().delete(intent.intentId);
-  const flashDesc = targetMsg ? `单条消息快照` : `《${cardTitle}》（${messages.length} 条记录）`;
-  flashMessage(`已自动从本体导入${flashDesc}到画布。`);
+function deliverIntent(intent, ctx) {
+  return bridge.deliverIntent(intent, ctx);
 }
 
 const bridgeIntents = createBridgeIntents({
@@ -1554,80 +1265,7 @@ function pollBridgeIntents() {
 }
 
 function initSessionBridge() {
-  if (isDisposed || bridgeInitialized || !bridgeDialogEl) return;
-  // 裁剪过的宿主（或测试里的假 document）没有这些方法，就让桥接安静退场
-  if (typeof document.querySelectorAll !== 'function') return;
-  bridgeInitialized = true;
-  listen(document.getElementById('btn-bridge-open'), 'click', async () => {
-    bridgeDialogEl.showModal();
-    await loadBridgeSessions();
-    await loadOutboxList();
-  });
-  listen(document.getElementById('btn-bridge-close'), 'click', () => bridgeDialogEl.close());
-  listen(document.getElementById('btn-bridge-cancel'), 'click', () => bridgeDialogEl.close());
-  listen(document.getElementById('btn-bridge-bind-active'), 'click', bindActiveSession);
-  listen(document.getElementById('btn-bridge-preview'), 'click', runBridgePreview);
-  listen(bridgeImportBtn, 'click', importBridgePreview);
-  listen(document.getElementById('btn-bridge-refresh-outbox'), 'click', loadOutboxList);
-
-  listen(bridgeSessionSelect, 'change', () => {
-    const val = bridgeSessionSelect.value;
-    if (val) {
-      void runBridgePreview();
-    } else {
-      if (bridgeImportBtn) bridgeImportBtn.disabled = true;
-      if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">请选择要导入的会话。</p>';
-    }
-  });
-  listen(bridgeKindSelect, 'change', () => {
-    bridgePreviewCache = null;
-    void runBridgePreview();
-  });
-  listen(bridgeLeafSelect, 'change', () => {
-    if (selectedBridgeKind() === 'tree-path') void runBridgePreview();
-  });
-
-  listen(document.getElementById('bridge-tab-import'), 'click', () => {
-    document.getElementById('bridge-pane-import').hidden = false;
-    document.getElementById('bridge-pane-outbox').hidden = true;
-    document.getElementById('bridge-tab-import').classList.add('is-active');
-    document.getElementById('bridge-tab-outbox').classList.remove('is-active');
-  });
-  listen(document.getElementById('bridge-tab-outbox'), 'click', () => {
-    document.getElementById('bridge-pane-import').hidden = true;
-    document.getElementById('bridge-pane-outbox').hidden = false;
-    document.getElementById('bridge-tab-outbox').classList.add('is-active');
-    document.getElementById('bridge-tab-import').classList.remove('is-active');
-    void loadOutboxList();
-  });
-
-  bridgeSend.bind();
-
-  void pollBridgeIntents();
-  if (typeof setInterval === 'function') {
-    const timer = setInterval(() => { void pollBridgeIntents(); }, 5000);
-    panelCleanups.add(() => clearInterval(timer));
-  }
-  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-    listen(window, 'focus', () => void pollBridgeIntents());
-  }
-  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-    listen(document, 'visibilitychange', () => {
-      if (!document.hidden) void pollBridgeIntents();
-    });
-  }
-  // 前台会话切换只更新提示，不改已绑定目标
-  try {
-    const stopActive = hana.sessions.onActiveChanged?.((change) => {
-      if (isDisposed || !bridgeActiveHint) return;
-      bridgeActiveHint.textContent = change?.sessionId
-        ? `当前会话：${change.title || change.sessionId}`
-        : '当前窗口没有选中会话';
-    });
-    if (typeof stopActive === 'function') panelCleanups.add(stopActive);
-  } catch {
-    // 窗口不支持就静默
-  }
+  return bridge.initSessionBridge();
 }
 
 if (document.readyState === 'loading') {
@@ -1997,7 +1635,7 @@ listen(window, 'pagehide', () => {
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
 await sessionController.init();
-if (bridgeInitialized && !isDisposed) void pollBridgeIntents();
+if (bridge.isInitialized() && !isDisposed) void pollBridgeIntents();
 
 if (typeof window !== 'undefined') {
   window.__forkChat = {
