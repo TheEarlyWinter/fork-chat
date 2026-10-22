@@ -6,12 +6,13 @@ import { createForkSessionStore } from './fork-session-store.js';
 import { createForkSessionController } from './fork-session-controller.js';
 import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
 import { renderConnectorsLayer } from './panel-connectors.js';
-import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewportToCluster as fitViewportToClusterLayout, computeAutoTidyPositions } from './panel-layout.js';
+import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewportToCluster as fitViewportToClusterLayout, computeAutoTidyPositions, collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
 import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js';
 import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
 import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
-import { clampCardWidth, clampCardHeight, buildCardHtml } from './panel-cards.js';
+import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
 import { createHistoryManager } from './panel-history.js';
+import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
 let sessionController = null;
@@ -223,6 +224,12 @@ const btnNewRoot = document.getElementById('btn-new-root');
 const btnImportDoc = document.getElementById('btn-import-doc');
 const globalDocInput = document.getElementById('global-doc-input');
 const canvasDropIndicator = document.getElementById('canvas-drop-indicator');
+const canvasSearchBar = document.getElementById('canvas-search-bar');
+const canvasSearchInput = document.getElementById('canvas-search-input');
+const canvasSearchCounter = document.getElementById('canvas-search-counter');
+const btnSearchPrev = document.getElementById('btn-search-prev');
+const btnSearchNext = document.getElementById('btn-search-next');
+const btnSearchClose = document.getElementById('btn-search-close');
 const sessionStatusEl = document.getElementById('session-status');
 const btnRetrySave = document.getElementById('btn-retry-save');
 const btnSaveCopy = document.getElementById('btn-save-copy');
@@ -335,9 +342,10 @@ function updateTransform() {
 // 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
 function renderConnectors() {
   if (isDisposed) return;
+  const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
   renderConnectorsLayer({
     svg: connectorsSvg,
-    cards,
+    cards: visibleCards,
     cardParentIds,
     cardHasParent,
     documentRef: document,
@@ -891,7 +899,9 @@ function renderCards(preserve = true) {
   drain(cardCleanups);
   cardsLayer.innerHTML = '';
 
-  cards.forEach(card => {
+  const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
+
+  visibleCards.forEach(card => {
     const cardEl = document.createElement('div');
     cardEl.className = 'chat-card';
     cardEl.id = `dom-${card.id}`;
@@ -914,8 +924,13 @@ function renderCards(preserve = true) {
     } else if (card.id === selectedCardId) {
       cardEl.classList.add('is-selected-card');
     }
+    if (card.statusStamp) {
+      cardEl.classList.add(`is-stamp-${card.statusStamp}`);
+    }
+    const descendantsCount = collectSubtreeCardIds({ cards, rootCardId: card.id, cardParentIds }).size;
     cardEl.innerHTML = buildCardHtml({
       card,
+      childCount: descendantsCount,
       currentAgent,
       isSelected: card.id === selectedCardId,
       isMultiSelected: multiSelectedCardIds.has(card.id),
@@ -1277,6 +1292,65 @@ function bindCardEvents(cardEl, card) {
     e.stopPropagation();
     closeCardHierarchy(card);
   });
+
+  // 5. 循环切换卡片标记盖戳 (星标 / 采纳 / 否决)
+  const btnStamp = cardEl.querySelector('[data-action="cycle-stamp"]');
+  if (btnStamp) {
+    on(btnStamp, 'click', (e) => {
+      e.stopPropagation();
+      if (isDisposed) return;
+      card.statusStamp = cycleCardStatusStamp(card.statusStamp);
+      renderCards();
+      sessionController?.scheduleSave();
+      historyManager.recordSnapshot(cards, card.id);
+    });
+  }
+
+  // 6. 顺藤摸瓜：整链导出为 Markdown 并一键复制
+  const btnExportChain = cardEl.querySelector('[data-action="export-chain"]');
+  if (btnExportChain) {
+    on(btnExportChain, 'click', async (e) => {
+      e.stopPropagation();
+      if (isDisposed) return;
+      const chain = findCardAncestorChain({ cards, targetCardId: card.id, cardParentIds });
+      if (!chain || chain.length === 0) {
+        flashMessage('未找到该卡片的推导链路');
+        return;
+      }
+      const markdown = formatCardChainMarkdown(chain, { title: `链路推导：${card.title || '长文'}` });
+      try {
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(markdown);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = markdown;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        flashMessage(`已顺藤摸瓜将 ${chain.length} 个节点的完整推导长文复制到剪贴板！`);
+      } catch (err) {
+        flashMessage(`导出复制失败：${safeDetail(err?.message || String(err))}`);
+      }
+    });
+  }
+
+  // 7. 折叠/展开子分支
+  const btnCollapseList = cardEl.querySelectorAll('[data-action="toggle-collapse"]');
+  btnCollapseList.forEach(btn => {
+    on(btn, 'click', (e) => {
+      e.stopPropagation();
+      if (isDisposed) return;
+      card.isCollapsed = !card.isCollapsed;
+      renderCards();
+      renderConnectors();
+      sessionController?.scheduleSave();
+      historyManager.recordSnapshot(cards, card.id);
+    });
+  });
 }
 
 // 画布视口平移与缩放控制器 (Viewport Controller)
@@ -1300,6 +1374,72 @@ const viewportController = bindViewportController({
   },
   listen,
   windowRef: window,
+});
+
+// 全局卡片搜索控制器 (Ctrl+F)
+let searchMatches = [];
+let currentSearchIndex = -1;
+
+function clearSearchHighlights() {
+  cards.forEach(c => {
+    const el = document.getElementById(`dom-${c.id}`);
+    el?.classList.remove('is-search-match', 'is-search-active');
+  });
+}
+
+function focusSearchMatch(index) {
+  if (index < 0 || index >= searchMatches.length) return;
+  cards.forEach(c => {
+    const el = document.getElementById(`dom-${c.id}`);
+    el?.classList.remove('is-search-active');
+  });
+  const target = searchMatches[index];
+  if (target) {
+    const el = document.getElementById(`dom-${target.id}`);
+    el?.classList.add('is-search-active');
+    selectCard(target.id, false);
+    ensureCardInView(target);
+  }
+}
+
+const searchController = bindSearchBarController({
+  searchBarEl: canvasSearchBar,
+  inputEl: canvasSearchInput,
+  counterEl: canvasSearchCounter,
+  btnPrev: btnSearchPrev,
+  btnNext: btnSearchNext,
+  btnClose: btnSearchClose,
+  onSearch: (query) => {
+    clearSearchHighlights();
+    searchMatches = findCardsByKeyword({ cards, query });
+    if (searchMatches.length > 0) {
+      currentSearchIndex = 0;
+      searchMatches.forEach(c => {
+        const el = document.getElementById(`dom-${c.id}`);
+        el?.classList.add('is-search-match');
+      });
+      focusSearchMatch(0);
+    } else {
+      currentSearchIndex = -1;
+    }
+    searchController.updateCounter(currentSearchIndex, searchMatches.length);
+  },
+  onNavigate: (direction) => {
+    if (searchMatches.length === 0) return;
+    currentSearchIndex = getNextMatchIndex({
+      currentIndex: currentSearchIndex,
+      totalCount: searchMatches.length,
+      direction,
+    });
+    focusSearchMatch(currentSearchIndex);
+    searchController.updateCounter(currentSearchIndex, searchMatches.length);
+  },
+  onClose: () => {
+    clearSearchHighlights();
+    searchMatches = [];
+    currentSearchIndex = -1;
+  },
+  listen,
 });
 
 // 全局键盘快捷键
@@ -1337,6 +1477,7 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
       historyManager.redo();
     },
     isBusy: () => activeRequests.size > 0 || !sessionController?.state.ready || sessionController.state.busy,
+    openSearchBar: () => searchController?.open(),
   },
 });
 

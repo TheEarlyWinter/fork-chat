@@ -178,3 +178,80 @@ export function computeAutoTidyPositions(cards, cardParentIds) {
 
   return positions;
 }
+
+/**
+ * 递归搜集指定根卡片之下的所有后代节点 ID（不含根卡片本身）
+ * @param {object} options
+ * @param {Array<object>} options.cards
+ * @param {string} options.rootCardId
+ * @param {Function} [options.cardParentIds]
+ * @returns {Set<string>}
+ */
+export function collectSubtreeCardIds({ cards = [], rootCardId, cardParentIds } = {}) {
+  const result = new Set();
+  if (!Array.isArray(cards) || !rootCardId) return result;
+
+  const resolveParentIds = (card) => {
+    if (typeof cardParentIds === 'function') {
+      const res = cardParentIds(card);
+      if (Array.isArray(res)) return res;
+    }
+    const ids = [];
+    if (card?.parentId) ids.push(card.parentId);
+    if (Array.isArray(card?.parentIds)) ids.push(...card.parentIds);
+    return Array.from(new Set(ids));
+  };
+
+  // 建立 parent -> children 邻接表
+  const childrenMap = new Map();
+  for (const card of cards) {
+    if (!card || !card.id) continue;
+    const pIds = resolveParentIds(card);
+    for (const pId of pIds) {
+      if (!childrenMap.has(pId)) childrenMap.set(pId, []);
+      childrenMap.get(pId).push(card.id);
+    }
+  }
+
+  // 广度优先遍历所有子孙节点
+  const queue = [...(childrenMap.get(rootCardId) || [])];
+  while (queue.length > 0) {
+    const childId = queue.shift();
+    if (!result.has(childId) && childId !== rootCardId) {
+      result.add(childId);
+      const grandChildren = childrenMap.get(childId) || [];
+      for (const gcId of grandChildren) {
+        if (!result.has(gcId) && gcId !== rootCardId) {
+          queue.push(gcId);
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 遍历卡片集合，计算受折叠状态影响后真正可见的卡片列表与隐藏卡片集合
+ * @param {object} options
+ * @param {Array<object>} options.cards
+ * @param {Function} [options.cardParentIds]
+ * @returns {{ visibleCards: Array<object>, hiddenCardIds: Set<string> }}
+ */
+export function computeVisibleCards({ cards = [], cardParentIds } = {}) {
+  if (!Array.isArray(cards)) return { visibleCards: [], hiddenCardIds: new Set() };
+
+  const hiddenCardIds = new Set();
+
+  for (const card of cards) {
+    if (card && card.isCollapsed) {
+      const subtreeIds = collectSubtreeCardIds({ cards, rootCardId: card.id, cardParentIds });
+      for (const id of subtreeIds) {
+        hiddenCardIds.add(id);
+      }
+    }
+  }
+
+  const visibleCards = cards.filter(card => card && !hiddenCardIds.has(card.id));
+  return { visibleCards, hiddenCardIds };
+}

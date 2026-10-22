@@ -59,6 +59,18 @@
         <button class="zoom-btn" id="btn-zoom-in">+</button>
       </div>
 
+      <!-- 全画布内容搜索悬浮栏 (Ctrl+F) -->
+      <div class="floating-search-bar" id="canvas-search-bar" hidden>
+        <span class="search-icon-symbol" title="全画布检索">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        </span>
+        <input type="text" class="search-input" id="canvas-search-input" placeholder="在画布中搜索 (Enter 下一个, Esc 退出)...">
+        <span class="search-counter mono" id="canvas-search-counter">0/0</span>
+        <button class="search-nav-btn" id="btn-search-prev" title="上一个匹配 (Shift+Enter)">▲</button>
+        <button class="search-nav-btn" id="btn-search-next" title="下一个匹配 (Enter)">▼</button>
+        <button class="search-close-btn" id="btn-search-close" title="关闭搜索 (Esc)">×</button>
+      </div>
+
       <!-- 多选分支合并悬浮操作栏（纯白极简规范） -->
       <div class="floating-merge-toolbar" id="merge-toolbar" hidden>
         <span class="merge-count-text" id="merge-count-text">已选 2 个分支</span>

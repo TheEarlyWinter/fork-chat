@@ -277,6 +277,46 @@ html, body {
   box-shadow: 0 0 0 1px #18181b, 0 6px 20px rgba(0, 0, 0, 0.09);
 }
 
+/* 状态盖戳卡片视觉特征 */
+.chat-card.is-stamp-starred {
+  border-color: rgba(234, 179, 8, 0.65) !important;
+  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.35), 0 4px 14px rgba(234, 179, 8, 0.12) !important;
+}
+
+.chat-card.is-stamp-accepted {
+  border-color: rgba(34, 197, 94, 0.65) !important;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.35), 0 4px 14px rgba(34, 197, 94, 0.12) !important;
+}
+
+.chat-card.is-stamp-rejected {
+  opacity: 0.55;
+  filter: grayscale(0.5);
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+
+.chat-card.is-stamp-rejected:hover {
+  opacity: 0.88;
+  filter: grayscale(0.15);
+}
+
+/* 搜索匹配与视口对焦高亮 */
+.chat-card.is-search-match {
+  border-color: rgba(234, 179, 8, 0.75) !important;
+  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.4), 0 4px 16px rgba(234, 179, 8, 0.15) !important;
+}
+
+.chat-card.is-search-active {
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px #2563eb, 0 8px 24px rgba(37, 99, 235, 0.22) !important;
+  animation: search-card-pulse 1.4s ease-out;
+}
+
+@keyframes search-card-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
 /* 卡片头部 */
 .card-header {
   display: flex;
@@ -324,6 +364,84 @@ html, body {
   color: var(--text-main);
   font-weight: 600;
   letter-spacing: -0.2px;
+}
+
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.card-collapse-btn,
+.card-export-btn,
+.card-stamp-btn {
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.card-collapse-btn:hover,
+.card-export-btn:hover,
+.card-stamp-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-main);
+}
+
+.collapsed-pill {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(113, 113, 122, 0.14);
+  color: #52525b;
+  border: 1px solid rgba(113, 113, 122, 0.28);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  user-select: none;
+  line-height: 1.4;
+  font-weight: 500;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.collapsed-pill:hover {
+  background: rgba(113, 113, 122, 0.24);
+  color: #18181b;
+}
+
+.card-stamp-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.4;
+}
+
+.card-stamp-badge.stamp-starred {
+  background: rgba(234, 179, 8, 0.15);
+  color: #b45309;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
+.card-stamp-badge.stamp-accepted {
+  background: rgba(34, 197, 94, 0.15);
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.card-stamp-badge.stamp-rejected {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+  border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
 .card-close-btn {
@@ -1066,6 +1184,71 @@ body.is-card-resizing.resizing-se {
   color: var(--text-sub);
   min-width: 36px;
   text-align: center;
+}
+
+/* 全画布内容搜索悬浮栏 (Ctrl+F) */
+.floating-search-bar {
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background-color: #ffffff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  z-index: 80;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.floating-search-bar[hidden] {
+  display: none !important;
+}
+
+.search-icon-symbol {
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+}
+
+.search-input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-main);
+  width: 220px;
+  padding: 2px 4px;
+}
+
+.search-counter {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 32px;
+  text-align: center;
+}
+
+.search-nav-btn,
+.search-close-btn {
+  background: transparent;
+  border: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.search-nav-btn:hover,
+.search-close-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-main);
 }
 
 /* 视口浮动多选合并操作条 (纯白极简规范) */

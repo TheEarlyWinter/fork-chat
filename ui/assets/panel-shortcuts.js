@@ -220,6 +220,13 @@ export function bindKeyboardShortcuts({ windowRef, documentRef, viewport, getSta
     // 8. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 画布拓扑与布局撤销重做 (智能穿透空输入框且非流式生成)
     const isCmdOrCtrl = Boolean(e.ctrlKey || e.metaKey);
     if (isCmdOrCtrl) {
+      // 9. Ctrl+F / Cmd+F 全画布卡片内容搜索
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault?.();
+        actions.openSearchBar?.();
+        return;
+      }
+
       // 智能判定：当焦点在输入框/文本域时，若含有草稿文字，保留原生撤销；若无文字，智能穿透触发画布级撤回
       const hasTextContent = Boolean(activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA') && activeEl.value && activeEl.value.length > 0);
       const isContentEditableActive = Boolean(activeEl?.isContentEditable);
