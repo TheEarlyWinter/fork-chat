@@ -1989,7 +1989,7 @@ async function runBridgePreview() {
   const kind = 'history';
   if (bridgePreviewEl) bridgePreviewEl.innerHTML = '<p class="bridge-placeholder">正在读取最新对话快照…</p>';
   try {
-    const payload = { sessionId, kind };
+    const payload = { sessionId, kind, limit: 100 };
     const data = await bridgeRequest('/api/bridge/preview', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -2060,7 +2060,7 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
       role: 'assistant',
       localOnly: true,
       text: `【本体导入快照】已从本体会话《${title}》导入 ${messageCount} 条正文（${text.length} 字）。\n\n这是只读摘录，不会随原会话变化。点上方徽标可跳回原会话。`,
-      docPreview: text.slice(0, 1500),
+      docPreview: text.length > 50000 ? text.slice(0, 50000) : text,
       docMeta: { name: title, size: text.length, lineCount: text.split('\n').length, charCount: text.length },
     }],
   };
@@ -2089,7 +2089,7 @@ async function importBridgePreview() {
     if (!preview || preview.session?.sessionId !== sessionId) {
       const data = await bridgeRequest('/api/bridge/preview', {
         method: 'POST',
-        body: JSON.stringify({ sessionId, kind: 'history' }),
+        body: JSON.stringify({ sessionId, kind: 'history', limit: 100 }),
       });
       preview = data?.preview;
       bridgePreviewCache = preview;
@@ -2304,7 +2304,7 @@ async function pollBridgeIntents() {
       try {
         const previewData = await bridgeRequest('/api/bridge/preview', {
           method: 'POST',
-          body: JSON.stringify({ sessionId: intent.sessionId, kind: 'history' }),
+          body: JSON.stringify({ sessionId: intent.sessionId, kind: 'history', limit: 100 }),
         });
         const preview = previewData?.preview;
         const messages = Array.isArray(preview?.messages) ? preview.messages : [];
