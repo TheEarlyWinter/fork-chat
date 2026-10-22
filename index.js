@@ -2,7 +2,7 @@ import { defineApp } from "./sdk/app-contract/server-client.js";
 import { createAgentDirectory } from "./lib/agents.js";
 import { createChatService } from "./lib/chat.js";
 import { parseDocumentSmart } from "./lib/parse-router.js";
-import { resolveMineruOptions } from "./lib/mineru-parse.js";
+import { resolveMineruOptions, sweepMineruCache } from "./lib/mineru-parse.js";
 import { createAppSettings } from "./lib/app-settings.js";
 import { createDocumentService } from "./lib/document-service.js";
 import { createBridgeService } from "./lib/bridge-service.js";
@@ -37,6 +37,13 @@ export default defineApp(async (sdk) => {
   const hostFetch = sdk.network?.fetch ? (input, init) => sdk.network.fetch(input, init) : null;
 
   const documents = createDocumentService({ sdk, dataDir, getConfig });
+
+  // 启动清扫：上一次进程留下的上传碎片与过期云端缓存。
+  // 内存里的记录随进程没了，磁盘上的文件却还在，以前没人回收。
+  void (async () => {
+    try { await documents.sweepOrphans?.(); } catch (error) { sdk.logger?.warn?.('[upload] 启动清扫失败', error?.message); }
+    try { await sweepMineruCache({ dataDir, logger: sdk.logger }); } catch (error) { sdk.logger?.warn?.('[mineru] 缓存清扫失败', error?.message); }
+  })();
   /** 本体会话桥：只读优先，投递走 Outbox 的 prepare / confirm */
   const bridgeIntents = createBridgeIntents({ dataDir, logger: sdk.logger });
   const bridgeService = createBridgeService({ sdk, dataDir, intents: bridgeIntents });

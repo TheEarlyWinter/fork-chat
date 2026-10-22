@@ -5,6 +5,20 @@ import { writeRenameIntent } from './fork-session-commands.js';
 
 const channel = new BroadcastChannel('fork-chat-bus');
 const panelId = 'panel_' + Math.random().toString(36).slice(2, 10);
+
+// 面板被关掉或换页时把通道解绑。侧边栏虽然多半随页面一起销毁，
+// 但在后台标签页里它可能比主画布活得更久，留着就是一份白占的监听。
+let functionPanelReleased = false;
+function releaseFunctionPanel() {
+  if (functionPanelReleased) return;
+  functionPanelReleased = true;
+  // 页面销毁时 DOM 监听会跟着没，但广播通道是跨页面对象，得手动关。
+  try { channel.close(); } catch {}
+}
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('pagehide', releaseFunctionPanel);
+  window.addEventListener('beforeunload', releaseFunctionPanel);
+}
 const sessionStore = createForkSessionStore(hana);
 
 // DOM 元素引用
