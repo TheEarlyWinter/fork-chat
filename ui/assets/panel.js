@@ -5,6 +5,9 @@ import { parseAssistantOutput } from './assistant-output.js';
 import { createForkSessionStore } from './fork-session-store.js';
 import { createForkSessionController } from './fork-session-controller.js';
 import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
+import { renderConnectorsLayer } from './panel-connectors.js';
+import { calculateBranchYPositions as calculateBranchYPositionsLayout, fitViewportToCluster as fitViewportToClusterLayout, computeAutoTidyPositions } from './panel-layout.js';
+import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js';
 
 const activeRequests = new Map();
 let sessionController = null;
@@ -256,71 +259,12 @@ function updateTransform() {
 
 // 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
 function renderConnectors() {
-  connectorsSvg.innerHTML = '';
-
-  cards.forEach(child => {
-    const parentIds = cardParentIds(child);
-
-    if (parentIds.length === 0) return;
-
-    parentIds.forEach((pId, pIndex) => {
-      const parent = cards.find(c => c.id === pId);
-      if (!parent) return;
-
-      const siblings = cards.filter(c => cardHasParent(c, parent.id));
-      const sibIndex = siblings.indexOf(child);
-      const sibCount = siblings.length;
-      // 多分支子卡片在起点微调 Y 锚点错位，形成规整线束扇出效果
-      const startOffsetY = sibCount > 1
-        ? 110 + (sibIndex - (sibCount - 1) / 2) * 12
-        : 110;
-
-      // 判断相对位置：子卡片在父卡片右侧还是左侧
-      const isForward = child.x >= parent.x;
-
-      // 起点：前进向右从父右边缘引出；后退向左从父左边缘引出，规避麻花畸变
-      const startX = isForward ? parent.x + parent.width : parent.x;
-      const startY = parent.y + startOffsetY;
-
-      // 终点：前进向右连入子左边缘；后退向左连入子右边缘
-      const endOffsetY = parentIds.length > 1
-        ? 110 + (pIndex - (parentIds.length - 1) / 2) * 14
-        : 110;
-      const endX = isForward ? child.x : child.x + child.width;
-      const endY = child.y + endOffsetY;
-
-      const spanX = Math.abs(endX - startX);
-      const deltaX = Math.max(spanX * 0.55, 30);
-      const c1X = isForward ? startX + deltaX : startX - deltaX;
-      const c2X = isForward ? endX - deltaX : endX + deltaX;
-
-      // 平滑贝塞尔曲线
-      const d = `M ${startX} ${startY} C ${c1X} ${startY}, ${c2X} ${endY}, ${endX} ${endY}`;
-
-      // 背景粗边描边
-      const pathBg = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      pathBg.setAttribute('d', d);
-      pathBg.setAttribute('fill', 'none');
-      pathBg.setAttribute('stroke', '#ffffff');
-      pathBg.setAttribute('stroke-width', '5');
-      connectorsSvg.appendChild(pathBg);
-
-      // 主连线
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', d);
-      path.setAttribute('fill', 'none');
-      path.setAttribute('stroke', '#18181b');
-      path.setAttribute('stroke-width', '1.8');
-      connectorsSvg.appendChild(path);
-
-      // 终点小微圆环
-      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      circle.setAttribute('cx', endX);
-      circle.setAttribute('cy', endY);
-      circle.setAttribute('r', '3');
-      circle.setAttribute('fill', '#18181b');
-      connectorsSvg.appendChild(circle);
-    });
+  renderConnectorsLayer({
+    svg: connectorsSvg,
+    cards,
+    cardParentIds,
+    cardHasParent,
+    documentRef: document,
   });
 }
 
@@ -614,52 +558,12 @@ async function openBattleDialog(card, initialPromptText = '') {
 }
 
 function fitViewportToCluster(clusterCards) {
-  if (!clusterCards || clusterCards.length === 0) return;
-  const minX = Math.min(...clusterCards.map(c => c.x));
-  const maxX = Math.max(...clusterCards.map(c => c.x + (c.width || 340)));
-  const minY = Math.min(...clusterCards.map(c => c.y));
-  const maxY = Math.max(...clusterCards.map(c => c.y + 360));
-
-  const padX = 80;
-  const padY = 80;
-  const clusterWidth = (maxX - minX) + padX * 2;
-  const clusterHeight = (maxY - minY) + padY * 2;
-
-  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
-  const vpWidth = vpRect.width || 1000;
-  const vpHeight = vpRect.height || 700;
-
-  const targetScale = Math.min(1.0, Math.max(0.45, Math.min(vpWidth / clusterWidth, vpHeight / clusterHeight)));
-  const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
-
-  view.scale = Number(targetScale.toFixed(2));
-  view.x = Math.round(vpWidth / 2 - centerX * view.scale);
-  view.y = Math.round(vpHeight / 2 - centerY * view.scale);
+  fitViewportToClusterLayout(clusterCards, { viewport, view });
   updateTransform();
 }
 
 function calculateBranchYPositions(parentCard, count, targetX) {
-  const step = 380;
-  const totalSpan = (count - 1) * step;
-  const idealStartY = Math.round(parentCard.y - (totalSpan / 2));
-  const candidateYs = Array.from({ length: count }, (_, i) => idealStartY + i * step);
-
-  const existingInColumn = cards.filter(c => c.id !== parentCard.id && Math.abs(c.x - targetX) < 120);
-  if (existingInColumn.length === 0) {
-    return candidateYs;
-  }
-
-  // 检测理想排布是否与现有卡片发生重叠（间距小于 320px 视为重叠）
-  const hasCollision = candidateYs.some(y => existingInColumn.some(c => Math.abs(c.y - y) < 320));
-  if (!hasCollision) {
-    return candidateYs;
-  }
-
-  // 发生碰撞，向下平移至已有列的最底端之后
-  const maxY = Math.max(...existingInColumn.map(c => c.y));
-  const safeStartY = maxY + step;
-  return Array.from({ length: count }, (_, i) => safeStartY + i * step);
+  return calculateBranchYPositionsLayout(parentCard, count, targetX, cards);
 }
 
 async function runBattleBranches(parentCard, prompt, selectedAgents) {
@@ -865,32 +769,13 @@ function focusCardInViewport(card) {
 }
 
 function navigateCardFocus(direction) {
-  const current = cards.find(c => c.id === selectedCardId) || cards[0];
-  if (!current) return;
-
-  let target = null;
-  const currentParents = cardParentIds(current);
-  if (direction === 'ArrowRight') {
-    const children = cards.filter(c => cardHasParent(c, current.id));
-    if (children.length > 0) target = children[0];
-  } else if (direction === 'ArrowLeft') {
-    if (currentParents.length > 0) {
-      target = cards.find(c => c.id === currentParents[0]);
-    }
-  } else if (direction === 'ArrowDown' || direction === 'ArrowUp') {
-    if (currentParents.length > 0) {
-      const siblings = cards.filter(c => currentParents.some(parentId => cardHasParent(c, parentId)));
-      const idx = siblings.findIndex(c => c.id === current.id);
-      if (direction === 'ArrowDown' && idx !== -1 && idx < siblings.length - 1) target = siblings[idx + 1];
-      if (direction === 'ArrowUp' && idx > 0) target = siblings[idx - 1];
-    } else {
-      const roots = cards.filter(c => cardParentIds(c).length === 0);
-      const idx = roots.findIndex(c => c.id === current.id);
-      if (direction === 'ArrowDown' && idx !== -1 && idx < roots.length - 1) target = roots[idx + 1];
-      if (direction === 'ArrowUp' && idx > 0) target = roots[idx - 1];
-    }
-  }
-
+  const target = findCardByDirection({
+    cards,
+    selectedCardId,
+    direction,
+    cardParentIds,
+    cardHasParent,
+  });
   if (target) {
     selectCard(target.id, false);
     ensureCardInView(target);
@@ -1444,92 +1329,29 @@ window.addEventListener('mouseup', () => {
 });
 
 // 全局键盘快捷键
-window.addEventListener('keydown', (e) => {
-  const isEditing = document.activeElement && (
-    document.activeElement.tagName === 'INPUT' ||
-    document.activeElement.tagName === 'TEXTAREA' ||
-    document.activeElement.isContentEditable
-  );
-
-  // 1. Space 抓手漫游模式
-  if (e.code === 'Space' && !isEditing) {
-    e.preventDefault();
-    if (!isSpacePressed) {
-      isSpacePressed = true;
-      viewport.classList.add('is-hand-tool');
-    }
-    return;
-  }
-
-  // 2. Tab 键快速开辟追问分支（非编辑状态下，对当前选中的卡片有效）
-  if (e.key === 'Tab' && !isEditing) {
-    const currentCard = cards.find(c => c.id === selectedCardId);
-    if (currentCard && !chainIsBusy(currentCard)) {
-      e.preventDefault();
-      createBranchCard(currentCard, { autoFocus: true });
-      return;
-    }
-  }
-
-  // 3. 方向键导航（非编辑状态）
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) && !isEditing) {
-    e.preventDefault();
-    navigateCardFocus(e.key);
-    return;
-  }
-
-  // 4. Escape 取消选中或关闭弹窗
-  if (e.key === 'Escape') {
-    if (battleDialog?.open) {
-      closeBattleDialog();
-      return;
-    }
-    if (multiSelectedCardIds.size > 0) {
-      clearMultiSelect();
-      return;
-    }
-    if (isEditing) {
-      document.activeElement.blur();
-      return;
-    }
-    if (selectedCardId) {
-      selectCard(null);
-      return;
-    }
-  }
-
-  // 5. Delete 关闭卡片（非编辑状态，移除危险的 Backspace 级联误删保护）
-  if (e.key === 'Delete' && !isEditing && selectedCardId) {
-    const currentCard = cards.find(c => c.id === selectedCardId);
-    if (currentCard) {
-      e.preventDefault();
-      closeCardHierarchy(currentCard);
-      return;
-    }
-  }
-
-  // 6. Shift + A 树状一键自动整理 (Auto-Tidy)
-  if ((e.key === 'a' || e.key === 'A') && e.shiftKey && !isEditing) {
-    e.preventDefault();
-    autoTidyLayout();
-    return;
-  }
-
-  // 7. Shift + M 多分支合并总结 (Merge)
-  if ((e.key === 'm' || e.key === 'M') && e.shiftKey && !isEditing) {
-    if (multiSelectedCardIds.size >= 2) {
-      e.preventDefault();
-      void createMergeCardFromSelected();
-      return;
-    }
-  }
-});
-
-window.addEventListener('keyup', (e) => {
-  if (e.code === 'Space') {
-    isSpacePressed = false;
-    viewport.classList.remove('is-hand-tool');
-  }
+bindKeyboardShortcuts({
+  windowRef: window,
+  documentRef: document,
+  viewport,
+  getState: () => ({
+    isSpacePressed,
+    cards,
+    selectedCardId,
+    battleDialogOpen: battleDialog?.open,
+    multiSelectedCount: multiSelectedCardIds.size,
+  }),
+  actions: {
+    setSpacePressed: (pressed) => { isSpacePressed = pressed; },
+    chainIsBusy,
+    createBranchCard,
+    navigateCardFocus,
+    closeBattleDialog,
+    clearMultiSelect,
+    selectCard,
+    closeCardHierarchy,
+    autoTidyLayout,
+    createMergeCardFromSelected,
+  },
 });
 
 // 滚轮缩放 (Zoom)
@@ -1562,108 +1384,12 @@ btnZoomOut.addEventListener('click', () => {
 // 树状一键自动整理排版算法 (Auto-Tidy Engine)
 function autoTidyLayout() {
   if (!cards || cards.length === 0) return;
-
-  const cardMap = new Map(cards.map(c => [c.id, c]));
-  const childrenMap = new Map();
-  const roots = [];
-
+  const positions = computeAutoTidyPositions(cards, cardParentIds);
   cards.forEach(c => {
-    childrenMap.set(c.id, []);
-  });
-
-  cards.forEach(c => {
-    const parents = cardParentIds(c).filter(parentId => cardMap.has(parentId));
-    if (parents.length > 0) {
-      for (const parentId of parents) childrenMap.get(parentId).push(c);
-    } else {
-      roots.push(c);
-    }
-  });
-
-  childrenMap.forEach(list => {
-    list.sort((a, b) => a.y - b.y);
-  });
-  roots.sort((a, b) => a.y - b.y);
-
-  let currentY = 80;
-  const startX = 80;
-  const cardH = 360;
-  const gapY = 32;
-  const gapRoot = 60;
-
-  // 计算每层的最大卡片宽度，确保拉伸后的宽卡片在排版时列间距自适应且不重叠
-  const depthMap = new Map();
-  const depthVisiting = new Set();
-  function assignDepth(node, depth) {
-    if (!node) return;
-    const previous = depthMap.get(node.id);
-    if (previous !== undefined && previous >= depth) return;
-    depthMap.set(node.id, depth);
-    if (depthVisiting.has(node.id)) return;
-    depthVisiting.add(node.id);
-    const children = childrenMap.get(node.id) || [];
-    children.forEach(child => assignDepth(child, depth + 1));
-    depthVisiting.delete(node.id);
-  }
-  roots.forEach(root => assignDepth(root, 0));
-  cards.forEach(card => {
-    if (!depthMap.has(card.id)) assignDepth(card, 0);
-  });
-
-  const maxColWidth = new Map();
-  cards.forEach(c => {
-    const d = depthMap.get(c.id) || 0;
-    const w = c.width || 340;
-    maxColWidth.set(d, Math.max(maxColWidth.get(d) || 340, w));
-  });
-
-  const colStartX = new Map();
-  let accumulatedX = startX;
-  const maxDepth = Math.max(0, ...Array.from(depthMap.values()));
-  for (let d = 0; d <= maxDepth; d++) {
-    colStartX.set(d, accumulatedX);
-    const colW = maxColWidth.get(d) || 340;
-    accumulatedX += colW + 120;
-  }
-
-  const laidOut = new Set();
-  const layoutVisiting = new Set();
-  function layoutSubtree(node, depth) {
-    if (!node || laidOut.has(node.id) || layoutVisiting.has(node.id)) return;
-    layoutVisiting.add(node.id);
-    const children = childrenMap.get(node.id) || [];
-    node.targetX = colStartX.get(depth) ?? (startX + depth * 460);
-    const nodeH = typeof node.height === 'number' ? node.height : cardH;
-
-    children.forEach(child => {
-      layoutSubtree(child, depth + 1);
-    });
-
-    const positionedChildren = children.filter(child => typeof child.targetY === 'number');
-    if (positionedChildren.length === 0) {
-      node.targetY = currentY;
-      currentY += nodeH + gapY;
-    } else {
-      const firstChild = positionedChildren[0];
-      const lastChild = positionedChildren[positionedChildren.length - 1];
-      node.targetY = Math.round((firstChild.targetY + lastChild.targetY) / 2);
-      currentY = Math.max(currentY, node.targetY + nodeH + gapY);
-    }
-    layoutVisiting.delete(node.id);
-    laidOut.add(node.id);
-  }
-
-  roots.forEach(root => {
-    layoutSubtree(root, 0);
-    currentY += gapRoot;
-  });
-
-  cards.forEach(c => {
-    if (typeof c.targetX === 'number' && typeof c.targetY === 'number') {
-      c.x = c.targetX;
-      c.y = c.targetY;
-      delete c.targetX;
-      delete c.targetY;
+    const pos = positions.get(c.id);
+    if (pos) {
+      c.x = pos.x;
+      c.y = pos.y;
     }
   });
 

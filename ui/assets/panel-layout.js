@@ -1,0 +1,167 @@
+/**
+ * panel-layout.js
+ * 画布树状排版、碰撞规避、分支Y坐标分布与视口聚焦计算引擎
+ */
+
+/**
+ * 在目标 X 坐标处为 count 个兄弟分支计算规避碰撞的 Y 轴分布
+ */
+export function calculateBranchYPositions(parentCard, count, targetX, cards = []) {
+  const step = 380;
+  const totalSpan = (count - 1) * step;
+  const idealStartY = Math.round(parentCard.y - (totalSpan / 2));
+  const candidateYs = Array.from({ length: count }, (_, i) => idealStartY + i * step);
+
+  const existingInColumn = cards.filter(c => c.id !== parentCard.id && Math.abs(c.x - targetX) < 120);
+  if (existingInColumn.length === 0) {
+    return candidateYs;
+  }
+
+  // 检测理想排布是否与现有卡片发生重叠（间距小于 320px 视为重叠）
+  const hasCollision = candidateYs.some(y => existingInColumn.some(c => Math.abs(c.y - y) < 320));
+  if (!hasCollision) {
+    return candidateYs;
+  }
+
+  // 发生碰撞，向下平移至已有列的最底端之后
+  const maxY = Math.max(...existingInColumn.map(c => c.y));
+  const safeStartY = maxY + step;
+  return Array.from({ length: count }, (_, i) => safeStartY + i * step);
+}
+
+/**
+ * 将视口缩放与平移对齐聚焦至卡片集群
+ */
+export function fitViewportToCluster(clusterCards, { viewport, view }) {
+  if (!clusterCards || clusterCards.length === 0 || !view) return;
+  const minX = Math.min(...clusterCards.map(c => c.x));
+  const maxX = Math.max(...clusterCards.map(c => c.x + (c.width || 340)));
+  const minY = Math.min(...clusterCards.map(c => c.y));
+  const maxY = Math.max(...clusterCards.map(c => c.y + 360));
+
+  const padX = 80;
+  const padY = 80;
+  const clusterWidth = (maxX - minX) + padX * 2;
+  const clusterHeight = (maxY - minY) + padY * 2;
+
+  const vpRect = viewport?.getBoundingClientRect?.() || { width: 1000, height: 700 };
+  const vpWidth = vpRect.width || 1000;
+  const vpHeight = vpRect.height || 700;
+
+  const targetScale = Math.min(1.0, Math.max(0.45, Math.min(vpWidth / clusterWidth, vpHeight / clusterHeight)));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  view.scale = Number(targetScale.toFixed(2));
+  view.x = Math.round(vpWidth / 2 - centerX * view.scale);
+  view.y = Math.round(vpHeight / 2 - centerY * view.scale);
+}
+
+/**
+ * 树状一键自动整理排版算法 (Auto-Tidy Engine)
+ * 计算每个卡片的拓扑层级、列宽分布与树状垂直对称对齐
+ */
+export function computeAutoTidyPositions(cards, cardParentIds) {
+  if (!cards || cards.length === 0) return new Map();
+
+  const cardMap = new Map(cards.map(c => [c.id, c]));
+  const childrenMap = new Map();
+  const roots = [];
+
+  cards.forEach(c => {
+    childrenMap.set(c.id, []);
+  });
+
+  cards.forEach(c => {
+    const parents = cardParentIds(c).filter(parentId => cardMap.has(parentId));
+    if (parents.length > 0) {
+      for (const parentId of parents) childrenMap.get(parentId).push(c);
+    } else {
+      roots.push(c);
+    }
+  });
+
+  childrenMap.forEach(list => {
+    list.sort((a, b) => a.y - b.y);
+  });
+  roots.sort((a, b) => a.y - b.y);
+
+  let currentY = 80;
+  const startX = 80;
+  const cardH = 360;
+  const gapY = 32;
+  const gapRoot = 60;
+
+  // 计算每层的最大卡片宽度，确保拉伸后的宽卡片在排版时列间距自适应且不重叠
+  const depthMap = new Map();
+  const depthVisiting = new Set();
+  function assignDepth(node, depth) {
+    if (!node) return;
+    const previous = depthMap.get(node.id);
+    if (previous !== undefined && previous >= depth) return;
+    depthMap.set(node.id, depth);
+    if (depthVisiting.has(node.id)) return;
+    depthVisiting.add(node.id);
+    const children = childrenMap.get(node.id) || [];
+    children.forEach(child => assignDepth(child, depth + 1));
+    depthVisiting.delete(node.id);
+  }
+  roots.forEach(root => assignDepth(root, 0));
+  cards.forEach(card => {
+    if (!depthMap.has(card.id)) assignDepth(card, 0);
+  });
+
+  const maxColWidth = new Map();
+  cards.forEach(c => {
+    const d = depthMap.get(c.id) || 0;
+    const w = c.width || 340;
+    maxColWidth.set(d, Math.max(maxColWidth.get(d) || 340, w));
+  });
+
+  const colStartX = new Map();
+  let accumulatedX = startX;
+  const maxDepth = Math.max(0, ...Array.from(depthMap.values()));
+  for (let d = 0; d <= maxDepth; d++) {
+    colStartX.set(d, accumulatedX);
+    const colW = maxColWidth.get(d) || 340;
+    accumulatedX += colW + 120;
+  }
+
+  const positions = new Map();
+  const laidOut = new Set();
+  const layoutVisiting = new Set();
+
+  function layoutSubtree(node, depth) {
+    if (!node || laidOut.has(node.id) || layoutVisiting.has(node.id)) return;
+    layoutVisiting.add(node.id);
+    const children = childrenMap.get(node.id) || [];
+    const targetX = colStartX.get(depth) ?? (startX + depth * 460);
+    const nodeH = typeof node.height === 'number' ? node.height : cardH;
+
+    children.forEach(child => {
+      layoutSubtree(child, depth + 1);
+    });
+
+    const positionedChildren = children.filter(child => positions.has(child.id));
+    let targetY = 0;
+    if (positionedChildren.length === 0) {
+      targetY = currentY;
+      currentY += nodeH + gapY;
+    } else {
+      const firstChild = positions.get(positionedChildren[0].id);
+      const lastChild = positions.get(positionedChildren[positionedChildren.length - 1].id);
+      targetY = Math.round((firstChild.y + lastChild.y) / 2);
+      currentY = Math.max(currentY, targetY + nodeH + gapY);
+    }
+    positions.set(node.id, { x: targetX, y: targetY });
+    layoutVisiting.delete(node.id);
+    laidOut.add(node.id);
+  }
+
+  roots.forEach(root => {
+    layoutSubtree(root, 0);
+    currentY += gapRoot;
+  });
+
+  return positions;
+}
