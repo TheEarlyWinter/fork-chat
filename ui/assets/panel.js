@@ -11,6 +11,7 @@ import { findCardByDirection, bindKeyboardShortcuts } from './panel-shortcuts.js
 import { applyViewportTransform, bindViewportController, computeCenterOnCard, computeEnsureCardVisible } from './panel-viewport.js';
 import { buildBattleBranchCards, bindBattleDialogController } from './panel-battle.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml } from './panel-cards.js';
+import { createHistoryManager } from './panel-history.js';
 
 const activeRequests = new Map();
 let sessionController = null;
@@ -193,6 +194,18 @@ function initialCards() { return [
   }
 ]; }
 let cards = initialCards();
+const historyManager = createHistoryManager({
+  maxDepth: 30,
+  onRestore: (restoredCards, restoredSelectedId) => {
+    if (isDisposed) return;
+    cards = restoredCards;
+    selectedCardId = restoredSelectedId && cards.some(c => c.id === restoredSelectedId) ? restoredSelectedId : null;
+    renderCards();
+    renderConnectors();
+    sessionController?.scheduleSave();
+  },
+});
+historyManager.recordSnapshot(cards, null);
 
 // DOM 元素引用
 const viewport = document.getElementById('viewport');
@@ -597,6 +610,7 @@ async function runBattleBranches(parentCard, prompt, selectedAgents) {
   cards.push(...newCards);
   renderCards();
   sessionController.scheduleSave();
+  historyManager.recordSnapshot(cards, selectedCardId);
 
   if (newCards.length > 0) {
     fitViewportToCluster([parentCard, ...newCards]);
@@ -695,6 +709,7 @@ async function createMergeCardFromSelected() {
   clearMultiSelect();
   renderCards();
   sessionController?.scheduleSave();
+  historyManager.recordSnapshot(cards, mergeCard.id);
 
   fitViewportToCluster([...selectedCards, mergeCard]);
 
@@ -819,6 +834,7 @@ function createBranchCard(card, { autoFocus = true } = {}) {
   cards.push(newCard);
   renderCards();
   sessionController.scheduleSave();
+  historyManager.recordSnapshot(cards, newCard.id);
 
   selectCard(newCard.id, autoFocus);
   ensureCardInView(newCard);
@@ -847,6 +863,7 @@ function closeCardHierarchy(card) {
   }
   renderCards();
   sessionController.scheduleSave();
+  historyManager.recordSnapshot(cards, selectedCardId);
 }
 
 // 渲染所有卡片
@@ -967,6 +984,12 @@ function bindCardEvents(cardEl, card) {
   }
   on(cardEl, 'mousedown', (e) => {
     if (isSpacePressed) return;
+    if (!e.target?.closest?.('input, textarea, button, [contenteditable="true"]')) {
+      const active = document.activeElement;
+      if (active && active !== document.body && typeof active.blur === 'function') {
+        active.blur();
+      }
+    }
     if (e.shiftKey) {
       e.stopPropagation();
       toggleMultiSelectCard(card.id);
@@ -1101,6 +1124,10 @@ function bindCardEvents(cardEl, card) {
   // 1. 卡片拖拽移动
   on(header, 'mousedown', (e) => {
     if (isSpacePressed) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && typeof active.blur === 'function') {
+      active.blur();
+    }
     e.stopPropagation();
     if (!sessionController?.state.ready || sessionController.state.busy) return;
     const dragGeneration = sessionController.generation;
@@ -1123,7 +1150,12 @@ function bindCardEvents(cardEl, card) {
     const onMouseUp = () => {
       stopMove();
       stopUp();
-      if (sessionController.generation === dragGeneration) sessionController.scheduleSave();
+      if (sessionController.generation === dragGeneration) {
+        sessionController.scheduleSave();
+        if (card.x !== startCardX || card.y !== startCardY) {
+          historyManager.recordSnapshot(cards, selectedCardId);
+        }
+      }
     };
 
     const stopMove = listen(window, 'mousemove', onMouseMove);
@@ -1184,6 +1216,9 @@ function bindCardEvents(cardEl, card) {
         stopUp();
         if (sessionController.generation === resizeGeneration) {
           sessionController.scheduleSave();
+          if (card.width !== startWidth || card.height !== startHeight) {
+            historyManager.recordSnapshot(cards, selectedCardId);
+          }
         }
       };
 
@@ -1279,6 +1314,8 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
     selectedCardId,
     battleDialogOpen: battleDialog?.open,
     multiSelectedCount: multiSelectedCardIds.size,
+    canUndo: historyManager.canUndo(),
+    canRedo: historyManager.canRedo(),
   }),
   actions: {
     setSpacePressed: (pressed) => { isSpacePressed = pressed; },
@@ -1291,6 +1328,15 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
     closeCardHierarchy,
     autoTidyLayout,
     createMergeCardFromSelected,
+    undo: () => {
+      if (!canMutateCanvas() || activeRequests.size > 0) return;
+      historyManager.undo();
+    },
+    redo: () => {
+      if (!canMutateCanvas() || activeRequests.size > 0) return;
+      historyManager.redo();
+    },
+    isBusy: () => activeRequests.size > 0 || !sessionController?.state.ready || sessionController.state.busy,
   },
 });
 
@@ -1310,6 +1356,7 @@ function autoTidyLayout() {
   renderCards();
   sessionController?.scheduleSave();
   fitViewportToCluster(cards);
+  historyManager.recordSnapshot(cards, selectedCardId);
 }
 
 listen(btnAutoTidy, 'click', () => {
@@ -1345,6 +1392,7 @@ listen(btnNewRoot, 'click', async () => {
   cards.push(newRoot);
   renderCards();
   sessionController.scheduleSave();
+  historyManager.recordSnapshot(cards, newRoot.id);
 });
 
 function bufferToBase64(buffer) {
@@ -1834,6 +1882,7 @@ function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
   sessionController?.scheduleSave();
   selectCard(newCard.id, false);
   focusCardInViewport(newCard);
+  historyManager.recordSnapshot(cards, newCard.id);
   return newCard;
 }
 
@@ -2329,6 +2378,7 @@ async function createDocumentCard(file, targetCoord = null) {
   renderCards();
   sessionController?.scheduleSave();
   selectCard(newCard.id, false);
+  historyManager.recordSnapshot(cards, newCard.id);
   return newCard;
 }
 
@@ -2452,6 +2502,8 @@ function applySnapshot(snapshot) {
     try { localStorage.setItem(`fork_chat_active_agent_${key}`, value || ''); } catch { /* Host storage is authoritative; this is only a legacy UI hint. */ }
   }
   updateHeaderStatus(); updateTransform(); renderCards(false);
+  historyManager.clear();
+  historyManager.recordSnapshot(cards, selectedCardId);
 }
 function cancelSessionRequests(reason) {
   for (const task of documentTasks) task.abort(inactiveError());
@@ -2667,6 +2719,11 @@ if (typeof window !== 'undefined') {
     formatFileSize,
     extractDocumentFile,
     createDocumentCard,
+    undo: () => historyManager.undo(),
+    redo: () => historyManager.redo(),
+    canUndo: () => historyManager.canUndo(),
+    canRedo: () => historyManager.canRedo(),
+    getHistoryStats: () => historyManager.getStats(),
     unbindKeyboardShortcuts: () => unbindKeyboardShortcuts?.(),
     unbindViewportController: () => viewportController?.cleanup(),
     isDisposed: () => isDisposed,

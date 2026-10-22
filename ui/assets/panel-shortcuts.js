@@ -216,6 +216,36 @@ export function bindKeyboardShortcuts({ windowRef, documentRef, viewport, getSta
         return;
       }
     }
+
+    // 8. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 画布拓扑与布局撤销重做 (智能穿透空输入框且非流式生成)
+    const isCmdOrCtrl = Boolean(e.ctrlKey || e.metaKey);
+    if (isCmdOrCtrl) {
+      // 智能判定：当焦点在输入框/文本域时，若含有草稿文字，保留原生撤销；若无文字，智能穿透触发画布级撤回
+      const hasTextContent = Boolean(activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA') && activeEl.value && activeEl.value.length > 0);
+      const isContentEditableActive = Boolean(activeEl?.isContentEditable);
+      const isActuallyTyping = hasTextContent || isContentEditableActive;
+
+      if (!isActuallyTyping) {
+        const isZ = e.key === 'z' || e.key === 'Z';
+        const isY = e.key === 'y' || e.key === 'Y';
+
+        if (isZ || isY) {
+          if (actions.isBusy?.()) return;
+
+          if ((isZ && e.shiftKey) || (isY && !e.shiftKey)) {
+            e.preventDefault?.();
+            actions.redo?.();
+            return;
+          }
+
+          if (isZ && !e.shiftKey) {
+            e.preventDefault?.();
+            actions.undo?.();
+            return;
+          }
+        }
+      }
+    }
   };
 
   const onKeyUp = (e) => {
