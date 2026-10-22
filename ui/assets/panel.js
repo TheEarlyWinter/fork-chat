@@ -24,6 +24,7 @@ import { createBridgeIntents } from './panel-bridge-intents.js';
 import { createDocumentUi } from './panel-document-ui.js';
 import { createCardGestures } from './panel-card-gestures.js';
 import { createCardEvents } from './panel-card-events.js';
+import { createRenderer } from './panel-renderer.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
@@ -101,6 +102,34 @@ const cardEvents = createCardEvents({
   formatCardChainMarkdown: (...args) => formatCardChainMarkdown(...args),
 });
 
+
+// 卡片层的重建与输入法守卫
+const renderer = createRenderer({
+  documentRef: document,
+  getCardsLayer: () => cardsLayer,
+  getBadgeStats: () => badgeStats,
+  getEmptyState: () => canvasEmptyState,
+  getIsDisposed: () => isDisposed,
+  getCards: () => cards,
+  getSelectedCardId: () => selectedCardId,
+  getCurrentAgent: () => currentAgent,
+  getSession: () => sessionController,
+  getMultiSelectedCardIds: () => multiSelectedCardIds,
+  activeRequests,
+  chainIsBusy: (card) => chainIsBusy(card),
+  drain: (set) => drain(set),
+  getCardCleanups: () => cardCleanups,
+  computeVisibleCards: (args) => computeVisibleCards(args),
+  collectSubtreeCardIds: (args) => collectSubtreeCardIds(args),
+  cardParentIds: (card) => cardParentIds(card),
+  buildCardHtml: (args) => buildCardHtml(args),
+  escapeHtml: (v) => escapeHtml(v),
+  messageMarkup: (...args) => messageMarkup(...args),
+  statusText: (...args) => statusText(...args),
+  formatFileSize: (v) => formatFileSize(v),
+  bindCardEvents: (el, card) => bindCardEvents(el, card),
+  renderConnectors: () => renderConnectors(),
+});
 
 // 流式引擎：请求、回调、迟到丢弃都在这个模块里，画布只管画。
 // 依赖里凡是"晚于这里才知道是什么"的一律包成箭头，避免模块求值时就把它算死。
@@ -512,101 +541,9 @@ function createMergeCardFromSelected() {
 // 渲染所有卡片
 // 输入法合成（拼音选词）期间的重建会把合成会话打断，打的字直接没。
 // 这段时间先记下来，等 compositionend 再补一次。
-let composingInputId = null;
-let pendingRenderCards = false;
 
 function renderCards(preserve = true) {
-  if (isDisposed) return;
-  if (composingInputId) { pendingRenderCards = true; return; }
-  // Never copy the previous session's DOM state into a newly loaded canvas.
-  if (preserve) {
-  for (const input of cardsLayer.querySelectorAll?.('.card-input') || []) {
-    const card = cards.find(item => `input-${item.id}` === input.id);
-    if (card) card.draft = input.value;
-  }
-  for (const card of cards) {
-    const body = document.getElementById(`body-${card.id}`);
-    if (typeof body?.scrollTop === 'number') card.savedScrollTop = body.scrollTop;
-    for (const message of card.messages) {
-      if (!message.requestId) continue;
-      const asides = document.getElementById(`asides-${message.requestId}`);
-      if (typeof asides?.open === 'boolean') message.asidesOpen = asides.open;
-    }
-  }
-  }
-  const focused = preserve ? document.activeElement : null;
-  const focusId = /^(input-|asides-toggle-)/.test(focused?.id || '') ? focused.id : null;
-  const selection = focusId?.startsWith('input-') ? [focused.selectionStart, focused.selectionEnd] : null;
-  drain(cardCleanups);
-  cardsLayer.innerHTML = '';
-
-  const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
-
-  visibleCards.forEach(card => {
-    const cardEl = document.createElement('div');
-    cardEl.className = 'chat-card';
-    cardEl.id = `dom-${card.id}`;
-    cardEl.style.left = `${card.x}px`;
-    cardEl.style.top = `${card.y}px`;
-    cardEl.style.width = `${card.width}px`;
-    if (typeof card.height === 'number') {
-      cardEl.style.height = `${card.height}px`;
-      cardEl.classList.add('has-custom-height');
-    }
-
-    const isBranch = Boolean(card.parentId || (Array.isArray(card.parentIds) && card.parentIds.length > 0));
-    const isBattle = Boolean(card.isBattle || card.title?.startsWith('对比 #'));
-    const isMerge = Boolean(card.isMerge || card.title?.startsWith('合并总结'));
-    const isDoc = Boolean(card.isDoc);
-    const busy = activeRequests.has(card.id);
-    const chainBusy = chainIsBusy(card);
-    if (multiSelectedCardIds.has(card.id)) {
-      cardEl.classList.add('is-multi-selected');
-    } else if (card.id === selectedCardId) {
-      cardEl.classList.add('is-selected-card');
-    }
-    if (card.statusStamp) {
-      cardEl.classList.add(`is-stamp-${card.statusStamp}`);
-    }
-    const descendantsCount = collectSubtreeCardIds({ cards, rootCardId: card.id, cardParentIds }).size;
-    cardEl.innerHTML = buildCardHtml({
-      card,
-      childCount: descendantsCount,
-      currentAgent,
-      isSelected: card.id === selectedCardId,
-      isMultiSelected: multiSelectedCardIds.has(card.id),
-      isBusy: busy,
-      chainBusy,
-      escapeHtml,
-      messageMarkup,
-      statusText,
-      formatFileSize,
-      isReady: Boolean(sessionController?.state.ready) && !sessionController.state.busy,
-    });
-
-    bindCardEvents(cardEl, card);
-    cardsLayer.appendChild(cardEl);
-
-    const bodyEl = cardEl.querySelector(`#body-${card.id}`);
-    if (bodyEl) {
-      if (typeof card.height === 'number') {
-        bodyEl.style.maxHeight = 'none';
-        bodyEl.style.flex = '1 1 0';
-      }
-      bodyEl.scrollTop = card.scrollToEnd || card.savedScrollTop === undefined ? bodyEl.scrollHeight : card.savedScrollTop;
-    }
-    card.scrollToEnd = false;
-  });
-
-  if (focusId) {
-    const restored = document.getElementById(focusId);
-    restored?.focus?.({ preventScroll: true });
-    if (selection?.every(Number.isInteger)) restored?.setSelectionRange?.(...selection);
-  }
-  const branchCount = cards.reduce((count, card) => count + cardParentIds(card).length, 0);
-  badgeStats.textContent = `${cards.length} 卡片 · ${branchCount} 追问分支`;
-  renderConnectors();
-  if (canvasEmptyState) canvasEmptyState.hidden = cards.length > 0;
+  renderer.renderCards(preserve);
 }
 
 function bindCardEvents(cardEl, card) {
@@ -1220,13 +1157,8 @@ listen(btnDeleteConfirm, 'click', async event => {
 
 // 合成起止用捕获阶段挂在 document 上，卡片重建后依然有效；
 // 必须走 listen，面板销毁时要能解绑，否则关掉的画布还在收事件。
-listen(document, 'compositionstart', event => {
-  if (event?.target?.classList?.contains?.('card-input')) composingInputId = event.target.id || '';
-}, true);
-listen(document, 'compositionend', () => {
-  composingInputId = null;
-  if (pendingRenderCards && !isDisposed) { pendingRenderCards = false; renderCards(); }
-}, true);
+listen(document, 'compositionstart', event => renderer.onCompositionStart(event), true);
+listen(document, 'compositionend', () => renderer.onCompositionEnd(), true);
 
 let lastPhase = '';
 let lastNotice = '';
