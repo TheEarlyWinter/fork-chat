@@ -1,103 +1,157 @@
-/**
- * panel-history.js
- * 画布拓扑与布局撤销/重做（Undo/Redo）历史状态管理器
- */
-
+/** Topology history with one latest business-content reference per card. */
 export const DEFAULT_MAX_HISTORY_DEPTH = 30;
+export const DEFAULT_MAX_RETAINED_BYTES = 64 * 1024 * 1024;
+export const CARD_TOPOLOGY_KEYS = Object.freeze([
+  'id', 'x', 'y', 'width', 'height', 'isCollapsed', 'zIndex', 'parentId', 'parentIds', 'statusStamp',
+]);
+const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
-/**
- * 纯函数深拷贝卡片拓扑与几何数据
- * @param {object} card 
- * @returns {object}
- */
+/** Never inspect or copy document/message/attachment payloads for a layout step. */
 export function cloneCardTopology(card) {
   if (!card || typeof card !== 'object') return card;
-  if (typeof structuredClone === 'function') {
-    try {
-      return structuredClone(card);
-    } catch {
-      // fallback in case of non-cloneable references
-    }
+  const result = {};
+  for (const key of CARD_TOPOLOGY_KEYS) {
+    if (own(card, key)) result[key] = Array.isArray(card[key]) ? [...card[key]] : card[key];
   }
-  return JSON.parse(JSON.stringify(card));
+  return result;
 }
 
-/**
- * 创建轻量级拓扑快照环形栈管理器
- * @param {object} options
- * @param {number} [options.maxDepth=30] 最大快照步数上限
- * @param {Function} [options.onRestore] (restoredCards, restoredSelectedId) => void
- * @returns {object}
- */
-export function createHistoryManager({ maxDepth = DEFAULT_MAX_HISTORY_DEPTH, onRestore } = {}) {
-  const depthLimit = typeof maxDepth === 'number' && maxDepth > 0 ? maxDepth : DEFAULT_MAX_HISTORY_DEPTH;
-  let undoStack = [];
-  let redoStack = [];
+// Conservative logical-size estimate, not a measurement of the JavaScript heap.
+// Only detached cards are measured; moving a live document never scans its text.
+function estimateContentBytes(card, limit) {
+  let bytes = 0;
+  const seen = new Set();
+  const pending = [card];
+  while (pending.length) {
+    const value = pending.pop();
+    if (typeof value === 'string') bytes += value.length * 2;
+    else if (typeof value === 'number' || typeof value === 'boolean') bytes += 8;
+    else if (value && typeof value === 'object' && !seen.has(value)) {
+      seen.add(value);
+      if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) bytes += value.byteLength;
+      else for (const key of Object.keys(value)) {
+        bytes += key.length * 2 + 8;
+        pending.push(value[key]);
+      }
+    }
+    if (bytes > limit) return bytes;
+  }
+  return bytes;
+}
+
+export function createHistoryManager({
+  maxDepth = DEFAULT_MAX_HISTORY_DEPTH,
+  maxRetainedBytes = DEFAULT_MAX_RETAINED_BYTES,
+  onRestore,
+} = {}) {
+  const depthLimit = typeof maxDepth === 'number' && Number.isFinite(maxDepth) && maxDepth >= 1
+    ? Math.floor(maxDepth) : DEFAULT_MAX_HISTORY_DEPTH;
+  if (!Number.isFinite(maxRetainedBytes) || maxRetainedBytes < 0) throw new RangeError('Invalid history retention budget');
+  const byteLimit = Math.floor(maxRetainedBytes);
+  let undoStack = [], redoStack = [];
+  let liveIds = new Set();
+  const contents = new Map();
+  const detachedSizes = new Map();
+  let retainedBytes = 0, trimmedCount = 0, budgetTrimmedCount = 0;
+
+  function checkCards(cards) {
+    if (!Array.isArray(cards)) throw new TypeError('History cards must be an array');
+    const ids = new Set();
+    for (const card of cards) {
+      if (!card || typeof card.id !== 'string' || !card.id || ids.has(card.id)) {
+        throw new TypeError('History requires unique non-empty card ids');
+      }
+      ids.add(card.id);
+    }
+    return ids;
+  }
+
+  function captureContents(cards) {
+    liveIds = checkCards(cards);
+    for (const card of cards) {
+      contents.set(card.id, card);
+      detachedSizes.delete(card.id);
+    }
+  }
+
+  function collect() {
+    const reachable = new Set(liveIds);
+    for (const state of [...undoStack, ...redoStack]) for (const card of state.cards) reachable.add(card.id);
+    retainedBytes = 0;
+    for (const [id, card] of contents) {
+      if (!reachable.has(id)) {
+        contents.delete(id);
+        detachedSizes.delete(id);
+      } else if (!liveIds.has(id)) {
+        if (!detachedSizes.has(id)) detachedSizes.set(id, estimateContentBytes(card, byteLimit));
+        retainedBytes += detachedSizes.get(id);
+      }
+    }
+  }
+
+  function enforceBudget() {
+    collect();
+    while (retainedBytes > byteLimit && (undoStack.length || redoStack.length)) {
+      // Drop whole states, never just their payloads: no surviving undo can restore an empty shell.
+      if (undoStack.length > 1) undoStack.shift();
+      else if (redoStack.length) redoStack.shift(); // furthest future, not the next redo
+      else undoStack.shift(); // syncCards may reveal an unrecorded removal of the last baseline
+      trimmedCount += 1;
+      budgetTrimmedCount += 1;
+      collect();
+    }
+  }
+
+  function restore(state) {
+    const restored = state.cards.map(topology => {
+      const content = contents.get(topology.id);
+      if (!content) throw new Error(`Missing retained card: ${topology.id}`);
+      const card = { ...content };
+      for (const key of CARD_TOPOLOGY_KEYS) delete card[key];
+      return Object.assign(card, cloneCardTopology(topology));
+    });
+    // The controller can preserve live object identity and return its actual installed cards.
+    const installed = typeof onRestore === 'function' ? onRestore(restored, state.selectedCardId) : undefined;
+    captureContents(Array.isArray(installed) ? installed : restored);
+    enforceBudget();
+  }
 
   return {
     recordSnapshot(cards, selectedCardId = null) {
-      const clonedCards = Array.isArray(cards) ? cards.map(cloneCardTopology) : [];
-      undoStack.push({
-        cards: clonedCards,
-        selectedCardId: selectedCardId ?? null,
-      });
-
-      if (undoStack.length > depthLimit) {
-        undoStack.shift();
-      }
-
+      captureContents(cards);
+      undoStack.push({ cards: cards.map(cloneCardTopology), selectedCardId: selectedCardId ?? null });
+      if (undoStack.length > depthLimit) { undoStack.shift(); trimmedCount += 1; }
       redoStack = [];
+      enforceBudget();
     },
-
+    syncCards(cards) {
+      captureContents(cards);
+      enforceBudget();
+    },
     undo() {
-      if (undoStack.length <= 1) {
-        return false;
-      }
-
-      const currentState = undoStack.pop();
-      redoStack.push(currentState);
-
-      const targetState = undoStack[undoStack.length - 1];
-      if (typeof onRestore === 'function') {
-        const restoredCards = targetState.cards.map(cloneCardTopology);
-        onRestore(restoredCards, targetState.selectedCardId);
-      }
+      if (undoStack.length <= 1) return false;
+      redoStack.push(undoStack.pop());
+      restore(undoStack[undoStack.length - 1]);
       return true;
     },
-
     redo() {
-      if (redoStack.length === 0) {
-        return false;
-      }
-
-      const nextState = redoStack.pop();
-      undoStack.push(nextState);
-
-      if (typeof onRestore === 'function') {
-        const restoredCards = nextState.cards.map(cloneCardTopology);
-        onRestore(restoredCards, nextState.selectedCardId);
-      }
+      if (!redoStack.length) return false;
+      undoStack.push(redoStack.pop());
+      restore(undoStack[undoStack.length - 1]);
       return true;
     },
-
-    canUndo() {
-      return undoStack.length > 1;
-    },
-
-    canRedo() {
-      return redoStack.length > 0;
-    },
-
+    canUndo() { return undoStack.length > 1; },
+    canRedo() { return redoStack.length > 0; },
     clear() {
-      undoStack = [];
-      redoStack = [];
+      undoStack = []; redoStack = [];
+      liveIds.clear(); contents.clear(); detachedSizes.clear();
+      retainedBytes = 0; trimmedCount = 0; budgetTrimmedCount = 0;
     },
-
+    getRetainedCardIds() { return new Set(contents.keys()); },
     getStats() {
       return {
-        undoCount: undoStack.length,
-        redoCount: redoStack.length,
-        maxDepth: depthLimit,
+        undoCount: undoStack.length, redoCount: redoStack.length, maxDepth: depthLimit,
+        retainedBytes, maxRetainedBytes: byteLimit, contentCount: contents.size, trimmedCount, budgetTrimmedCount,
       };
     },
   };

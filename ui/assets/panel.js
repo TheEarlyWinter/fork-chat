@@ -150,7 +150,7 @@ const chatEngine = createChatEngine({
   getSession: () => sessionController,
   getAgent: () => currentAgent,
   getReasoningEffort: () => currentReasoningEffort,
-  scheduleSave: () => sessionController?.scheduleSave(),
+  scheduleSave: () => sessionController.scheduleSave(),
   documentRef: document,
 });
 function chainIsBusy(card) { return chatEngine.chainIsBusy(card); }
@@ -459,8 +459,9 @@ const historyManager = createHistoryController({
   getRemovedCardArchive: () => canvasActions.removedCardArchive,
   renderCards: () => renderCards(),
   renderConnectors: () => renderConnectors(),
-  scheduleSave: () => sessionController?.scheduleSave(),
+  scheduleSave: () => sessionController.scheduleSave(),
   isDisposed: () => isDisposed,
+  onBudgetTrim: () => flashMessage('撤销历史达到内容保留上限，部分历史操作已不可撤销；当前画布内容未受影响。'),
   maxDepth: 30,
 });
 historyManager.recordSnapshot(cards, null);
@@ -1113,6 +1114,7 @@ function disposePanel() {
   }
   for (const control of document.querySelectorAll?.('button, input, textarea, select') || []) control.disabled = true;
   for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl]) dialog?.close?.();
+  historyManager.clear();
   // close() cancels generation-bound work and flushes the last snapshot once.
   disposalPromise = sessionController.close();
   void disposalPromise.catch(() => {});

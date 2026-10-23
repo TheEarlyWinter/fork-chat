@@ -50,7 +50,8 @@ export function createSessionState(deps) {
   /** 拍一份快照前，先把只存在于 DOM 里的东西收回数据：草稿、滚动位置、折叠状态。 */
   function captureSnapshot() {
     const doc = documentRef;
-    const cards = getCards() || [];
+    const cards = getCards();
+    if (!Array.isArray(cards)) throw new TypeError('createSessionState: getCards must return an array');
     for (const card of cards) {
       const input = doc.getElementById(`input-${card.id}`);
       if (input && typeof input.value === 'string') card.draft = input.value;
@@ -74,6 +75,7 @@ export function createSessionState(deps) {
     if (getIsDisposed()) return;
     const view = getView();
     if (typeof clearRemovedCardArchive === 'function') clearRemovedCardArchive();
+    clearHistory();
 
     if (!snapshot) {
       setCards([]);
@@ -86,7 +88,6 @@ export function createSessionState(deps) {
     Object.assign(view, snapshot.view, { isDragging: false });
     restoreAgent(snapshot.agent);
     updateHeaderStatus(); updateTransform(); renderCards(false);
-    clearHistory();
     recordSnapshot(snapshot.cards, getSelectedCardId());
   }
 

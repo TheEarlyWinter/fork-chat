@@ -5,12 +5,14 @@ import path from 'node:path';
 import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parsePdfWithMineru, storeMineruCache } from '../lib/mineru-parse.js';
-import { privateDirectory, openCheckedFile, readCheckedFile, exclusiveFile } from '../lib/file-safety.js';
+import { privateDirectory, openCheckedFile, readCheckedFile, exclusiveFile, checkedPath } from '../lib/file-safety.js';
 import { assertMineruUrl, createCheckedFetch, parserError } from '../lib/parser-network.js';
 
 const MAX_FILE = 200 * 1024 * 1024;
 const FILE_ID = /^[a-f0-9]{32}\.[a-z0-9]{1,8}$/;
 const JOB_ID = /^[a-f0-9]{32}$/;
+const RESULT_FILE = /^[a-f0-9]{32}\.json$/;
+const RESULT_TTL_MS = 10 * 60 * 1000;
 export const assertSafeUrl = assertMineruUrl;
 
 export async function assertReadableInsideDataDir(target, dataDir = process.env.PARSER_DATA_DIR || process.cwd()) {
@@ -26,6 +28,34 @@ export async function createParserService({ dataDir, authToken, generation = 'te
   const checkedFetch = createCheckedFetch({ fetchImpl });
   const jobs = new Map();
   let active = 0;
+  let closing = false;
+  let closePromise;
+  // 只操作本目录的普通任务结果，绝不递归清空共享目录或跟随链接。
+  async function removeResultFile(name) {
+    if (!RESULT_FILE.test(name || '')) return false;
+    const target = path.join(resultsRoot, name);
+    try {
+      await checkedPath(path.dirname(resultsRoot), resultsRoot);
+      const stat = await fs.lstat(target);
+      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+      await fs.unlink(target);
+      return true;
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+  // 崩溃时 close 不会运行。结果过了原有十分钟有效期才可回收，
+  // 新鲜结果可能属于另一个仍在运行的 helper，不能按“重启”全部删掉。
+  for (const entry of await fs.readdir(resultsRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !RESULT_FILE.test(entry.name)) continue;
+    try {
+      const stat = await fs.lstat(path.join(resultsRoot, entry.name));
+      if (stat.isFile() && Date.now() - stat.mtimeMs > RESULT_TTL_MS) await removeResultFile(entry.name);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
   const authorised = req => {
     const actual = Buffer.from(String(req.headers.authorization || ''));
     const expected = Buffer.from(`Bearer ${authToken}`);
@@ -95,7 +125,7 @@ export async function createParserService({ dataDir, authToken, generation = 'te
         job.status = 'error'; job.stage = '失败'; job.code = error?.name === 'AbortError' ? 'REQUEST_CANCELLED' : 'PARSE_FAILED';
         job.error = parserError(error, [job.options?.token]);
       }
-      if (resultFile) await fs.rm(path.join(resultsRoot, resultFile), { force: true }).catch(() => {});
+      if (resultFile) await removeResultFile(resultFile).catch(() => {});
     } finally {
       clearTimeout(job.timer);
       for (const stream of job.streams) stream.destroy();
@@ -104,8 +134,8 @@ export async function createParserService({ dataDir, authToken, generation = 'te
       job.settled = true; job.finishedAt = Date.now(); active--;
       job.expiry = setTimeout(() => {
         jobs.delete(job.id);
-        if (job.resultFile) void fs.rm(path.join(resultsRoot, job.resultFile), { force: true }).catch(() => {});
-      }, 10 * 60 * 1000);
+        if (job.resultFile) void removeResultFile(job.resultFile).catch(() => {});
+      }, RESULT_TTL_MS);
       job.expiry.unref();
     }
   }
@@ -119,6 +149,7 @@ export async function createParserService({ dataDir, authToken, generation = 'te
     return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
   }
   const server = http.createServer(async (req, res) => {
+    if (closing) { req.resume(); return send(res, 503, { ok: false, error: '解析助手正在关闭' }); }
     if (!authorised(req)) { req.resume(); return send(res, 401, { ok: false, error: '控制请求未授权' }); }
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
@@ -134,6 +165,7 @@ export async function createParserService({ dataDir, authToken, generation = 'te
         // 而那一步原本发生在文件已打开、名额已占用之后，异常会把名额永久漏掉。
         const safeFilename = path.basename(input.filename).slice(0, 200);
         const file = await openCheckedFile(uploadsRoot, path.join(uploadsRoot, input.fileId), MAX_FILE);
+        if (closing) { await file.handle.close(); return send(res, 503, { ok: false, error: '解析助手正在关闭' }); }
         if (active >= 2) { await file.handle.close(); return send(res, 429, { ok: false, error: '助手正在忙' }); }
         // Reserve after every await, before starting asynchronous work.
         active++;
@@ -142,7 +174,7 @@ export async function createParserService({ dataDir, authToken, generation = 'te
         jobs.set(id, job);
         if (jobs.size > 64) for (const [oldId, old] of jobs) if (old.settled && oldId !== id) {
           jobs.delete(oldId); clearTimeout(old.expiry);
-          if (old.resultFile) void fs.rm(path.join(resultsRoot, old.resultFile), { force: true }).catch(() => {});
+          if (old.resultFile) void removeResultFile(old.resultFile).catch(() => {});
           break;
         }
         const duration = jobTimeoutMs ?? Math.min(15 * 60 * 1000, Math.max(30000, ((Number(input.options.timeoutSeconds) || 300) + 120) * 1000));
@@ -167,12 +199,26 @@ export async function createParserService({ dataDir, authToken, generation = 'te
   server.requestTimeout = 15000; server.headersTimeout = 10000;
   return {
     server, jobs,
-    async close() {
-      for (const job of jobs.values()) { cancel(job); clearTimeout(job.expiry); }
-      server.closeAllConnections();
-      await new Promise(resolve => server.close(resolve));
-      await Promise.allSettled([...jobs.values()].map(job => job.finished));
-      for (const job of jobs.values()) clearTimeout(job.expiry);
+    close() {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        for (const job of jobs.values()) { cancel(job); clearTimeout(job.expiry); }
+        // 先停止接收，再断连接；await 之后的提交也受 closing 闸门保护。
+        const stopped = new Promise(resolve => server.close(resolve));
+        server.closeAllConnections();
+        await stopped;
+        await Promise.allSettled([...jobs.values()].map(job => job.finished));
+        const removals = [];
+        for (const job of jobs.values()) {
+          clearTimeout(job.expiry);
+          if (job.resultFile) removals.push(removeResultFile(job.resultFile));
+        }
+        const settled = await Promise.allSettled(removals);
+        const errors = settled.filter(result => result.status === 'rejected').map(result => result.reason);
+        if (errors.length) throw new AggregateError(errors, '解析结果清理失败');
+      })();
+      return closePromise;
     },
   };
 }
@@ -188,6 +234,6 @@ if (isMain) {
   await fs.rm(path.join(control, name));
   const service = await createParserService({ dataDir, authToken: config.token, generation: name.slice(0, 32) });
   service.server.listen(port, '127.0.0.1', () => process.stdout.write('PARSER_READY\n'));
-  const shutdown = () => { void service.close().finally(() => process.exit(0)); setTimeout(() => process.exit(1), 3000).unref(); };
+  const shutdown = () => { void service.close().then(() => process.exit(0), () => process.exit(1)); setTimeout(() => process.exit(1), 3000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

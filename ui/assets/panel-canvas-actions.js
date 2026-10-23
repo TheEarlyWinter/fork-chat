@@ -2,7 +2,7 @@
  * 画布卡片结构修改与增删动作控制器模块
  *
  * 负责根卡片创建、分支卡片创建、来源资料卡导入去重、层级级联删除、
- * 以及删除卡片完整快照的有界（30张）记忆留档管理。
+ * 以及删除卡片的有界（30张）快速引用留档；历史内容池负责可撤销内容的完整生命周期。
  * 严禁在顶层访问裸 window 或 document，不反向依赖 panel.js。
  */
 
@@ -47,15 +47,14 @@ export function createCanvasActions(deps) {
   const checkDisposed = () => (typeof isDisposed === 'function' ? isDisposed() : Boolean(isDisposed));
 
   /**
-   * 最近被删除的卡片内容留档。
-   * 撤销删除时优先从这里取，而不是用布局快照里那份可能是很久以前的副本。
-   * 有界，超出 30 丢最老的。
+   * 最近被删除卡片的快速引用索引，不再复制正文。
+   * 超过 30 张的同批删除仍由历史内容池完整保留；淘汰与释放由历史控制器协调。
    */
   const removedCardArchive = new Map();
 
   function rememberRemovedCard(card) {
     if (!card) return;
-    removedCardArchive.set(card.id, JSON.parse(JSON.stringify(card)));
+    removedCardArchive.set(card.id, card);
     while (removedCardArchive.size > 30) {
       removedCardArchive.delete(removedCardArchive.keys().next().value);
     }
@@ -181,8 +180,7 @@ export function createCanvasActions(deps) {
       multiSelectedCardIds?.delete?.(id);
     }
 
-    // 记住删掉的内容。撤销删除时快照里只有那一刻的旧数据，
-    // 直接拿它重建会把删除前的对话整段丢掉。
+    // 保留删除时的最新对象引用；历史池还持有同一份业务内容，布局快照不复制正文。
     for (const c of currentCards) {
       if (idsToDelete.has(c.id)) rememberRemovedCard(c);
     }

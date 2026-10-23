@@ -11,7 +11,17 @@ import { parseAssistantOutput } from './assistant-output.js';
  * 用户可能已经切了会话、关了卡片、或者同一张卡重发了一次。
  * 所以三重检查必须同时成立才允许写回，缺一条就会串内容。
  */
-export function createChatEngine(deps) {
+export function createChatEngine(deps = {}) {
+  for (const key of [
+    'runChat', 'ChatError', 'safeDetail', 'getCards', 'getSession', 'getAgent',
+    'getReasoningEffort', 'getAgentReasoningEffort', 'buildChainContext', 'getIsDisposed',
+    'canMutateCanvas', 'uniqueId', 'paintMessage', 'renderCards', 'scheduleSave', 'cardParentIds',
+  ]) {
+    if (typeof deps[key] !== 'function') throw new TypeError(`createChatEngine: ${key} must be a function`);
+  }
+  if (!deps.activeRequests || ['get', 'set', 'has', 'delete', 'values', 'clear'].some(key => typeof deps.activeRequests[key] !== 'function')) {
+    throw new TypeError('createChatEngine: activeRequests must be Map-like');
+  }
   const {
     hana,
     runChat,
@@ -34,9 +44,15 @@ export function createChatEngine(deps) {
     cardParentIds,
   } = deps;
 
+  function readCards() {
+    const cards = getCards();
+    if (!Array.isArray(cards)) throw new TypeError('createChatEngine: getCards must return an array');
+    return cards;
+  }
+
   function chainIsBusy(card) {
-    if (!canMutateCanvas || !canMutateCanvas()) return true;
-    const cards = getCards() || [];
+    if (!canMutateCanvas()) return true;
+    const cards = readCards();
     const seen = new Set();
     function visit(current) {
       if (!current || seen.has(current.id)) return false;
@@ -48,7 +64,7 @@ export function createChatEngine(deps) {
   }
 
   async function sendCardPrompt(card, text, options = {}) {
-    const cards = () => getCards() || [];
+    const cards = readCards;
     if (getIsDisposed() || chainIsBusy(card) || !cards().includes(card)) return;
     const trimmed = typeof text === 'string' ? text.trim() : '';
     const attachments = Array.isArray(options.attachments) && options.attachments.length > 0 ? options.attachments : undefined;
