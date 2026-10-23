@@ -1,4 +1,5 @@
 import { parseAssistantOutput } from './assistant-output.js';
+import { createPendingUserMessage } from './panel-context.js';
 
 /**
  * 流式请求引擎。
@@ -14,7 +15,7 @@ import { parseAssistantOutput } from './assistant-output.js';
 export function createChatEngine(deps = {}) {
   for (const key of [
     'runChat', 'ChatError', 'safeDetail', 'getCards', 'getSession', 'getAgent',
-    'getReasoningEffort', 'getAgentReasoningEffort', 'buildChainContext', 'getIsDisposed',
+    'getReasoningEffort', 'getAgentReasoningEffort', 'buildContextPlan', 'reportContextIssue', 'getIsDisposed',
     'canMutateCanvas', 'uniqueId', 'paintMessage', 'renderCards', 'scheduleSave', 'cardParentIds',
   ]) {
     if (typeof deps[key] !== 'function') throw new TypeError(`createChatEngine: ${key} must be a function`);
@@ -33,7 +34,8 @@ export function createChatEngine(deps = {}) {
     getAgent,
     getReasoningEffort,
     getAgentReasoningEffort,
-    buildChainContext,
+    buildContextPlan,
+    reportContextIssue,
     getIsDisposed,
     canMutateCanvas,
     uniqueId,
@@ -43,6 +45,12 @@ export function createChatEngine(deps = {}) {
     documentRef,
     cardParentIds,
   } = deps;
+
+  function safeReportIssue(issue) {
+    try {
+      reportContextIssue(issue);
+    } catch {}
+  }
 
   function readCards() {
     const cards = getCards();
@@ -64,21 +72,44 @@ export function createChatEngine(deps = {}) {
   }
 
   async function sendCardPrompt(card, text, options = {}) {
+    // 回调类型当场校验：写错了不能等到"成功之后什么都不发生"才发现
+    if (options.onAccepted !== undefined && typeof options.onAccepted !== 'function') {
+      throw new TypeError('sendCardPrompt: options.onAccepted 必须是函数');
+    }
     const cards = readCards;
-    if (getIsDisposed() || chainIsBusy(card) || !cards().includes(card)) return;
-    const trimmed = typeof text === 'string' ? text.trim() : '';
-    const attachments = Array.isArray(options.attachments) && options.attachments.length > 0 ? options.attachments : undefined;
-    if (!trimmed && !attachments) return;
+    if (getIsDisposed() || chainIsBusy(card) || !cards().includes(card)) return false;
+    const userMsg = createPendingUserMessage(text, options.attachments);
+    if (!userMsg) return false;
 
-    const userMsg = {
+    // 先编译再落卡片：直接且仅一次 buildContextPlan(card, { pendingUserMessage })
+    const plan = buildContextPlan(card, { pendingUserMessage: userMsg });
+    if (!plan || !plan.isRequestReady || (Array.isArray(plan.errors) && plan.errors.length > 0)) {
+      // 预检失败：卡片和用户输入都不动，调用方的清理逻辑一个都还没跑
+      safeReportIssue(plan?.errors?.[0]?.message || '这次请求没有通过上下文检查');
+      return false;
+    }
+
+    // 独立复制冻结 accepted user DTO 及 attachments 数组/DTO，不冻结 live 输入附件对象
+    const acceptedAttachments = Array.isArray(userMsg.attachments)
+      ? Object.freeze(userMsg.attachments.map(att => Object.freeze({ ...att })))
+      : undefined;
+
+    const acceptedUserMsg = Object.freeze({
       role: 'user',
-      text: trimmed || (attachments ? `[已附带 ${attachments.length} 份文档资料]` : ''),
-      ...(attachments ? { attachments } : {}),
-    };
-    card.messages.push(userMsg);
+      text: userMsg.text,
+      ...(acceptedAttachments ? { attachments: acceptedAttachments } : {}),
+    });
 
-    // 祖先链路完整上下文
-    const contextMessages = buildChainContext(card);
+    card.messages.push(acceptedUserMsg);
+
+    // wire 消息同样独立冻结
+    const contextMessages = Object.freeze(
+      (plan.messages || []).map(m => Object.freeze({
+        role: m.role,
+        content: m.content,
+        ...(m.attachments ? { attachments: Object.freeze(m.attachments.map(a => Object.freeze({ ...a }))) } : {}),
+      }))
+    );
 
     const requestId = uniqueId('req');
     const requestGeneration = getSession().generation;
@@ -99,6 +130,22 @@ export function createChatEngine(deps = {}) {
     const active = { requestId, controller: new AbortController(), message: asstMsg, terminalSeen: false };
     activeRequests.set(card.id, active);
     card.messages.push(asstMsg);
+
+    // 接受边界：建立 request/user/asst 账本后，在首次 render/save 之前调用同步 onAccepted 一次！
+    // 清理抛错不回滚请求（账本已建、消息已入卡），由调用方按前镜像恢复输入。
+    if (typeof options.onAccepted === 'function') {
+      const meta = Object.freeze({
+        requestId,
+        cardId: card.id,
+        generation: requestGeneration,
+      });
+      try {
+        options.onAccepted(meta);
+      } catch (err) {
+        safeReportIssue(`发送已经开始了，但清理输入时出错：${safeDetail(err?.message || String(err))}`);
+      }
+    }
+
     card.scrollToEnd = true;
     renderCards();
     scheduleSave();
@@ -187,6 +234,7 @@ export function createChatEngine(deps = {}) {
         scheduleSave();
       }
     }
+    return true;
   }
 
   function cancelCardRequest(cardId, reason = '用户取消了本次等待。') {

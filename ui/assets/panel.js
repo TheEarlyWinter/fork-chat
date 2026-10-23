@@ -12,19 +12,24 @@ import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js'
 import { createAgentController } from './panel-agents.js';
 import { createCanvasViewController } from './panel-canvas-view.js';
 import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
-import { cardParentIds, cardHasParent, buildChainContext as buildContext } from './panel-context.js';
+import { cardParentIds, cardHasParent } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
 import { createChatEngine } from './panel-chat-engine.js';
 import { createBattleFlow } from './panel-battle-flow.js';
 import { createMergeController } from './panel-merge.js';
 import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown, createInitialCards } from './panel-cards.js';
+import { buildTopologyOutline } from './panel-topology-export.js';
+import { buildContextPlan } from './panel-context-plan.js';
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
+import { createSelectionBranchController } from './panel-selection-popover.js';
+import { createContextPreview } from './panel-context-preview.js';
+import { createRefController } from './panel-refs.js';
 import { createBridgeSend } from './panel-bridge-send.js';
 import { createBridgeIntents } from './panel-bridge-intents.js';
 import { createDocumentUi } from './panel-document-ui.js';
 import { createCardGestures } from './panel-card-gestures.js';
-import { createCardEvents } from './panel-card-events.js';
+import { createCardEvents, createInputRecoveryBuffer } from './panel-card-events.js';
 import { createRenderer } from './panel-renderer.js';
 import { createSearchController } from './panel-search-controller.js';
 import { createSessionState } from './panel-session-state.js';
@@ -73,6 +78,10 @@ const documentUi = createDocumentUi({
 
 // 卡片上的全部事件
 const cardEvents = createCardEvents({
+  recoveryBuffer: createInputRecoveryBuffer({
+    getSession: () => sessionController,
+    getCards: () => cards,
+  }),
   listen: (...args) => listen(...args),
   getCardCleanups: () => cardCleanups,
   hana,
@@ -108,6 +117,9 @@ const cardEvents = createCardEvents({
   findCardAncestorChain: (...args) => findCardAncestorChain(...args),
   cardParentIds: (card) => cardParentIds(card),
   formatCardChainMarkdown: (...args) => formatCardChainMarkdown(...args),
+  buildTopologyOutline: (...args) => buildTopologyOutline(...args),
+  openContextPreview: card => contextPreview.show(card),
+  openRefManager: card => refController.showManager(card),
 });
 
 
@@ -137,6 +149,10 @@ const renderer = createRenderer({
   formatFileSize: (v) => formatFileSize(v),
   bindCardEvents: (el, card) => bindCardEvents(el, card),
   renderConnectors: () => renderConnectors(),
+  onBeforeRender: () => resetTransientUI(),
+  onAfterRender: () => {
+    try { contextPreview?.refresh?.(); } catch {}
+  },
 });
 
 // 流式引擎：请求、回调、迟到丢弃都在这个模块里，画布只管画。
@@ -148,7 +164,14 @@ const chatEngine = createChatEngine({
   getIsDisposed: () => isDisposed,
   canMutateCanvas: (generation) => canMutateCanvas(generation),
   cardParentIds: (card) => cardParentIds(card),
-  buildChainContext: (card) => buildChainContext(card),
+  buildContextPlan: (targetCard, { pendingUserMessage }) => buildContextPlan({ cards, targetCard, pendingUserMessage }),
+  reportContextIssue: (issue) => {
+    try {
+      const msg = typeof issue === 'string' ? issue : (issue?.message || '上下文检查异常');
+      flashMessage(msg);
+    } catch {}
+  },
+  flashMessage: (message) => flashMessage(message),
   paintMessage: (message) => paintMessage(message),
   renderCards: () => renderCards(),
   getAgentReasoningEffort: (id) => getAgentReasoningEffort(id),
@@ -249,6 +272,7 @@ let isSpacePressed = false;
 const viewport = document.getElementById('viewport');
 const surface = document.getElementById('surface');
 const connectorsSvg = document.getElementById('connectors-svg');
+const refConnectorsSvg = document.getElementById('ref-connectors-svg');
 const cardsLayer = document.getElementById('cards-layer');
 const badgeStats = document.getElementById('badge-stats');
 const activeAgentDisplay = document.getElementById('active-agent-display');
@@ -367,6 +391,7 @@ const canvasViewController = createCanvasViewController({
   viewport,
   zoomText,
   connectorsSvg,
+  refConnectorsSvg,
   btnZoomIn,
   btnZoomOut,
   getIsSpacePressed: () => isSpacePressed,
@@ -426,8 +451,61 @@ const canvasActions = createCanvasActions({
 
 const rememberRemovedCard = card => canvasActions.rememberRemovedCard(card);
 const removedCardArchive = canvasActions.removedCardArchive;
+// 预览只读：展示这次请求会带上什么，不改卡片也不发请求
+const contextPreview = createContextPreview({
+  getDocument: () => document,
+  getCards: () => cards,
+  getGeneration: () => sessionController?.generation ?? null,
+  reportIssue: message => flashMessage(message),
+});
+panelCleanups.add(() => contextPreview.dispose());
+
+// 引用：原文快照，只增删，不成为父边
+const refController = createRefController({
+  getCards: () => cards,
+  getRetainedReferenceIds: () => historyManager.getRetainedReferenceIds(),
+  renderCards: () => renderCards(),
+  renderConnectors: () => renderConnectors(),
+  scheduleSave: () => sessionController.scheduleSave(),
+  recordSnapshot: (list, id) => historyManager.recordSnapshot(list, id),
+  flashMessage: message => flashMessage(message),
+  getDocument: () => document,
+  getGeneration: () => sessionController?.generation ?? null,
+  canMutateCanvas: () => canMutateCanvas(),
+  getIsDisposed: () => isDisposed,
+});
+panelCleanups.add(() => refController.dispose());
+
 const createRootCard = () => canvasActions.createRootCard();
 const createBranchCard = (card, opts) => canvasActions.createBranchCard(card, opts);
+
+// 正文划词开分支：只预填草稿，不发送，父卡片一个字段都不动
+const selectionController = createSelectionBranchController({
+  getDocument: () => document,
+  getCards: () => cards,
+  createBranchCard: (card, opts) => canvasActions.createBranchCard(card, opts),
+  getSelectedCardId: () => selectedCardId,
+  addContextRef: (ownerId, payload) => refController.addRef(ownerId, payload),
+  reportIssue: message => flashMessage(message),
+  getGeneration: () => sessionController?.generation ?? null,
+  getIsDisposed: () => isDisposed,
+  canMutateCanvas: () => canMutateCanvas(),
+  chainIsBusy: card => chainIsBusy(card),
+  listen: (target, type, handler, options) => listen(target, type, handler, options),
+});
+selectionController.attach();
+panelCleanups.add(() => selectionController.dispose());
+
+function resetTransientUI() {
+  try { selectionController?.reset?.() || selectionController?.hide?.(); } catch {}
+  try { refController?.closeManager?.(); } catch {}
+}
+
+function closeAllTransientUI() {
+  resetTransientUI();
+  try { contextPreview?.close?.(); } catch {}
+  try { cardEvents.dispose(); } catch {}
+}
 const closeCardHierarchy = card => canvasActions.closeCardHierarchy(card);
 const createDocumentCard = (file, coord) => canvasActions.createDocumentCard(file, coord);
 const createBridgeDocCard = opts => canvasActions.createBridgeDocCard(opts);
@@ -448,8 +526,16 @@ const historyManager = createHistoryController({
 });
 historyManager.recordSnapshot(cards, null);
 
-// 向上递归回溯祖先节点，拼装从根节点到当前节点的完整上下文链路
-const buildChainContext = targetCard => buildContext({ cards, targetCard });
+// 向上递归回溯祖先节点，委托统一上下文计划拼装从根节点到当前节点的完整上下文链路
+const buildChainContext = targetCard => {
+  const plan = buildContextPlan({ cards, targetCard });
+  if (plan.errors?.length) {
+    const err = new Error(plan.errors[0]?.message || '上下文编译错误');
+    err.code = plan.errors[0]?.code || 'CONTEXT_PLAN_ERROR';
+    throw err;
+  }
+  return plan.messages;
+};
 
 
 // 对比推导：弹窗、选择、并发开分支
@@ -494,6 +580,12 @@ const mergeController = createMergeController({
   sendCardPrompt: (card, prompt) => sendCardPrompt(card, prompt),
   uniqueId: (...args) => uniqueId(...args),
   outputFor: msg => outputFor(msg),
+  reportContextIssue: issue => {
+    try {
+      const msg = typeof issue === 'string' ? issue : (issue?.message || '合流检查未通过');
+      flashMessage(msg);
+    } catch {}
+  },
   documentRef: document,
   mergeToolbar,
   mergeCountText,
@@ -830,6 +922,8 @@ listen(viewport, 'drop', async (e) => {
 });
 
 const sessionState = createSessionState({
+  reportIssue: message => flashMessage(message),
+  resetTransientUI: () => closeAllTransientUI(),
   documentRef: document,
   getCards: () => cards,
   setCards: (next) => { cards = next; },
@@ -940,6 +1034,7 @@ function disposePanel() {
   }
   for (const control of document.querySelectorAll?.('button, input, textarea, select') || []) control.disabled = true;
   for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl]) dialog?.close?.();
+  closeAllTransientUI();
   historyManager.clear();
   sessionUi?.dispose();
   feedbackService?.dispose();
@@ -997,5 +1092,9 @@ if (typeof window !== 'undefined') {
     unbindViewportController: () => canvasViewController.cleanup(),
     isDisposed: () => isDisposed,
     dispose: disposePanel,
+    getRecoveryBuffer: () => cardEvents.recoverableBuffer,
+    getRecoverableInputBackup: (cardId) => cardEvents.recoverableBuffer.get(cardId),
+    restoreRecoverableInputBackup: (cardId, opts) => cardEvents.recoverableBuffer.restore(cardId, opts),
+    clearRecoverableInputBackups: () => cardEvents.recoverableBuffer.clear(),
   };
 }

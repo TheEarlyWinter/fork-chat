@@ -1,5 +1,6 @@
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertString, assertMethod } from './panel-contracts.js';
 import { setCardDraft, setCardSavedScrollTop, setMessageAsidesOpen } from './panel-cards.js';
+import { normalizeForkSnapshot } from './fork-session-store.js';
 
 /**
  * 会话快照的拍取与应用，以及跨窗口的状态广播。
@@ -32,9 +33,11 @@ export function createSessionState(deps) {
     assertMethod(deps.documentRef, 'getElementById', 'createSessionState');
   }
 
-  assertOptionalFunctions(deps, ['getDeleteIntent', 'getReasoningEffort'], 'createSessionState');
+  assertOptionalFunctions(deps, ['getDeleteIntent', 'getReasoningEffort', 'reportIssue', 'resetTransientUI'], 'createSessionState');
 
   const {
+    reportIssue = () => {},
+    resetTransientUI,
     documentRef,
     getCards,
     setCards,
@@ -99,6 +102,9 @@ export function createSessionState(deps) {
 
   function applySnapshot(snapshot) {
     if (getIsDisposed()) return;
+    if (typeof resetTransientUI === 'function') {
+      try { resetTransientUI(); } catch {}
+    }
     const view = getView();
     if (typeof clearRemovedCardArchive === 'function') clearRemovedCardArchive();
     clearHistory();
@@ -110,11 +116,20 @@ export function createSessionState(deps) {
       return;
     }
 
-    setCards(snapshot.cards);
+    // 从存储回到活卡片时重新规范化：引用要重新冻结，否则下游可以就地改写快照
+    let appliedCards = snapshot.cards;
+    if (Array.isArray(snapshot.cards) && snapshot.cards.some(card => Array.isArray(card?.contextRefs))) {
+      try {
+        appliedCards = normalizeForkSnapshot(snapshot).cards;
+      } catch (err) {
+        reportIssue?.(`会话里的上下文引用有问题，已按原样打开：${err?.message || err}`);
+      }
+    }
+    setCards(appliedCards);
     Object.assign(view, snapshot.view, { isDragging: false });
     restoreAgent(snapshot.agent);
     updateHeaderStatus(); updateTransform(); renderCards(false);
-    recordSnapshot(snapshot.cards, getSelectedCardId());
+    recordSnapshot(appliedCards, getSelectedCardId());
   }
 
   function cancelSessionRequests(reason) {

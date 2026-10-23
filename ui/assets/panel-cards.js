@@ -139,11 +139,16 @@ export function applyCardTopologySnapshot(card, snapshot, keys = [
   if (!card || !snapshot || typeof snapshot !== 'object') return;
   for (const key of keys) {
     if (key === 'id') continue;
-    if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
-      card[key] = Array.isArray(snapshot[key]) ? [...snapshot[key]] : snapshot[key];
-    } else {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, key)) {
       delete card[key];
+      continue;
     }
+    if (key === 'contextRefs' && Array.isArray(snapshot[key])) {
+      // 恢复出来的引用数组同样只读：展开成普通数组会让人直接 push 进去
+      card[key] = Object.freeze([...snapshot[key]]);
+      continue;
+    }
+    card[key] = Array.isArray(snapshot[key]) ? [...snapshot[key]] : snapshot[key];
   }
 }
 
@@ -210,6 +215,49 @@ export function cycleCardStatusStamp(currentStamp) {
   if (currentStamp === 'starred') return 'accepted';
   if (currentStamp === 'accepted') return 'rejected';
   return null;
+}
+
+/**
+ * 卡片父边：parentId 与 parentIds 合并去重。
+ *
+ * 这是拓扑唯一入口，panel-context 与编译器都从这里取，
+ * 免得各自实现一份「父亲是谁」的规则。
+ */
+export function cardParentIds(card) {
+  return Array.from(new Set([
+    ...(card?.parentId ? [card.parentId] : []),
+    ...(Array.isArray(card?.parentIds) ? card.parentIds : []),
+  ]));
+}
+
+export function cardHasParent(card, parentId) {
+  return cardParentIds(card).includes(parentId);
+}
+
+/**
+ * 向上递归回溯祖先节点，得到从根到目标的去重链路（后序）。
+ *
+ * 后序是关键：父节点先入链，子节点后入链，顺序与既有编译输出一致。
+ * 已访问集合顺带做防环保护，菱形结构里的公共祖先只出现一次。
+ */
+export function collectChainCards({ cards = [], targetCard } = {}) {
+  const cardList = Array.isArray(cards) ? cards : [];
+  const chain = [];
+  const added = new Set();
+  const visiting = new Set();
+  function visit(card) {
+    if (!card || added.has(card.id)) return;
+    if (visiting.has(card.id)) return;
+    visiting.add(card.id);
+    for (const parentId of cardParentIds(card)) {
+      visit(cardList.find(item => item.id === parentId));
+    }
+    visiting.delete(card.id);
+    added.add(card.id);
+    chain.push(card);
+  }
+  visit(targetCard);
+  return chain;
 }
 
 /**
@@ -446,8 +494,10 @@ export function buildCardHtml({
     </div>
   ` : '';
 
-  const messagesHtml = (card.messages || []).map(m => `
-    <div class="msg-row ${m.role === 'user' ? 'msg-user' : 'msg-asst'}">
+  // data-message-index 只在当前渲染周期有效：划词候选靠它把 DOM 对回 card.messages 里的活对象，
+  // 不当稳定消息 ID 存盘（消息没有可靠的统一 ID，伪造一个反而会骗到自己）。
+  const messagesHtml = (card.messages || []).map((m, messageIndex) => `
+    <div class="msg-row ${m.role === 'user' ? 'msg-user' : 'msg-asst'}" data-message-index="${messageIndex}">
       <span class="msg-role">${m.role === 'user' ? 'User' : escapeHtml(m.agentName || currentAgent.name || 'Assistant')}</span>
       ${messageMarkup(m)}
       ${m.requestId ? `<div class="request-status" id="status-${m.requestId}" role="status">${escapeHtml(statusText(m))}</div>` : ''}
@@ -466,6 +516,8 @@ export function buildCardHtml({
     </div>
   ` : '';
 
+  const isContextExcluded = card.contextMode === 'exclude';
+  const refCount = Array.isArray(card.contextRefs) ? card.contextRefs.length : 0;
   const placeholder = isDoc ? '输入关于此文档的问题...' : '输入对话或追问...';
   const inputDisabled = !isReady ? 'disabled' : '';
 
@@ -480,6 +532,7 @@ export function buildCardHtml({
       </div>
       <div class="card-header-actions">
         ${collapseBtnHtml}
+        <button class="card-export-btn" title="导出结构大纲：只含节点与父边，不含正文" data-action="export-topology">◇</button>
         <button class="card-export-btn" title="顺藤摸瓜：导出整条问答链路为 Markdown" data-action="export-chain">⎘</button>
         <button class="card-stamp-btn" title="${stampBtnTitle}" data-action="cycle-stamp">${stampBtnIcon}</button>
         <button class="card-close-btn" title="关闭卡片" data-action="close">×</button>
@@ -493,6 +546,14 @@ export function buildCardHtml({
     </div>
 
     <div class="card-footer">
+      <div class="card-context-row">
+        <button class="ctx-toggle${isContextExcluded ? ' is-excluded' : ''}" data-action="toggle-context-mode"
+          title="${isContextExcluded ? '这张卡的内容不会进入后续分支的上下文，单击恢复' : '这张卡的内容会进入后续分支的上下文，单击停止提供'}">
+          ${isContextExcluded ? '不向后续分支提供上下文' : '向后续分支提供上下文'}
+        </button>
+        <button class="ctx-preview" data-action="preview-context" title="预览这次请求会带上的内容">预览</button>
+        ${refCount > 0 ? `<button class="ctx-preview" data-action="manage-refs" title="管理这张卡引用的原文快照">引用 ${refCount}</button>` : ''}
+      </div>
       ${attachmentsHtml}
       <div class="card-input-row">
         <button class="btn-card-attach" data-action="attach" title="添加文档资料附件" ${chainBusy ? 'disabled' : ''}>

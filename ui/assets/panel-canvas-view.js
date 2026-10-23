@@ -7,7 +7,7 @@
  * 严禁在顶层访问裸 window 或 document，不反向依赖 panel.js。
  */
 
-import { renderConnectorsLayer } from './panel-connectors.js';
+import { renderConnectorsLayer, renderReferenceConnectors } from './panel-connectors.js';
 import { cardParentIds, cardHasParent } from './panel-context.js';
 import {
   computeVisibleCards,
@@ -51,6 +51,7 @@ export function createCanvasViewController(deps) {
     viewport,
     zoomText,
     connectorsSvg,
+    refConnectorsSvg,
     btnZoomIn,
     btnZoomOut,
     getIsSpacePressed,
@@ -87,6 +88,12 @@ export function createCanvasViewController(deps) {
       cards: visibleCards,
       cardParentIds,
       cardHasParent,
+      documentRef: getDoc(),
+    });
+    // 引用虚线单独一层：不混进父边的元素计数与复用键，缺端点自然不画
+    renderReferenceConnectors({
+      svg: refConnectorsSvg,
+      cards: visibleCards,
       documentRef: getDoc(),
     });
   }

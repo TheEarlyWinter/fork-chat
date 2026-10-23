@@ -1,4 +1,5 @@
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertCardsArray } from './panel-contracts.js';
+import { getContextMode } from './fork-context-policy.js';
 
 /**
  * 多选与合流控制器 (Merge Controller)
@@ -15,7 +16,7 @@ export function createMergeController(deps) {
   assertFunctions(deps, [
     'getCards', 'getSelectedCardId', 'canMutateCanvas', 'chainIsBusy',
     'calculateBranchYPositions', 'fitViewportToCluster', 'renderCards',
-    'scheduleSave', 'recordSnapshot', 'sendCardPrompt'
+    'scheduleSave', 'recordSnapshot', 'sendCardPrompt', 'reportContextIssue'
   ], 'createMergeController');
 
   assertObject(deps.multiSelectedCardIds, 'multiSelectedCardIds', 'createMergeController');
@@ -43,6 +44,7 @@ export function createMergeController(deps) {
     scheduleSave,
     recordSnapshot,
     sendCardPrompt,
+    reportContextIssue,
     uniqueId = prefix => `${prefix}_${Date.now()}`,
     outputFor = msg => ({ body: msg?.text || '' }),
     documentRef,
@@ -53,6 +55,12 @@ export function createMergeController(deps) {
     listen,
     cleanups,
   } = deps;
+
+  const report = issue => {
+    try {
+      reportContextIssue(issue);
+    } catch {}
+  };
 
   function toggleMultiSelectCard(cardId) {
     if (!canMutateCanvas()) return;
@@ -102,6 +110,10 @@ export function createMergeController(deps) {
 
   function synthesizeMergePrompt(selectedCards) {
     const branchSummaries = selectedCards.map((card, idx) => {
+      // 被排除的分支不自动摘正文：合流是第二条进入模型的路径，也得守排除规则
+      if (getContextMode(card) === 'exclude') {
+        return `### 分支 #${idx + 1}：${card.title}\n（该分支已被设为不提供上下文，未提取其问题与结论）`;
+      }
       const userMsg = card.messages.filter(m => m.role === 'user' && !m.failed).at(-1);
       const asstMsg = card.messages.filter(m => m.role === 'assistant' && !m.localOnly && !m.failed && (!m.status || m.status === 'completed')).at(-1);
 
@@ -120,6 +132,12 @@ export function createMergeController(deps) {
     const cards = assertCardsArray(getCards(), 'merge:createMergeCardFromSelected');
     const selectedCards = cards.filter(c => multiSelectedCardIds.has(c.id));
     if (selectedCards.length < 2 || selectedCards.some(chainIsBusy)) return null;
+    // 真正能参与合流的是"未被排除"的分支；不足两条就整次拒绝，不建半张卡
+    const usableCards = selectedCards.filter(c => getContextMode(c) !== 'exclude');
+    if (usableCards.length < 2) {
+      report('至少要两条未被排除的分支才能合流');
+      return null;
+    }
 
     const maxX = Math.max(...selectedCards.map(c => c.x + (c.width || 340)));
     const targetX = maxX + 140;

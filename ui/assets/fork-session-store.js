@@ -8,12 +8,18 @@
  * 4. 纯函数 normalizeForkSnapshot 白名单深拷贝与断流截断，杜绝污染与未完成状态残留。
  */
 
+import { normalizeContextRefs } from './fork-context-policy.js';
+
 export const FORK_SESSION_STORAGE_KEY = "fork-chat.sessions.v1";
 export const STORAGE_MAX_SESSIONS = 100;
 export const STORAGE_MAX_BYTES = 12 * 1024 * 1024; // 12MB
 export const STORE_LOCK_NAME = "fork-chat-session-store-v1";
 
 const ID_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
+
+/** 只有这两种根版本能读；写出去永远是当前版本 */
+export const STORE_VERSION = 2;
+export const READABLE_STORE_VERSIONS = Object.freeze([1, 2]);
 
 function parentIdsOf(card) {
   return Array.from(new Set([
@@ -93,6 +99,35 @@ export function generateAutoTitle(snapshot) {
 export const DOC_CONTENT_MAX_CHARS = 2000000;
 /** 单个附件正文上限 */
 export const ATTACHMENT_MAX_CHARS = 1000000;
+/**
+ * 盖戳的合法取值。真实循环是 无 → starred → accepted → rejected → 无，
+ * 这里少写一档就等于每次重开都把那一档重置掉。
+ */
+export const STATUS_STAMPS = Object.freeze(['starred', 'accepted', 'rejected']);
+
+/**
+ * 会话级引用身份校验：整个快照里 ref.id 必须唯一。
+ * 单卡内去重不够——跨卡撞 ID 会让"按 ID 去重"的历史预算前提失效。
+ */
+function assertSnapshotRefIdentity(cards) {
+  const seen = new Map();
+  for (const card of cards) {
+    const refs = Array.isArray(card?.contextRefs) ? card.contextRefs : [];
+    for (const ref of refs) {
+      const previous = seen.get(ref.id);
+      if (previous) {
+        const sameContent = previous.sourceCardId === ref.sourceCardId && previous.text === ref.text;
+        throw createError(
+          'INVALID_SESSION_SNAPSHOT',
+          sameContent
+            ? `引用 id ${ref.id} 在同一会话里出现了两次`
+            : `引用 id ${ref.id} 被两张卡用于不同内容（${previous.owner} / ${card.id}）`,
+        );
+      }
+      seen.set(ref.id, { sourceCardId: ref.sourceCardId, text: ref.text, owner: card.id });
+    }
+  }
+}
 
 export function normalizeForkSnapshot(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -327,8 +362,23 @@ export function normalizeForkSnapshot(input) {
     if (typeof cardHeight === 'number') normCard.height = cardHeight;
     if (requestId) normCard.requestId = requestId;
     // 盖戳与折叠是用户的操作结果，丢了就等于每次重开都被重置
-    if (rawCard.statusStamp === 'accepted' || rawCard.statusStamp === 'rejected') {
+    if (STATUS_STAMPS.includes(rawCard.statusStamp)) {
       normCard.statusStamp = rawCard.statusStamp;
+    }
+    // 上下文策略：exclude 必须保留；refs 走白名单重建并冻结，越限直接抛错
+    if (rawCard.contextMode === 'exclude') {
+      normCard.contextMode = 'exclude';
+    } else if (rawCard.contextMode !== undefined && rawCard.contextMode !== 'include') {
+      throw createError('INVALID_SESSION_SNAPSHOT', `Unknown contextMode: ${String(rawCard.contextMode)}`);
+    }
+    if (rawCard.contextRefs !== undefined) {
+      let refs;
+      try {
+        refs = normalizeContextRefs(rawCard.contextRefs, { ownerCardId: cardId });
+      } catch (err) {
+        throw createError('INVALID_SESSION_SNAPSHOT', `卡片 ${cardId} 的引用不合法：${err.message || String(err)}`);
+      }
+      if (refs) normCard.contextRefs = refs;
     }
     if (rawCard.isCollapsed === true) normCard.isCollapsed = true;
     if (rawCard.isMerge) normCard.isMerge = true;
@@ -450,6 +500,8 @@ export function normalizeForkSnapshot(input) {
     visited.add(cardId);
   }
   for (const card of normalizedCards) visit(card.id);
+  // 跨卡引用身份校验：单卡内去重不够，同一快照里 ref.id 必须唯一
+  assertSnapshotRefIdentity(normalizedCards);
 
   return {
     cards: normalizedCards,
@@ -465,7 +517,7 @@ function validateStoreDoc(doc) {
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
     throw createError("SESSION_STORE_CORRUPT", "Storage document is corrupt or not an object");
   }
-  if (doc.version !== 1) {
+  if (!READABLE_STORE_VERSIONS.includes(doc.version)) {
     throw createError("SESSION_STORE_CORRUPT", `Unknown session store version: ${doc.version}`);
   }
   if (!Array.isArray(doc.sessions)) {
@@ -480,6 +532,13 @@ function validateStoreDoc(doc) {
       throw createError('SESSION_STORE_CORRUPT', 'Invalid session record in storage document');
     }
     ids.add(rec.id);
+    if (doc.version === 1) {
+      const polluted = Array.isArray(rec.snapshot?.cards)
+        && rec.snapshot.cards.some(card => card && (card.contextMode !== undefined || card.contextRefs !== undefined));
+      if (polluted) {
+        throw createError('SESSION_STORE_CORRUPT', 'Version 1 store carries version 2 context fields');
+      }
+    }
     try { rec.snapshot = normalizeForkSnapshot(rec.snapshot); }
     catch { throw createError('SESSION_STORE_CORRUPT', 'Invalid saved canvas; original storage was not overwritten'); }
   }
@@ -520,7 +579,7 @@ export function createForkSessionStore(hana, options = {}) {
     const val = unwrapStorageValue(raw);
     if (val === undefined || val === null) {
       return {
-        version: 1,
+        version: STORE_VERSION,
         activeId: null,
         sessions: [],
         initialized: false,
@@ -536,6 +595,8 @@ export function createForkSessionStore(hana, options = {}) {
 
   // 内部：写入文档并检查容量限制
   async function writeDoc(doc) {
+    // 只写当前版本：旧窗口读不懂 v2，会在读的时候自己停下，而不是把新字段洗掉
+    doc.version = STORE_VERSION;
     if (doc.sessions.length > STORAGE_MAX_SESSIONS) {
       throw createError("STORAGE_QUOTA_EXCEEDED", `Session count exceeds maximum quota of ${STORAGE_MAX_SESSIONS}`);
     }

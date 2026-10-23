@@ -97,6 +97,22 @@ export function createHistoryController(deps = {}) {
     canRedo: () => manager.canRedo(),
     clear() { manager.clear(); getArchive()?.clear(); lastBudgetTrimmedCount = 0; },
     getRetainedCardIds: () => manager.getRetainedCardIds(),
+    // 转发的必须与底层同一契约：返回 Set<string>，调用方可以放心 has()
+    getRetainedReferenceIds() {
+      const retained = manager.getRetainedReferenceIds();
+      if (!(retained instanceof Set)) throw new TypeError('history manager 必须返回 Set 的引用 id 集合');
+      const ids = new Set(retained);
+      // 通常 archive 是内容池的子集，仍显式合并以维护对调用方承诺的全集。
+      const archive = getArchive();
+      if (archive) for (const cardId of archive.keys()) {
+        const refs = archive.get(cardId)?.contextRefs;
+        if (Array.isArray(refs)) for (const ref of refs) ids.add(ref?.id);
+      }
+      for (const id of ids) if (typeof id !== 'string' || !id) {
+        throw new TypeError('history controller 必须返回纯字符串引用 id 集合');
+      }
+      return ids;
+    },
     getStats: () => manager.getStats(),
   };
 }

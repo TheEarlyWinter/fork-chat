@@ -173,3 +173,41 @@ export function renderConnectorsLayer({ svg, cards, cardParentIds, cardHasParent
     svg.appendChild(circle);
   }
 }
+
+/**
+ * 引用虚线层。
+ *
+ * 与父边完全分开：自己的容器、自己的 key、自己清空重建。
+ * 引用不参与根节点计算、折叠、级联删除和祖先忙检查，
+ * 所以这里也只做一件事——画出来，缺端点就不画。
+ */
+export function renderReferenceConnectors({ svg, cards, documentRef = null } = {}) {
+  if (!svg || !Array.isArray(cards)) return;
+  const doc = documentRef || svg.ownerDocument;
+  if (doc) {
+    const cardMap = new Map(cards.map(card => [card.id, card]));
+    const edges = [];
+    for (const owner of cards) {
+      const refs = Array.isArray(owner.contextRefs) ? owner.contextRefs : [];
+      for (const ref of refs) {
+        const source = cardMap.get(ref?.sourceCardId);
+        // 来源没了就只保留文字快照，不画一条指向虚空的线
+        if (!source) continue;
+        if (source.x === owner.x && source.y === owner.y) continue;
+        edges.push({ edgeKey: `ref:${ref.id}`, source, owner });
+      }
+    }
+    svg.innerHTML = '';
+    for (const { edgeKey, source, owner } of edges) {
+      const geom = calculateConnectorGeometry({ parent: source, child: owner });
+      const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', geom.d);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', '#8a8378');
+      path.setAttribute('stroke-width', '1.2');
+      path.setAttribute('stroke-dasharray', '5 4');
+      path.setAttribute('data-ref-edge', edgeKey);
+      svg.appendChild(path);
+    }
+  }
+}

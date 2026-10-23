@@ -1,5 +1,5 @@
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
-import { setCardDraft, setMessageAsidesOpen, setCardSavedScrollTop, setCardScrollToEnd } from './panel-cards.js';
+import { setCardDraft, clearCardDraft, setMessageAsidesOpen, setCardSavedScrollTop, setCardScrollToEnd } from './panel-cards.js';
 
 /**
  * 卡片层的重建。
@@ -30,13 +30,15 @@ export function createRenderer(deps) {
   assertMethod(deps.documentRef, 'getElementById', 'createRenderer');
   assertMethod(deps.documentRef, 'createElement', 'createRenderer');
 
-  assertOptionalFunctions(deps, ['getBadgeStats', 'getEmptyState'], 'createRenderer');
+  assertOptionalFunctions(deps, ['getBadgeStats', 'getEmptyState', 'onBeforeRender', 'onAfterRender'], 'createRenderer');
 
   const {
     documentRef,
     getCardsLayer,
     getBadgeStats = () => null,
     getEmptyState = () => null,
+    onBeforeRender,
+    onAfterRender,
     getIsDisposed,
     getCards,
     getSelectedCardId,
@@ -64,6 +66,9 @@ export function createRenderer(deps) {
 
   function renderCards(preserve = true) {
     if (getIsDisposed()) return;
+    if (typeof onBeforeRender === 'function') {
+      try { onBeforeRender(); } catch {}
+    }
     if (composingInputId) {
       pendingRenderCards = true;
       return;
@@ -81,10 +86,22 @@ export function createRenderer(deps) {
     if (preserve) {
       for (const input of cardsLayer.querySelectorAll?.('.card-input') || []) {
         const card = cards.find(item => `input-${item.id}` === input.id);
-        if (card) setCardDraft(card, input.value);
+        const cardEl = input.closest?.('.chat-card') || (card ? doc.getElementById(`dom-${card.id}`) : null);
+        const bound = input.__boundCard || cardEl?.__boundCard;
+        if (card) {
+          if (bound && bound !== card) {
+            // 来源 DOM 属于已失效的同 ID 旧卡对象，绝不覆盖同 ID 新卡草稿
+            continue;
+          }
+          if (input.value) setCardDraft(card, input.value);
+          else clearCardDraft(card);
+        }
       }
       for (const card of cards) {
         const body = doc.getElementById(`body-${card.id}`);
+        const cardEl = doc.getElementById(`dom-${card.id}`);
+        const bound = cardEl?.__boundCard;
+        if (cardEl && bound && bound !== card) continue;
         if (typeof body?.scrollTop === 'number') setCardSavedScrollTop(card, body.scrollTop);
         for (const message of card.messages) {
           if (!message.requestId) continue;
@@ -145,6 +162,9 @@ export function createRenderer(deps) {
       });
 
       bindCardEvents(cardEl, card);
+      cardEl.__boundCard = card;
+      const inputEl = cardEl.querySelector?.('.card-input') || cardEl.querySelector?.(`#input-${card.id}`);
+      if (inputEl) inputEl.__boundCard = card;
       cardsLayer.appendChild(cardEl);
 
       const bodyEl = cardEl.querySelector(`#body-${card.id}`);
@@ -173,6 +193,10 @@ export function createRenderer(deps) {
     renderConnectors();
     const emptyState = getEmptyState();
     if (emptyState) emptyState.hidden = cards.length > 0;
+
+    if (typeof onAfterRender === 'function') {
+      try { onAfterRender(); } catch {}
+    }
   }
 
   function onCompositionStart(event) {

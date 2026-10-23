@@ -10,6 +10,7 @@ import { rootSlotPosition, formatFileSize } from './panel-format.js';
 import { cardParentIds, cardHasParent } from './panel-context.js';
 import { outputFor } from './panel-messages.js';
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
+import { findDeletionReferenceConflicts } from './fork-context-policy.js';
 
 /** 会话尾号辅助函数：同名会话靠这个区分 */
 function shortId(id) {
@@ -124,7 +125,7 @@ export function createCanvasActions(deps) {
   }
 
   // 从指定卡片拉出子分支卡片
-  function createBranchCard(card, { autoFocus = true } = {}) {
+  function createBranchCard(card, { autoFocus = true, initialDraft = '' } = {}) {
     if (checkDisposed()) return null;
     const currentCards = assertCardsArray(getCards(), 'canvas-actions:createBranchCard');
     const parentCard = typeof card === 'string' ? currentCards.find(c => c.id === card) : (currentCards.find(c => c.id === card?.id) || card);
@@ -165,6 +166,8 @@ export function createCanvasActions(deps) {
         }
       ]
     };
+    // 带过来的草稿跟着卡片一起落盘；赋值在重绘之前，首绘就能显示
+    if (initialDraft) newCard.draft = String(initialDraft);
 
     currentCards.push(newCard);
     if (setCards) setCards(currentCards);
@@ -200,6 +203,15 @@ export function createCanvasActions(deps) {
           changed = true;
         }
       });
+    }
+
+    // 删掉一张被排除的来源，会让别处指向它的引用重新入模。
+    // 这种连锁必须挡在改动之前：先让用户移除引用，或显式把来源放回。
+    const conflicts = findDeletionReferenceConflicts({ cards: currentCards, deletingIds: idsToDelete });
+    if (conflicts.length > 0) {
+      const owners = Array.from(new Set(conflicts.map(item => item.ownerCardId)));
+      flashMessage?.(`这 ${conflicts.length} 条引用指向被排除的来源，删掉后它们会重新参与上下文。请先移除引用或把来源改回提供上下文（涉及卡片：${owners.join('、')}）`);
+      return;
     }
 
     for (const id of idsToDelete) {

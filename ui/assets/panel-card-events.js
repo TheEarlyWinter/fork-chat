@@ -9,6 +9,147 @@
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
 import { setCardDraft, clearCardDraft, getCardDraft, setMessageAsidesOpen, setCardStatusStamp } from './panel-cards.js';
 
+/**
+ * 生产受控有界恢复缓冲工厂（默认容量 8 份 FIFO）
+ * 绑定代际与卡片活对象身份，不写 localStorage、不记正文日志
+ */
+export function createInputRecoveryBuffer({ getSession, getGeneration, getCards, maxCapacity = 8 } = {}) {
+  const validCapacity = Number.isInteger(maxCapacity) && maxCapacity > 0 ? maxCapacity : 8;
+  const bufferEntries = [];
+  const currentGen = () => {
+    if (typeof getSession === 'function') return getSession()?.generation ?? null;
+    if (typeof getGeneration === 'function') return getGeneration();
+    return null;
+  };
+  const activeCards = () => (typeof getCards === 'function' ? getCards() : null);
+
+  return {
+    save(entry) {
+      if (!entry || !entry.cardId) return;
+      const existingIdx = bufferEntries.findIndex(e => e.cardId === entry.cardId);
+      if (existingIdx !== -1) bufferEntries.splice(existingIdx, 1);
+      if (bufferEntries.length >= validCapacity) {
+        bufferEntries.shift();
+      }
+      bufferEntries.push({
+        cardId: entry.cardId,
+        cardRef: entry.cardRef,
+        generation: entry.generation,
+        inputValue: entry.inputValue,
+        draft: entry.draft,
+        hasDraftProp: entry.hasDraftProp,
+        stagedAttachments: entry.stagedAttachments,
+        timestamp: Date.now(),
+      });
+    },
+
+    get(cardId) {
+      const gen = currentGen();
+      const cards = activeCards();
+      const idx = bufferEntries.findIndex(e => e.cardId === cardId);
+      if (idx === -1) return null;
+      const entry = bufferEntries[idx];
+      // 代际变化或卡片活对象已失效（包括 cards 为空列表），主动失效并清除
+      const genMismatch = gen !== null && entry.generation !== gen;
+      const cardMismatch = Array.isArray(cards) && !cards.includes(entry.cardRef);
+
+      if (genMismatch || cardMismatch) {
+        bufferEntries.splice(idx, 1);
+        return null;
+      }
+      return {
+        cardId: entry.cardId,
+        generation: entry.generation,
+        cardRef: entry.cardRef,
+        hasDraft: entry.hasDraftProp,
+        hasAttachments: Array.isArray(entry.stagedAttachments) && entry.stagedAttachments.length > 0,
+        inputValue: entry.inputValue,
+        draft: entry.draft,
+        stagedAttachments: entry.stagedAttachments,
+      };
+    },
+
+    has(cardId) {
+      return Boolean(this.get(cardId));
+    },
+
+    restore(cardId, { targetCard, inputEl, generation } = {}) {
+      const gen = currentGen();
+      const cards = activeCards();
+      const idx = bufferEntries.findIndex(e => e.cardId === cardId);
+      if (idx === -1) return false;
+      const entry = bufferEntries[idx];
+
+      // 强校验：代际、活对象身份必须严格匹配
+      if (gen !== null && entry.generation !== gen) {
+        bufferEntries.splice(idx, 1);
+        return false;
+      }
+      if (generation !== undefined && generation !== entry.generation) return false;
+      if (Array.isArray(cards)) {
+        if (cards.length === 0) {
+          bufferEntries.splice(idx, 1);
+          return false;
+        }
+        if (!cards.includes(targetCard) || !cards.includes(entry.cardRef)) return false;
+      }
+      if (targetCard && entry.cardRef && targetCard !== entry.cardRef) return false;
+
+      // 绝不覆盖后续编辑：如果卡片当前已有新输入、新草稿或新附件，拒绝覆盖
+      if (inputEl && inputEl.value !== '') return false;
+      if (targetCard && targetCard.draft !== undefined && targetCard.draft !== '') return false;
+      if (targetCard && Array.isArray(targetCard.stagedAttachments) && targetCard.stagedAttachments.length > 0) return false;
+
+      let draftOk = true;
+      let attOk = true;
+      let inputOk = true;
+
+      if (targetCard) {
+        try {
+          if (entry.hasDraftProp) setCardDraft(targetCard, entry.draft);
+          else clearCardDraft(targetCard);
+        } catch {
+          draftOk = false;
+        }
+
+        try {
+          if (Array.isArray(entry.stagedAttachments)) {
+            targetCard.stagedAttachments = entry.stagedAttachments;
+          }
+        } catch {
+          attOk = false;
+        }
+      }
+
+      if (inputEl) {
+        try {
+          inputEl.value = entry.inputValue;
+        } catch {
+          inputOk = false;
+        }
+      }
+
+      if (draftOk && attOk && inputOk) {
+        bufferEntries.splice(idx, 1);
+        return true;
+      }
+      return false;
+    },
+
+    clear() {
+      bufferEntries.length = 0;
+    },
+
+    dispose() {
+      bufferEntries.length = 0;
+    },
+
+    size() {
+      return bufferEntries.length;
+    },
+  };
+}
+
 export function createCardEvents(deps) {
   if (!deps || typeof deps !== 'object') {
     throw new TypeError('createCardEvents: deps must be an object');
@@ -21,7 +162,7 @@ export function createCardEvents(deps) {
     'toggleMultiSelectCard', 'clearMultiSelect', 'renderCards', 'renderConnectors',
     'scheduleSave', 'recordSnapshot', 'canMutateCanvas', 'sendCardPrompt',
     'cancelCardRequest', 'findCardAncestorChain', 'cardParentIds',
-    'formatCardChainMarkdown'
+    'formatCardChainMarkdown', 'buildTopologyOutline', 'openContextPreview', 'openRefManager'
   ], 'createCardEvents');
 
   assertObject(deps.documentUi, 'documentUi', 'createCardEvents');
@@ -77,10 +218,20 @@ export function createCardEvents(deps) {
     findCardAncestorChain,
     cardParentIds,
     formatCardChainMarkdown,
+    buildTopologyOutline,
+    openContextPreview,
+    openRefManager,
   } = deps;
 
   const cardsNow = () => assertCardsArray(getCards(), 'card-events');
-  const doc = () => (typeof getDocumentRef === 'function' ? getDocumentRef() : null);
+  const doc = () => (typeof deps.getDocumentRef === 'function' ? deps.getDocumentRef() : (typeof document !== 'undefined' ? document : null));
+
+  // 实例级有界恢复缓冲
+  const recoverableBuffer = deps.recoveryBuffer || createInputRecoveryBuffer({
+    getSession: deps.getSession,
+    getGeneration: deps.getGeneration,
+    getCards: deps.getCards,
+  });
 
   function bindCardEvents(cardEl, card) {
     const on = (target, type, handler, options) => listen(target, type, handler, options, getCardCleanups());
@@ -123,6 +274,11 @@ export function createCardEvents(deps) {
 
     on(cardEl, 'mousedown', (e) => {
       if (typeof getIsSpacePressed === 'function' && getIsSpacePressed()) return;
+      // 正文是用来选字的，不是用来选卡的：在这里改选中会把划词的目标带偏
+      if (e.target?.closest?.('.msg-bubble')) {
+        e.stopPropagation();
+        return;
+      }
       if (!e.target?.closest?.('input, textarea, button, [contenteditable="true"]')) {
         const active = doc()?.activeElement;
         if (active && active !== doc()?.body && typeof active.blur === 'function') {
@@ -219,12 +375,161 @@ export function createCardEvents(deps) {
       const text = inputEl.value.trim();
       const hasStaged = Array.isArray(card.stagedAttachments) && card.stagedAttachments.length > 0;
       if (!text && !hasStaged) return;
-      const staged = hasStaged ? [...card.stagedAttachments] : [];
-      card.stagedAttachments = [];
-      if (doc()?.activeElement === btnSend) inputEl.focus({ preventScroll: true });
-      inputEl.value = '';
-      clearCardDraft(card);
-      await sendCardPrompt(card, text, { attachments: staged });
+
+      // 发送前捕获初始前镜像与代际
+      const sendGeneration = typeof getSession === 'function' ? getSession()?.generation : null;
+      const targetCard = card;
+      const capturedInputEl = inputEl;
+      const inputBefore = inputEl.value;
+      const draftBefore = card.draft;
+      const hasDraftPropBefore = Object.prototype.hasOwnProperty.call(card, 'draft');
+      const rawAttachmentsBefore = card.stagedAttachments;
+      const attachmentsCountBefore = Array.isArray(rawAttachmentsBefore) ? rawAttachmentsBefore.length : 0;
+      const attachmentsMembersBefore = Array.isArray(rawAttachmentsBefore) ? [...rawAttachmentsBefore] : [];
+
+      const onAccepted = (meta) => {
+        // 步骤 0：焦点保护——focus 动作可能触发 DOM 事件，必须先 focus 再做完整前镜像核对
+        if (doc()?.activeElement === btnSend && capturedInputEl) {
+          try { capturedInputEl.focus?.({ preventScroll: true }); } catch {}
+        }
+
+        // 步骤 1：完整前镜像与活对象强校验
+        if (meta?.cardId && meta.cardId !== targetCard.id) return;
+        if (meta?.generation !== undefined && sendGeneration !== null && meta.generation !== sendGeneration) return;
+
+        const currentGen = typeof getSession === 'function' ? getSession()?.generation : null;
+        if (currentGen !== sendGeneration) return;
+
+        // 校验当前卡片活对象身份
+        const activeCards = cardsNow();
+        if (!activeCards.includes(targetCard) || activeCards.find(c => c.id === targetCard.id) !== targetCard) return;
+
+        // 校验当前输入框 DOM 挂载与引用
+        if (capturedInputEl.isConnected === false) return;
+        const domInput = doc()?.getElementById?.(`input-${targetCard.id}`);
+        if (domInput && domInput !== capturedInputEl) return;
+
+        // 校验输入框值是否仍为 inputBefore（未被用户后续编辑）
+        if (capturedInputEl.value !== inputBefore) return;
+
+        // 校验 draft own 状态与值是否未变
+        const currentHasDraft = Object.prototype.hasOwnProperty.call(targetCard, 'draft');
+        if (currentHasDraft !== hasDraftPropBefore || targetCard.draft !== draftBefore) return;
+
+        // 校验附件数组引用及每个原成员身份
+        if (targetCard.stagedAttachments !== rawAttachmentsBefore) return;
+        if (Array.isArray(targetCard.stagedAttachments)) {
+          if (targetCard.stagedAttachments.length !== attachmentsCountBefore) return;
+          for (let i = 0; i < attachmentsCountBefore; i++) {
+            if (targetCard.stagedAttachments[i] !== attachmentsMembersBefore[i]) return;
+          }
+        }
+
+        // 步骤 2：分步清理与事务修改记录
+        let didClearAttachments = false;
+        let didClearInput = false;
+        let didClearDraft = false;
+        let cleanupError = null;
+        let clearedAttachmentsInstance = null;
+
+        try {
+          // 清理附件：替换数组、不修改原数组
+          const newEmptyAttachments = [];
+          targetCard.stagedAttachments = newEmptyAttachments;
+          clearedAttachmentsInstance = newEmptyAttachments;
+          didClearAttachments = true;
+        } catch (err) {
+          cleanupError = cleanupError || err;
+        }
+
+        try {
+          // 清理输入框
+          capturedInputEl.value = '';
+          didClearInput = true;
+        } catch (err) {
+          cleanupError = cleanupError || err;
+        }
+
+        try {
+          // 清理草稿
+          clearCardDraft(targetCard);
+          didClearDraft = true;
+        } catch (err) {
+          cleanupError = cleanupError || err;
+        }
+
+        if (cleanupError) {
+          // 清理异常：分步回滚已修改字段，恢复回原附件数组与原成员对象
+          let allRestored = true;
+
+          const stillCurrentGen = typeof getSession === 'function' ? getSession()?.generation : null;
+          const stillActiveCards = cardsNow();
+          const cardStillValid = (stillCurrentGen === sendGeneration) &&
+            stillActiveCards.includes(targetCard) &&
+            (stillActiveCards.find(c => c.id === targetCard.id) === targetCard);
+
+          if (cardStillValid) {
+            if (didClearDraft) {
+              try {
+                // 仅当 draft 仍是本事务清理后的状态时才恢复
+                if (targetCard.draft === undefined && !Object.prototype.hasOwnProperty.call(targetCard, 'draft')) {
+                  if (hasDraftPropBefore) setCardDraft(targetCard, draftBefore);
+                  else clearCardDraft(targetCard);
+                }
+              } catch {
+                allRestored = false;
+              }
+            }
+
+            if (didClearInput) {
+              try {
+                // 仅当 inputEl 仍是本事务清空后的值时才恢复
+                if (capturedInputEl.value === '') {
+                  capturedInputEl.value = inputBefore;
+                }
+              } catch {
+                allRestored = false;
+              }
+            }
+
+            if (didClearAttachments) {
+              try {
+                // 仅当 attachments 仍是本事务设置的那同一个空数组实例时，才恢复回原附件数组；避免覆盖后续编辑新建的空数组
+                if (targetCard.stagedAttachments === clearedAttachmentsInstance) {
+                  targetCard.stagedAttachments = rawAttachmentsBefore;
+                }
+              } catch {
+                allRestored = false;
+              }
+            }
+          } else {
+            allRestored = false;
+          }
+
+          // 恢复再次抛错或清理未完成也安全隔离、提示且保留受控有界可恢复副本
+          if (!didClearAttachments || !didClearInput || !didClearDraft || !allRestored) {
+            try {
+              recoverableBuffer.save({
+                cardId: targetCard.id,
+                cardRef: targetCard,
+                generation: sendGeneration,
+                inputValue: inputBefore,
+                draft: draftBefore,
+                hasDraftProp: hasDraftPropBefore,
+                stagedAttachments: rawAttachmentsBefore,
+              });
+            } catch {}
+          }
+
+          try {
+            flashMessage(`输入没能清干净，已尝试按原样放回：${safeDetail(cleanupError?.message || String(cleanupError))}`);
+          } catch {}
+          throw cleanupError;
+        }
+      };
+
+      // 仅调用 sendCardPrompt；无条件恢复分支已删除，未进接受边界保持零修改
+      await sendCardPrompt(card, text, { attachments: rawAttachmentsBefore, onAccepted });
     };
 
     on(btnSend, 'click', doSend);
@@ -258,6 +563,38 @@ export function createCardEvents(deps) {
       closeCardHierarchy(card);
     });
 
+    // 是否向后续分支提供上下文。这是策略，不是标签：不动卡片内容，也不删历史
+    const btnContextMode = cardEl.querySelector('[data-action="toggle-context-mode"]');
+    if (btnContextMode) {
+      on(btnContextMode, 'click', (e) => {
+        e.stopPropagation();
+        if (getIsDisposed()) return;
+        if (card.contextMode === 'exclude') delete card.contextMode;
+        else card.contextMode = 'exclude';
+        renderCards();
+        scheduleSave();
+        recordSnapshot(cardsNow(), card.id);
+      });
+    }
+
+    const btnContextPreview = cardEl.querySelector('[data-action="preview-context"]');
+    if (btnContextPreview) {
+      on(btnContextPreview, 'click', (e) => {
+        e.stopPropagation();
+        if (getIsDisposed()) return;
+        openContextPreview(card);
+      });
+    }
+
+    const btnManageRefs = cardEl.querySelector('[data-action="manage-refs"]');
+    if (btnManageRefs) {
+      on(btnManageRefs, 'click', (e) => {
+        e.stopPropagation();
+        if (getIsDisposed()) return;
+        openRefManager(card);
+      });
+    }
+
     // 循环盖戳：星标 / 采纳 / 否决
     const btnStamp = cardEl.querySelector('[data-action="cycle-stamp"]');
     if (btnStamp) {
@@ -268,6 +605,44 @@ export function createCardEvents(deps) {
         renderCards();
         scheduleSave();
         recordSnapshot(cardsNow(), card.id);
+      });
+    }
+
+    // 两个导出入口共用同一套剪贴板路径：优先异步 API，退回复制文本框
+    const copyText = async text => {
+      const nav = typeof getNavigator === 'function' ? getNavigator() : null;
+      if (nav?.clipboard?.writeText) {
+        await nav.clipboard.writeText(text);
+        return;
+      }
+      const root = doc();
+      const ta = root.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      root.body.appendChild(ta);
+      ta.select();
+      root.execCommand('copy');
+      root.body.removeChild(ta);
+    };
+
+    // 结构大纲：只导节点与父边，不含正文，可以放心给人看
+    const btnExportTopology = cardEl.querySelector('[data-action="export-topology"]');
+    if (btnExportTopology) {
+      on(btnExportTopology, 'click', async (e) => {
+        e.stopPropagation();
+        if (getIsDisposed()) return;
+        try {
+          const outline = buildTopologyOutline({
+            cards: cardsNow(),
+            targetCard: card,
+            title: `结构大纲：${card.title || '长文'}`,
+          });
+          await copyText(outline);
+          flashMessage('已复制结构大纲（只含节点与父边，不含正文）');
+        } catch (err) {
+          flashMessage(`结构大纲导出失败：${safeDetail(err?.message || String(err))}`);
+        }
       });
     }
 
@@ -284,20 +659,7 @@ export function createCardEvents(deps) {
         }
         const markdown = formatCardChainMarkdown(chain, { title: `链路推导：${card.title || '长文'}` });
         try {
-          const nav = typeof getNavigator === 'function' ? getNavigator() : null;
-          if (nav?.clipboard?.writeText) {
-            await nav.clipboard.writeText(markdown);
-          } else {
-            const root = doc();
-            const ta = root.createElement('textarea');
-            ta.value = markdown;
-            ta.style.position = 'fixed';
-            ta.style.opacity = '0';
-            root.body.appendChild(ta);
-            ta.select();
-            root.execCommand('copy');
-            root.body.removeChild(ta);
-          }
+          await copyText(markdown);
           flashMessage(`已顺藤摸瓜将 ${chain.length} 个节点的完整推导长文复制到剪贴板！`);
         } catch (err) {
           flashMessage(`导出复制失败：${safeDetail(err?.message || String(err))}`);
@@ -320,5 +682,12 @@ export function createCardEvents(deps) {
     });
   }
 
-  return { bindCardEvents };
+  return {
+    bindCardEvents,
+    recoverableBuffer,
+    recoveryBuffer: recoverableBuffer,
+    getRecoveryBuffer: () => recoverableBuffer,
+    dispose: () => recoverableBuffer.clear(),
+    clear: () => recoverableBuffer.clear(),
+  };
 }

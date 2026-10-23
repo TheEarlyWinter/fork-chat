@@ -43,6 +43,8 @@
       <div class="canvas-surface" id="surface">
         <!-- SVG 贝塞尔曲线连线层 -->
         <svg class="connectors-layer" id="connectors-svg" style="overflow: visible;"></svg>
+        <!-- 引用虚线层：独立于父边，不动父边的复用与计数 -->
+        <svg class="connectors-layer ref-connectors-layer" id="ref-connectors-svg" style="overflow: visible;"></svg>
         <!-- 卡片实体挂载层 -->
         <div class="cards-layer" id="cards-layer"></div>
       </div>
