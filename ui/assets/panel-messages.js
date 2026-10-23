@@ -67,8 +67,9 @@ export function statusText(message) {
   const cancellation = message.cancelConfirmed === false && ['cancelled', 'failed'].includes(message.status)
     ? ` · 服务端取消未确认${message.cancelError ? `：${message.cancelError}` : ''}`
     : '';
+  // 投到哪个会话也要写出来：这个应用的面板不在会话里，用户没法从界面直接看出文件去了哪
   const delivered = Array.isArray(message.deliveredFiles) && message.deliveredFiles.length
-    ? ` · 已交付 ${message.deliveredFiles.map(f => f?.name || '文档').join('、')}`
+    ? ` · 已交付 ${message.deliveredFiles.map(f => `${f?.name || '文档'}${f?.session ? ` → ${f.session}` : ''}`).join('、')}`
     : '';
   const deliverFailed = message.deliverError ? ` · 交付失败：${message.deliverError}` : '';
   return `${labels[message.status] || '等待'}${error}${cancellation}${delivered}${deliverFailed} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
