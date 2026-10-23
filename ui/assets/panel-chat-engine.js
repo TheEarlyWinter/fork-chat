@@ -189,6 +189,13 @@ export function createChatEngine(deps = {}) {
     }
   }
 
+  function cancelCardRequest(cardId, reason = '用户取消了本次等待。') {
+    const active = activeRequests.get(cardId);
+    if (!active || active.terminalSeen) return false;
+    active.controller.abort(new ChatError('REQUEST_CANCELLED', reason));
+    return true;
+  }
+
   function cancelAll(reason) {
     for (const active of activeRequests.values()) {
       active.message.status = 'cancelled';
@@ -201,5 +208,5 @@ export function createChatEngine(deps = {}) {
     activeRequests.clear();
   }
 
-  return { chainIsBusy, sendCardPrompt, cancelAll };
+  return { chainIsBusy, sendCardPrompt, cancelAll, cancelCardRequest };
 }

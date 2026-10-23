@@ -1,3 +1,5 @@
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertCardsArray } from './panel-contracts.js';
+
 /**
  * 全画布搜索的界面编排：高亮、跳转、防抖。
  *
@@ -10,6 +12,18 @@
  */
 
 export function createSearchController(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createSearchController: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'getIsDisposed', 'selectCard', 'ensureCardInView',
+    'findCardsByKeyword', 'getNextMatchIndex', 'bindSearchBarController',
+    'listen', 'setTimeoutRef', 'clearTimeoutRef', 'trackTimer', 'untrackTimer'
+  ], 'createSearchController');
+
+  assertOptionalFunctions(deps, ['getDocumentRef'], 'createSearchController');
+
   const {
     getCards,
     getDocumentRef,
@@ -37,7 +51,7 @@ export function createSearchController(deps) {
   let searchDebounceTimer = null;
   let controller = null;
 
-  const cardsNow = () => getCards() || [];
+  const cardsNow = () => assertCardsArray(getCards(), 'search-controller');
   const doc = () => (typeof getDocumentRef === 'function' ? getDocumentRef() : null);
   const listItem = id => doc()?.getElementById?.(`dom-${id}`) || null;
 

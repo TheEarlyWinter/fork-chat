@@ -1,3 +1,5 @@
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertCardsArray } from './panel-contracts.js';
+
 /**
  * 文档上传的界面侧动作：附件按钮选中的文件、卡片上拖进来的文件、
  * 画布空白处拖进来的文件。
@@ -7,6 +9,20 @@
  */
 
 export function createDocumentUi(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createDocumentUi: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'extractDocumentFile', 'flashMessage', 'canMutateCanvas', 'getCards',
+    'getSession', 'renderCards', 'scheduleSave', 'createDocumentCard',
+    'getView', 'getIsDisposed', 'later', 'cancelLater'
+  ], 'createDocumentUi');
+
+  assertOptionalFunctions(deps, [
+    'getViewport', 'getDropIndicator'
+  ], 'createDocumentUi');
+
   const {
     extractDocumentFile,
     flashMessage,
@@ -17,8 +33,8 @@ export function createDocumentUi(deps) {
     scheduleSave,
     createDocumentCard,
     getView,
-    getViewport,
-    getDropIndicator,
+    getViewport = () => null,
+    getDropIndicator = () => null,
     getIsDisposed,
     later,
     cancelLater,
@@ -29,7 +45,8 @@ export function createDocumentUi(deps) {
   /** 解析一份文件并追加到卡片的暂存附件里。返回是否真的加上了。 */
   async function stageOneFile(card, file, generation) {
     const parsed = await extractDocumentFile(file, card.id);
-    if (getIsDisposed() || !canMutateCanvas(generation) || !(getCards() || []).includes(card)) return false;
+    const cards = assertCardsArray(getCards(), 'document-ui:stageOneFile');
+    if (getIsDisposed() || !canMutateCanvas(generation) || !cards.includes(card)) return false;
     if (parsed.cancelled) return false;
     if (!parsed.ok) {
       // 失败要说清卡在哪一步。悄悄跳过会让用户以为文件进去了。
@@ -53,13 +70,15 @@ export function createDocumentUi(deps) {
    * 中途画布失效就直接放弃，不再动剩下的文件。
    */
   async function attachFilesToCard(card, files) {
-    if (!canMutateCanvas() || !(getCards() || []).includes(card)) return false;
+    const initialCards = assertCardsArray(getCards(), 'document-ui:attachFilesToCard');
+    if (!canMutateCanvas() || !initialCards.includes(card)) return false;
     const generation = getSession().generation;
     let changed = false;
 
     for (const file of files) {
       const added = await stageOneFile(card, file, generation);
-      if (getIsDisposed() || !canMutateCanvas(generation) || !(getCards() || []).includes(card)) return changed;
+      const loopCards = assertCardsArray(getCards(), 'document-ui:attachFilesToCard:loop');
+      if (getIsDisposed() || !canMutateCanvas(generation) || !loopCards.includes(card)) return changed;
       if (added) changed = true;
     }
 
@@ -101,12 +120,13 @@ export function createDocumentUi(deps) {
 
   /** 画布空白处落文件：按落点换算成画布坐标，依次摆开建资料卡。 */
   async function dropFilesOnViewport(files, clientX, clientY) {
-    if (!Array.isArray(files) || !files.length) return;
+    if (!Array.isArray(files) || !files.length) return false;
     hideDropIndicator();
 
-    const viewport = getViewport();
-    const view = getView();
-    if (!viewport || !view) return;
+    const viewport = typeof getViewport === 'function' ? getViewport() : null;
+    if (!viewport || typeof viewport.getBoundingClientRect !== 'function') return false;
+    const view = typeof getView === 'function' ? getView() : null;
+    if (!view) return false;
 
     const rect = viewport.getBoundingClientRect();
     const canvasX = Math.round((clientX - rect.left - view.x) / view.scale);
@@ -118,6 +138,7 @@ export function createDocumentUi(deps) {
         y: canvasY + i * 60,
       });
     }
+    return true;
   }
 
   return {

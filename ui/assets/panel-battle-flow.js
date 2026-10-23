@@ -1,4 +1,5 @@
 import { bindBattleDialogController, buildBattleBranchCards } from './panel-battle.js';
+import { assertFunction, assertFunctions, assertCardsArray } from './panel-contracts.js';
 
 /**
  * 对比推导（Battle）的业务编排。
@@ -7,6 +8,18 @@ import { bindBattleDialogController, buildBattleBranchCards } from './panel-batt
  * 弹窗本身的渲染与校验仍在 panel-battle.js，发送在 panel-chat-engine.js。
  */
 export function createBattleFlow(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createBattleFlow: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'listen', 'getAgentReasoningEffort', 'getAvailableAgents', 'loadAvailableAgents',
+    'chainIsBusy', 'getCards', 'getSession', 'getIsDisposed', 'canMutateCanvas',
+    'cardHasParent', 'calculateBranchYPositions', 'fitViewportToCluster',
+    'renderCards', 'scheduleSave', 'recordSnapshot', 'getSelectedCardId',
+    'sendCardPrompt', 'uniqueId'
+  ], 'createBattleFlow');
+
   const {
     battleDialog, battlePromptInput, battleAgentsList, battleSelectedCount,
     battleDialogError, btnBattleClose, btnBattleCancel, btnBattleSubmit, btnUseLastPrompt,
@@ -35,7 +48,7 @@ export function createBattleFlow(deps) {
     getReasoningEffort: getAgentReasoningEffort,
     onSubmit: ({ targetCard, prompt, selectedAgentIds }) => {
       const agents = (getAvailableAgents() || []).filter(a => selectedAgentIds.has(a.id));
-      const cards = getCards() || [];
+      const cards = assertCardsArray(getCards(), 'battle-flow:onSubmit');
       if (targetCard && cards.includes(targetCard)) {
         void runBattleBranches(targetCard, prompt, agents);
       }
@@ -49,16 +62,18 @@ export function createBattleFlow(deps) {
   }
 
   async function openBattleDialog(card, initialPromptText = '') {
-    if (getIsDisposed() || chainIsBusy(card) || !(getCards() || []).includes(card)) return;
+    const cards = assertCardsArray(getCards(), 'battle-flow:openBattleDialog');
+    if (getIsDisposed() || chainIsBusy(card) || !cards.includes(card)) return;
     const generation = getSession().generation;
     await controller.open(card, initialPromptText);
-    if (!canMutateCanvas(generation) || !(getCards() || []).includes(card)) {
+    const refreshedCards = assertCardsArray(getCards(), 'battle-flow:openBattleDialog:afterOpen');
+    if (!canMutateCanvas(generation) || !refreshedCards.includes(card)) {
       controller.close();
     }
   }
 
   async function runBattleBranches(parentCard, prompt, selectedAgents) {
-    const cards = getCards() || [];
+    const cards = assertCardsArray(getCards(), 'battle-flow:runBattleBranches');
     if (!parentCard || !cards.includes(parentCard) || chainIsBusy(parentCard)) return;
     const existingChildren = cards.filter(c => cardHasParent(c, parentCard.id));
     const startBranchIndex = existingChildren.length + 1;

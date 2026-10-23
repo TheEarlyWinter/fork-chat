@@ -8,6 +8,7 @@
 
 import { escapeHtml as defaultEscapeHtml } from './panel-format.js';
 import { safeDetail as defaultSafeDetail } from './host-api.js';
+import { assertFunction, assertFunctions, assertOptionalFunctions } from './panel-contracts.js';
 
 /** 会话尾号辅助函数：同名会话靠这个区分 */
 export function shortId(id) {
@@ -21,6 +22,21 @@ export function selectedBridgeKind(kindSelect) {
 }
 
 export function createBridge(deps = {}) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createBridge: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'bridgeRequest', 'canMutateCanvas', 'getGeneration',
+    'createBridgeDocCard', 'flushSession', 'getCanvasId'
+  ], 'createBridge');
+
+  assertOptionalFunctions(deps, [
+    'isDisposed', 'safeDetail', 'escapeHtml', 'flashMessage',
+    'getOwnedClaims', 'bindBridgeSend', 'pollBridgeIntents',
+    'addCleanup', 'setIntervalRef', 'clearIntervalRef', 'listen'
+  ], 'createBridge');
+
   const {
     documentRef,
     windowRef,
@@ -30,11 +46,11 @@ export function createBridge(deps = {}) {
     safeDetail = defaultSafeDetail,
     escapeHtml = defaultEscapeHtml,
     flashMessage = () => {},
-    canMutateCanvas = () => true,
-    getGeneration = () => null,
+    canMutateCanvas,
+    getGeneration,
     createBridgeDocCard,
-    flushSession = async () => {},
-    getCanvasId = () => '',
+    flushSession,
+    getCanvasId,
     getOwnedClaims = () => null,
     bindBridgeSend = () => {},
     pollBridgeIntents = () => {},

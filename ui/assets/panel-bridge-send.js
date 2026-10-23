@@ -9,6 +9,7 @@
 import { escapeHtml as defaultEscapeHtml } from './panel-format.js';
 import { safeDetail as defaultSafeDetail } from './host-api.js';
 import { selectedBridgeKind as resolveBridgeKind } from './panel-bridge.js';
+import { assertFunction, assertOptionalFunctions, assertCardsArray } from './panel-contracts.js';
 
 /** 会话尾号辅助函数：同名会话靠这个区分 */
 function shortId(id) {
@@ -17,6 +18,16 @@ function shortId(id) {
 }
 
 export function createBridgeSend(deps = {}) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createBridgeSend: deps must be an object');
+  }
+
+  assertFunction(deps.bridgeRequest, 'bridgeRequest', 'createBridgeSend');
+  assertOptionalFunctions(deps, [
+    'isDisposed', 'safeDetail', 'escapeHtml', 'flashMessage',
+    'getCards', 'getSelectedCardId', 'getBridgeTargetSessionId', 'listen'
+  ], 'createBridgeSend');
+
   const {
     documentRef,
     isDisposed = () => false,
@@ -126,9 +137,9 @@ export function createBridgeSend(deps = {}) {
       const box = getEl('bridge-send-text');
       if (box) box.oninput = updateMeta;
       // 从当前选中卡片带一段确定性模板，不调模型生成摘要
-      const cards = getCards();
-      const selectedCardId = getSelectedCardId();
-      const selected = Array.isArray(cards) ? cards.find((c) => c.id === selectedCardId) : null;
+      const cards = typeof getCards === 'function' ? assertCardsArray(getCards(), 'bridge-send:openBridgeSendDialog') : [];
+      const selectedCardId = typeof getSelectedCardId === 'function' ? getSelectedCardId() : null;
+      const selected = cards.find((c) => c.id === selectedCardId);
       if (box && selected && !box.value.trim()) {
         const lastAssistant = [...(selected.messages || [])].reverse().find((m) => m.role === 'assistant' && m.text);
         const excerpt = lastAssistant?.text ? lastAssistant.text.slice(0, 4000) : (selected.docContent || '').slice(0, 4000);

@@ -4,7 +4,8 @@ import { runChat, ChatError } from './chat-client.js';
 import { parseAssistantOutput } from './assistant-output.js';
 import { createForkSessionStore } from './fork-session-store.js';
 import { createForkSessionController } from './fork-session-controller.js';
-import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
+import { createPanelSessionUi } from './panel-session-ui.js';
+import { createFeedbackService } from './panel-feedback.js';
 import { collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
 import { bindKeyboardShortcuts } from './panel-shortcuts.js';
 import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
@@ -16,7 +17,7 @@ import { createDocumentPipeline } from './panel-documents.js';
 import { createChatEngine } from './panel-chat-engine.js';
 import { createBattleFlow } from './panel-battle-flow.js';
 import { createMergeController } from './panel-merge.js';
-import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown } from './panel-cards.js';
+import { clampCardWidth, clampCardHeight, buildCardHtml, cycleCardStatusStamp, findCardAncestorChain, formatCardChainMarkdown, createInitialCards } from './panel-cards.js';
 import { createHistoryController } from './panel-history-controller.js';
 import { createCanvasActions } from './panel-canvas-actions.js';
 import { createBridgeSend } from './panel-bridge-send.js';
@@ -31,6 +32,10 @@ import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
 
 const activeRequests = new Map();
+
+let sessionUi = null;
+let feedbackService = null;
+const flashMessage = (msg) => feedbackService?.flashMessage(msg);
 
 // 卡片上的拖拽移动与缩放
 const cardGestures = createCardGestures({
@@ -99,6 +104,7 @@ const cardEvents = createCardEvents({
   recordSnapshot: (list, id) => historyManager?.recordSnapshot(list, id),
   canMutateCanvas: (generation) => canMutateCanvas(generation),
   sendCardPrompt: (card, text, opts) => sendCardPrompt(card, text, opts),
+  cancelCardRequest: (cardId, reason) => chatEngine.cancelCardRequest(cardId, reason),
   findCardAncestorChain: (...args) => findCardAncestorChain(...args),
   cardParentIds: (card) => cardParentIds(card),
   formatCardChainMarkdown: (...args) => formatCardChainMarkdown(...args),
@@ -156,8 +162,6 @@ const chatEngine = createChatEngine({
 function chainIsBusy(card) { return chatEngine.chainIsBusy(card); }
 function sendCardPrompt(card, text, options) { return chatEngine.sendCardPrompt(card, text, options); }
 let sessionController = null;
-let deleteIntent = null, deleteInProgress = false;
-const activeRenameCommands = new Set();
 const canvasId = uniqueId('canvas');
 function uniqueId(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
@@ -236,23 +240,7 @@ const view = {
 };
 
 // Each App session starts with its own independent canvas.
-function initialCards() { return [
-  {
-    id: 'card-1',
-    parentId: null,
-    title: '主线对话 #01',
-    x: 80,
-    y: 80,
-    width: 340,
-    messages: [
-      {
-        role: 'assistant',
-        localOnly: true,
-        text: '你好！这里是你的第一张对话卡片。\n\n在下方输入框打入你想聊的内容开启主线；随时点击卡片右侧的 [+] 按钮，即可开辟一条独立的追问分支。'
-      }
-    ]
-  }
-]; }
+const initialCards = () => createInitialCards();
 let cards = initialCards();
 let selectedCardId = null;
 let isSpacePressed = false;
@@ -335,7 +323,7 @@ const agentController = createAgentController({
   getReasoningEffort: () => currentReasoningEffort,
   setReasoningEffort: next => { currentReasoningEffort = next; },
   activeAgentDisplay,
-  isBusy: () => Boolean(sessionController?.state.busy || deleteIntent),
+  isBusy: () => Boolean(sessionController?.state.busy || sessionUi?.hasDeleteIntent()),
   renderCards: () => renderCards(),
   scheduleSave: () => sessionController?.scheduleSave(),
   isDisposed: () => isDisposed,
@@ -363,15 +351,7 @@ bus.onmessage = (e) => {
   if (agentController.handleBroadcast(message)) {
     return;
   }
-  if (message?.type === 'FORK_SESSION_COMMAND') {
-    if (message.targetCanvasId !== canvasId || !sessionController) return;
-    if (deleteIntent) { replySessionCommand(message, { ok: false, error: '请先处理当前删除确认。' }); return; }
-    if (message.command === 'rename') { void renameSessionFromIntent(message); return; }
-    if (message.command === 'delete') { void openDeleteConfirmation(message); return; }
-    const operation = message.command === 'new' ? sessionController.newSession(initialSnapshot())
-      : message.command === 'switch' ? sessionController.switchTo(message.sessionId)
-      : sessionController.state.ready ? sessionController.refresh() : sessionController.init();
-    void operation.catch(() => {});
+  if (sessionUi?.handleSessionMessage(message)) {
     return;
   }
 };
@@ -426,7 +406,7 @@ const canvasActions = createCanvasActions({
   isBusy: () => Boolean(!sessionController?.state.ready || sessionController?.state.busy),
   isModalOpen: () => Boolean(battleDialog?.open || deleteDialog?.open || bridgeDialogEl?.open || bridgeSendDialogEl?.open),
   abortActiveRequest: id => {
-    activeRequests.get(id)?.controller.abort(new ChatError('REQUEST_CANCELLED', '卡片已关闭。'));
+    chatEngine.cancelCardRequest(id, '卡片已关闭。');
   },
   abortDocumentTasksFor: id => abortDocumentTasksFor(id),
   calculateBranchYPositions: (parent, count, targetX) => calculateBranchYPositions(parent, count, targetX),
@@ -441,6 +421,7 @@ const canvasActions = createCanvasActions({
   initialSnapshot: () => initialSnapshot(),
   uniqueId,
   isDisposed: () => isDisposed,
+  extractDocumentFile: (file, cardId) => extractDocumentFile(file, cardId),
 });
 
 const rememberRemovedCard = card => canvasActions.rememberRemovedCard(card);
@@ -448,6 +429,7 @@ const removedCardArchive = canvasActions.removedCardArchive;
 const createRootCard = () => canvasActions.createRootCard();
 const createBranchCard = (card, opts) => canvasActions.createBranchCard(card, opts);
 const closeCardHierarchy = card => canvasActions.closeCardHierarchy(card);
+const createDocumentCard = (file, coord) => canvasActions.createDocumentCard(file, coord);
 const createBridgeDocCard = opts => canvasActions.createBridgeDocCard(opts);
 
 // 画布历史撤销与重做控制器 (History Controller)
@@ -622,16 +604,7 @@ listen(btnAutoTidy, 'click', () => {
 });
 
 listen(btnResetView, 'click', () => {
-  // 按钮叫「居中视野」，那就真的居中到现有卡片；
-  // 以前是把视图重置成 (60, 40) 的固定原点，卡片一多就跑到视口外面去了。
-  if (cards.length > 0) {
-    fitViewportToCluster(visibleCardsForFraming());
-    return;
-  }
-  view.x = 60;
-  view.y = 40;
-  view.scale = 1;
-  updateTransform();
+  canvasViewController.resetView();
 });
 
 // 新建主线根卡片
@@ -648,28 +621,6 @@ const documentPipeline = createDocumentPipeline({
 });
 const extractDocumentFile = (file, cardId = null) => documentPipeline.extractDocumentFile(file, cardId);
 const abortDocumentTasksFor = (cardId) => documentPipeline.abortDocumentTasksFor(cardId);
-
-// 解析失败时原地报一声，比默默生成一张空白的资料卡诚实
-function flashMessage(text) {
-  if (isDisposed) return;
-  let el = document.getElementById('fork-flash');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'fork-flash';
-    el.style.cssText = [
-      'position:fixed', 'left:50%', 'bottom:60px', 'transform:translateX(-50%)',
-      'max-width:min(560px, 78vw)', 'padding:11px 17px', 'border-radius:6px',
-      'font-size:12.5px', 'line-height:1.75', 'z-index:9999', 'pointer-events:none',
-      'transition:opacity .35s', 'background:#40221f', 'color:#f6ece9',
-      'border:1px solid #6b3a34', 'font-family:inherit', 'box-shadow:0 6px 20px rgba(0,0,0,.22)',
-    ].join(';');
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.style.opacity = '1';
-  cancelLater(flashMessage._timer);
-  flashMessage._timer = later(() => { el.style.opacity = '0'; }, 4600);
-}
 
 // ===== 本体会话桥接：导入、来源、回传 =====
 
@@ -836,64 +787,6 @@ if (document.readyState === 'loading') {
   initSessionBridge();
 }
 
-async function createDocumentCard(file, targetCoord = null) {
-  if (!canMutateCanvas() || !file) return null;
-  if (!sessionController.state.activeId) {
-    await sessionController.newSession(initialSnapshot());
-  }
-  if (!canMutateCanvas() || !sessionController.state.activeId) return null;
-  const generation = sessionController.generation;
-  const result = await extractDocumentFile(file);
-  if (!canMutateCanvas(generation) || result.cancelled) return null;
-  if (!result.ok) {
-    flashMessage(`《${result.filename}》没读出来（${result.stage || '未知'}阶段）：${result.error}`);
-    return null;
-  }
-  const rootCount = cards.filter(c => cardParentIds(c).length === 0).length + 1;
-  const spot = rootSlotPosition(rootCount);
-  const x = targetCoord ? targetCoord.x : spot.x;
-  const y = targetCoord ? targetCoord.y : spot.y;
-
-  const newCard = {
-    id: uniqueId('doc'),
-    parentId: null,
-    title: result.filename,
-    isDoc: true,
-    docContent: result.text,
-    docMeta: {
-      name: result.filename,
-      size: result.size,
-      extension: result.extension,
-      charCount: result.charCount,
-      lineCount: result.lineCount,
-    },
-    x,
-    y,
-    width: 360,
-    messages: [
-      {
-        role: 'assistant',
-        localOnly: true,
-        text: `【资料源就绪】已成功解析《${result.filename}》（${formatFileSize(result.size)} · ${result.charCount} 字）· 引擎：${result.engineLabel || '本地'}。\n\n点击卡片右侧 [+] 追问 或 [⑂ 对比]，即可以此文档为基座开辟分析分支。`,
-        docPreview: result.preview,
-        docMeta: {
-          name: result.filename,
-          size: result.size,
-          lineCount: result.lineCount,
-          charCount: result.charCount,
-        },
-      }
-    ],
-  };
-
-  cards.push(newCard);
-  renderCards();
-  sessionController?.scheduleSave();
-  selectCard(newCard.id, false);
-  historyManager.recordSnapshot(cards, newCard.id);
-  return newCard;
-}
-
 listen(btnImportDoc, 'click', () => {
   globalDocInput?.click();
 });
@@ -956,7 +849,7 @@ const sessionState = createSessionState({
   abortAllDocumentTasks: () => documentPipeline.abortAll(),
   cancelAllRequests: (reason) => chatEngine.cancelAll(reason),
   getSessionController: () => sessionController,
-  getDeleteIntent: () => deleteIntent,
+  getDeleteIntent: () => sessionUi?.getDeleteIntent() || null,
   bus,
   canvasId,
 });
@@ -965,124 +858,57 @@ const captureSnapshot = () => sessionState.captureSnapshot();
 const applySnapshot = (snapshot) => sessionState.applySnapshot(snapshot);
 const cancelSessionRequests = (reason) => sessionState.cancelSessionRequests(reason);
 const publishSessionState = (targetPanelId) => sessionState.publishSessionState(targetPanelId);
-function replySessionCommand(message, result) {
-  if (isDisposed) return;
-  if (!message?.requestId || !message?.panelId) return;
-  bus.postMessage({ type: 'FORK_SESSION_RESULT', canvasId, targetPanelId: message.panelId,
-    requestId: message.requestId, command: message.command, ...result });
-}
-async function renameSessionFromIntent(message) {
-  if (isDisposed) return;
-  if (activeRenameCommands.has(message.requestId)) return;
-  activeRenameCommands.add(message.requestId);
-  try {
-    const intent = await readRenameIntent(hana, message.requestId, message.sessionId);
-    if (isDisposed) return;
-    const result = await sessionController.rename(message.sessionId, intent.title, intent.expectedTitle);
-    replySessionCommand(message, result);
-  } catch (err) { replySessionCommand(message, { ok: false, error: safeDetail(err.message) }); }
-  finally { activeRenameCommands.delete(message.requestId); await clearRenameIntent(hana, message.requestId); }
-}
-function dismissDeleteConfirmation(cancelled = true) {
-  if (!deleteIntent || deleteInProgress) return;
-  const message = deleteIntent.message;
-  deleteIntent = null;
-  deleteDialog.close();
-  publishSessionState();
-  if (cancelled) replySessionCommand(message, { ok: false, cancelled: true });
-}
-async function openDeleteConfirmation(message) {
-  if (isDisposed) return;
-  if (!sessionController.state.ready || sessionController.state.busy) {
-    replySessionCommand(message, { ok: false, error: '会话正忙，请稍后重试。' }); return;
-  }
-  const intent = { message, record: null };
-  deleteIntent = intent;
-  deleteTargetTitle.textContent = '正在读取会话…';
-  deleteDialogError.textContent = '';
-  deleteDialogProgress.textContent = '确认前不会删除或取消任何请求。';
-  btnDeleteConfirm.disabled = true; btnDeleteCancel.disabled = false;
-  deleteDialog.showModal(); btnDeleteCancel.focus(); publishSessionState();
-  try {
-    const record = await sessionStore.get(message.sessionId);
-    if (isDisposed) return;
-    if (deleteIntent !== intent) return;
-    intent.record = record;
-    deleteTargetTitle.textContent = record.title;
-    const isCurrent = record.id === sessionController.state.activeId;
-    const changedElsewhere = isCurrent && record.revision > sessionController.state.activeRevision;
-    deleteDialogProgress.textContent = changedElsewhere
-      ? '已保存版本较本窗口记录更新（可能来自其他窗口）。确认后会删除最新已保存版本，以及本窗口未保存的内容。'
-      : isCurrent && activeRequests.size ? '当前仍在生成，确认删除后会先停止请求。'
-      : '确认后将永久删除该会话及其全部卡片记录。';
-    btnDeleteConfirm.disabled = false;
-  } catch (err) {
-    if (!isDisposed && deleteIntent === intent) deleteDialogError.textContent = safeDetail(err.message);
-  }
-}
-listen(btnDeleteCancel, 'click', () => dismissDeleteConfirmation());
-listen(deleteDialog, 'cancel', event => { event.preventDefault(); dismissDeleteConfirmation(); });
-listen(btnDeleteConfirm, 'click', async event => {
-  // A forged channel message or scripted .click() is not deletion consent.
-  // 伪造的通道消息或脚本点击不算删除同意。但不能静默退出，
-  // 否则读屏软件和键盘模拟点一次就卡住，界面既不动也不说为什么。
-  if (!event?.isTrusted) {
-    deleteDialogError.textContent = '这次点击未被识别为本人操作，请直接用鼠标或键盘确认。';
-    return;
-  }
-  const intent = deleteIntent;
-  if (!intent?.record || deleteInProgress) return;
-  deleteInProgress = true; btnDeleteConfirm.disabled = btnDeleteCancel.disabled = true;
-  deleteDialogError.textContent = ''; deleteDialogProgress.textContent = '正在删除…';
-  const result = await sessionController.remove(intent.record.id, intent.record.revision, initialSnapshot());
-  if (isDisposed) return;
-  deleteInProgress = false;
-  if (result.ok) {
-    dismissDeleteConfirmation(false);
-    replySessionCommand(intent.message, result);
-  } else {
-    deleteDialogError.textContent = result.error || '删除失败，原会话尚未移除。';
-    deleteDialogProgress.textContent = '可以取消，或检查存储状态后重试。';
-    btnDeleteConfirm.disabled = btnDeleteCancel.disabled = false;
-  }
-});
-
 // 合成起止用捕获阶段挂在 document 上，卡片重建后依然有效；
 // 必须走 listen，面板销毁时要能解绑，否则关掉的画布还在收事件。
 listen(document, 'compositionstart', event => renderer.onCompositionStart(event), true);
 listen(document, 'compositionend', () => renderer.onCompositionEnd(), true);
 
-let lastPhase = '';
-let lastNotice = '';
+feedbackService = createFeedbackService({
+  documentRef: document,
+  later,
+  cancelLater,
+  isDisposed: () => isDisposed,
+});
+
 const sessionStore = createForkSessionStore(hana);
+
+sessionUi = createPanelSessionUi({
+  hana,
+  sessionStore,
+  getSessionController: () => sessionController,
+  bus,
+  canvasId,
+  safeDetail,
+  initialSnapshot: () => initialSnapshot(),
+  publishSessionState: (id) => publishSessionState(id),
+  renderCards: (preserve) => renderCards(preserve),
+  listen,
+  deleteDialog,
+  deleteTargetTitle,
+  deleteDialogError,
+  deleteDialogProgress,
+  btnDeleteConfirm,
+  btnDeleteCancel,
+  sessionStatusEl,
+  btnRetrySave,
+  btnSaveCopy,
+  btnNewRoot,
+  btnEmptyNewSession,
+  documentRef: document,
+  later,
+  cancelLater,
+  flashMessage,
+  isDisposed: () => isDisposed,
+  hasActiveRequests: () => activeRequests.size > 0,
+});
+
 sessionController = createForkSessionController({
-  store: sessionStore, capture: captureSnapshot, apply: applySnapshot, cancelPending: cancelSessionRequests,
-  onChange(state) {
-    if (isDisposed) return;
-    // 会话控制器只知道"发生了什么"，说不出人话；在这里翻成一句提示
-    if (state.notice && state.notice !== lastNotice) {
-      lastNotice = state.notice;
-      flashMessage(state.notice);
-    }
-    sessionStatusEl.textContent = state.error ? `${state.dirty ? '未保存' : '会话操作失败'} · ${safeDetail(state.error)}`
-      : !state.ready ? '正在恢复会话…'
-      : !state.activeId ? '暂无会话 · 可点击新建会话'
-      : `${state.title} · ${state.busy ? '正在切换…' : state.saving ? '保存中…' : state.dirty ? '待保存' : '已保存'}`;
-    sessionStatusEl.title = sessionStatusEl.textContent;
-    btnRetrySave.hidden = !state.error;
-    btnSaveCopy.hidden = !state.error || !state.ready;
-    btnRetrySave.disabled = btnSaveCopy.disabled = state.busy;
-    btnNewRoot.disabled = !state.ready || state.busy;
-    const phase = `${state.ready}:${state.busy}`;
-    if (lastPhase !== phase) { lastPhase = phase; renderCards(); }
-    publishSessionState();
-  },
+  store: sessionStore,
+  capture: captureSnapshot,
+  apply: applySnapshot,
+  cancelPending: cancelSessionRequests,
+  onChange: (state) => sessionUi.handleSessionStateChange(state),
 });
-listen(btnEmptyNewSession, 'click', () => {
-  void sessionController?.newSession(initialSnapshot()).catch(() => {});
-});
-listen(btnRetrySave, 'click', () => { void (sessionController.state.ready ? sessionController.flush() : sessionController.init()).catch(() => {}); });
-listen(btnSaveCopy, 'click', () => { void sessionController.saveCopy().catch(() => {}); });
 const stopWatchingSessions = sessionStore.watch(() => { void sessionController.refresh().catch(() => {}); });
 
 function disposePanel() {
@@ -1115,6 +941,8 @@ function disposePanel() {
   for (const control of document.querySelectorAll?.('button, input, textarea, select') || []) control.disabled = true;
   for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl]) dialog?.close?.();
   historyManager.clear();
+  sessionUi?.dispose();
+  feedbackService?.dispose();
   // close() cancels generation-bound work and flushes the last snapshot once.
   disposalPromise = sessionController.close();
   void disposalPromise.catch(() => {});

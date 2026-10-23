@@ -6,6 +6,8 @@
  * 严禁在顶层访问 window 或 document，不反向依赖 panel.js。
  */
 
+import { assertFunctions, assertOptionalFunctions } from './panel-contracts.js';
+
 export function createInitialAgent(storage = typeof localStorage !== 'undefined' ? localStorage : null) {
   return {
     id: storage?.getItem?.('fork_chat_active_agent_id') || 'hakimi',
@@ -25,6 +27,17 @@ export function getInitialReasoningEffort(storage = typeof localStorage !== 'und
 }
 
 export function createAgentController(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createAgentController: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getAgent', 'setAgent', 'getReasoningEffort', 'setReasoningEffort', 'renderCards', 'scheduleSave'
+  ], 'createAgentController');
+  assertOptionalFunctions(deps, [
+    'isBusy', 'getActiveAgentDisplay', 'isDisposed', 'requestHost', 'abortable', 'getSignal'
+  ], 'createAgentController');
+
   const {
     getAgent,
     setAgent,

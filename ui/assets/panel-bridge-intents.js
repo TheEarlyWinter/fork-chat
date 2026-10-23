@@ -14,6 +14,7 @@
  */
 
 import { requestHost as defaultRequestHost } from './host-api.js';
+import { assertFunction } from './panel-contracts.js';
 
 export function createBridgeIntents(deps = {}) {
   const {
@@ -25,16 +26,10 @@ export function createBridgeIntents(deps = {}) {
   // 这几个依赖缺了就是接线错了，不能给默认值。
   // 默认「门禁永远放行」「代际为 0」「身份是空串」会把错误悄悄变成行为异常：
   // 凭条被一个不存在的身份认领，然后永远释放不掉。
-  const requireFn = (name, value) => {
-    if (typeof value !== 'function') {
-      throw new Error(`createBridgeIntents 缺少依赖：${name}`);
-    }
-    return value;
-  };
-  const canMutateCanvas = requireFn('canMutateCanvas', deps.canMutateCanvas);
-  const getGeneration = requireFn('getGeneration', deps.getGeneration);
-  const getCanvasId = requireFn('getCanvasId', deps.getCanvasId);
-  const deliverIntent = requireFn('deliverIntent', deps.deliverIntent);
+  const canMutateCanvas = assertFunction(deps.canMutateCanvas, 'canMutateCanvas', 'createBridgeIntents');
+  const getGeneration = assertFunction(deps.getGeneration, 'getGeneration', 'createBridgeIntents');
+  const getCanvasId = assertFunction(deps.getCanvasId, 'getCanvasId', 'createBridgeIntents');
+  const deliverIntent = assertFunction(deps.deliverIntent, 'deliverIntent', 'createBridgeIntents');
 
   const resolveCanvasId = () => getCanvasId();
   const resolveHana = () => (typeof hana === 'function' ? hana() : hana);

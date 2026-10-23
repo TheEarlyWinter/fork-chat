@@ -9,6 +9,7 @@
 import { rootSlotPosition, formatFileSize } from './panel-format.js';
 import { cardParentIds, cardHasParent } from './panel-context.js';
 import { outputFor } from './panel-messages.js';
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
 
 /** 会话尾号辅助函数：同名会话靠这个区分 */
 function shortId(id) {
@@ -17,16 +18,43 @@ function shortId(id) {
 }
 
 export function createCanvasActions(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createCanvasActions: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'setCards', 'getSelectedCardId', 'setSelectedCardId',
+    'canMutateCanvas', 'chainIsBusy', 'abortActiveRequest', 'abortDocumentTasksFor',
+    'calculateBranchYPositions', 'renderCards', 'scheduleSave', 'recordSnapshot',
+    'extractDocumentFile', 'initialSnapshot'
+  ], 'createCanvasActions');
+
+  const hasGetSessionController = typeof deps.getSessionController === 'function';
+  const hasLegacySessionController = deps.sessionController && (typeof deps.sessionController === 'object' || typeof deps.sessionController === 'function');
+  if (!hasGetSessionController && !hasLegacySessionController) {
+    throw new TypeError('createCanvasActions: requires either getSessionController function or sessionController object');
+  }
+
+  assertOptionalFunctions(deps, [
+    'uniqueId', 'getSessionController', 'isBusy', 'isModalOpen', 'selectCard', 'ensureCardInView',
+    'focusCardInViewport', 'flashMessage', 'isDisposed'
+  ], 'createCanvasActions');
+
+  if (deps.multiSelectedCardIds != null) {
+    assertObject(deps.multiSelectedCardIds, 'multiSelectedCardIds', 'createCanvasActions');
+    assertMethod(deps.multiSelectedCardIds, 'delete', 'createCanvasActions');
+  }
+
   const {
     getCards,
     setCards,
     getSelectedCardId,
     setSelectedCardId,
     multiSelectedCardIds,
-    canMutateCanvas = () => true,
-    chainIsBusy = () => false,
-    isBusy = () => false,
-    isModalOpen = () => false,
+    canMutateCanvas,
+    chainIsBusy,
+    isBusy,
+    isModalOpen,
     abortActiveRequest,
     abortDocumentTasksFor,
     calculateBranchYPositions,
@@ -42,6 +70,7 @@ export function createCanvasActions(deps) {
     initialSnapshot,
     uniqueId = prefix => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     isDisposed,
+    extractDocumentFile,
   } = deps;
 
   const checkDisposed = () => (typeof isDisposed === 'function' ? isDisposed() : Boolean(isDisposed));
@@ -74,7 +103,7 @@ export function createCanvasActions(deps) {
       await sessionCtrl.newSession(snapshot);
       return null;
     }
-    const currentCards = getCards ? getCards() : [];
+    const currentCards = assertCardsArray(getCards(), 'canvas-actions:createRootCard');
     const rootCount = currentCards.filter(c => cardParentIds(c).length === 0).length + 1;
     const newRoot = {
       id: uniqueId('card'),
@@ -97,7 +126,7 @@ export function createCanvasActions(deps) {
   // 从指定卡片拉出子分支卡片
   function createBranchCard(card, { autoFocus = true } = {}) {
     if (checkDisposed()) return null;
-    const currentCards = getCards ? getCards() : [];
+    const currentCards = assertCardsArray(getCards(), 'canvas-actions:createBranchCard');
     const parentCard = typeof card === 'string' ? currentCards.find(c => c.id === card) : (currentCards.find(c => c.id === card?.id) || card);
     if (!parentCard || (chainIsBusy && chainIsBusy(parentCard)) || !currentCards.includes(parentCard)) return null;
 
@@ -155,7 +184,7 @@ export function createCanvasActions(deps) {
     if (typeof isBusy === 'function' && isBusy()) return;
     if (typeof isModalOpen === 'function' && isModalOpen()) return;
 
-    let currentCards = getCards ? getCards() : [];
+    let currentCards = assertCardsArray(getCards(), 'canvas-actions:closeCardHierarchy');
     const targetId = typeof card === 'string' ? card : card?.id;
     if (!targetId) return;
     const targetCard = currentCards.find(c => c.id === targetId);
@@ -204,7 +233,7 @@ export function createCanvasActions(deps) {
   function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
     if (checkDisposed()) return null;
     if (canMutateCanvas && !canMutateCanvas()) return null;
-    const currentCards = getCards ? getCards() : [];
+    const currentCards = assertCardsArray(getCards(), 'canvas-actions:createBridgeDocCard');
 
     // 去重只看内容与导入类型：同内容的快照生成两张一模一样的卡没有意义，
     // 即使两个来源会话标题相同也定位回已有卡片。
@@ -258,6 +287,73 @@ export function createCanvasActions(deps) {
     return newCard;
   }
 
+  // 创建文档资料基座卡片
+  async function createDocumentCard(file, targetCoord = null) {
+    if (checkDisposed()) return null;
+    if (canMutateCanvas && !canMutateCanvas()) return null;
+    if (!file) return null;
+    const sessionCtrl = typeof getSessionController === 'function' ? getSessionController() : sessionController;
+    if (sessionCtrl && !sessionCtrl.state?.activeId) {
+      const snapshot = typeof initialSnapshot === 'function' ? initialSnapshot() : null;
+      await sessionCtrl.newSession(snapshot);
+    }
+    if ((canMutateCanvas && !canMutateCanvas()) || !sessionCtrl?.state?.activeId) return null;
+    const generation = sessionCtrl.generation;
+    if (typeof extractDocumentFile !== 'function') return null;
+    const result = await extractDocumentFile(file);
+    if (checkDisposed()) return null;
+    if ((canMutateCanvas && !canMutateCanvas(generation)) || result?.cancelled) return null;
+    if (!result?.ok) {
+      flashMessage?.(`《${result?.filename}》没读出来（${result?.stage || '未知'}阶段）：${result?.error}`);
+      return null;
+    }
+    const currentCards = assertCardsArray(getCards(), 'canvas-actions:createDocumentCard');
+    const rootCount = currentCards.filter(c => cardParentIds(c).length === 0).length + 1;
+    const spot = rootSlotPosition(rootCount);
+    const x = targetCoord ? targetCoord.x : spot.x;
+    const y = targetCoord ? targetCoord.y : spot.y;
+
+    const newCard = {
+      id: uniqueId('doc'),
+      parentId: null,
+      title: result.filename,
+      isDoc: true,
+      docContent: result.text,
+      docMeta: {
+        name: result.filename,
+        size: result.size,
+        extension: result.extension,
+        charCount: result.charCount,
+        lineCount: result.lineCount,
+      },
+      x,
+      y,
+      width: 360,
+      messages: [
+        {
+          role: 'assistant',
+          localOnly: true,
+          text: `【资料源就绪】已成功解析《${result.filename}》（${formatFileSize(result.size)} · ${result.charCount} 字）· 引擎：${result.engineLabel || '本地'}。\n\n点击卡片右侧 [+] 追问 或 [⑂ 对比]，即可以此文档为基座开辟分析分支。`,
+          docPreview: result.preview,
+          docMeta: {
+            name: result.filename,
+            size: result.size,
+            lineCount: result.lineCount,
+            charCount: result.charCount,
+          },
+        }
+      ],
+    };
+
+    currentCards.push(newCard);
+    setCards(currentCards);
+    renderCards();
+    scheduleSave();
+    selectCard?.(newCard.id, false);
+    recordSnapshot(currentCards, newCard.id);
+    return newCard;
+  }
+
   return {
     rememberRemovedCard,
     removedCardArchive,
@@ -266,5 +362,6 @@ export function createCanvasActions(deps) {
     createBranchCard,
     closeCardHierarchy,
     createBridgeDocCard,
+    createDocumentCard,
   };
 }

@@ -22,8 +22,25 @@ import {
   computeEnsureCardVisible,
 } from './panel-viewport.js';
 import { findCardByDirection } from './panel-shortcuts.js';
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertCardsArray } from './panel-contracts.js';
+import { setCardGeometry } from './panel-cards.js';
 
 export function createCanvasViewController(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createCanvasViewController: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'getSelectedCardId', 'setSelectedCardId', 'canMutateCanvas',
+    'renderCards', 'scheduleSave', 'recordSnapshot', 'clearMultiSelect'
+  ], 'createCanvasViewController');
+
+  assertObject(deps.view, 'view', 'createCanvasViewController');
+
+  assertOptionalFunctions(deps, [
+    'listen', 'later', 'getIsSpacePressed', 'isDisposed'
+  ], 'createCanvasViewController');
+
   const {
     getCards,
     getSelectedCardId,
@@ -37,7 +54,7 @@ export function createCanvasViewController(deps) {
     btnZoomIn,
     btnZoomOut,
     getIsSpacePressed,
-    canMutateCanvas = () => true,
+    canMutateCanvas,
     renderCards,
     scheduleSave,
     recordSnapshot,
@@ -63,7 +80,7 @@ export function createCanvasViewController(deps) {
   // 绘制所有卡片之间的贝塞尔曲线（支持单亲与多亲收敛节点）
   function renderConnectors() {
     if (checkDisposed()) return;
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:renderConnectors');
     const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
     renderConnectorsLayer({
       svg: connectorsSvg,
@@ -91,7 +108,7 @@ export function createCanvasViewController(deps) {
 
   // 计算分支子卡片在 Y 轴上的防重叠目标坐标
   function calculateBranchYPositions(parentCard, count, targetX) {
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:calculateBranchYPositions');
     return calculateBranchYPositionsLayout(parentCard, count, targetX, cards);
   }
 
@@ -99,7 +116,7 @@ export function createCanvasViewController(deps) {
   function selectCard(cardId, focusInput = false) {
     if (checkDisposed()) return;
     if (setSelectedCardId) setSelectedCardId(cardId);
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:selectCard');
     const doc = getDoc();
     cards.forEach(c => {
       const el = doc?.getElementById?.(`dom-${c.id}`);
@@ -166,7 +183,7 @@ export function createCanvasViewController(deps) {
 
   // 依据拓扑关系（父、子、兄、弟）通过键盘方向键移动焦点卡片
   function navigateCardFocus(direction) {
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:navigateCardFocus');
     const selectedCardId = getSelectedCardId ? getSelectedCardId() : null;
     const target = findCardByDirection({
       cards,
@@ -183,7 +200,7 @@ export function createCanvasViewController(deps) {
 
   /** 当前真正显示在画布上的卡片（折叠的子分支不算） */
   function visibleCardsForFraming() {
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:visibleCardsForFraming');
     try {
       const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
       return visibleCards.length ? visibleCards : cards;
@@ -195,14 +212,13 @@ export function createCanvasViewController(deps) {
   // 树状一键自动整理排版算法 (Auto-Tidy Engine)
   function autoTidyLayout() {
     if (canMutateCanvas && !canMutateCanvas()) return;
-    const cards = getCards ? getCards() : [];
+    const cards = assertCardsArray(getCards(), 'canvas-view:autoTidyLayout');
     if (!cards || cards.length === 0) return;
     const positions = computeAutoTidyPositions(cards, cardParentIds);
     cards.forEach(c => {
       const pos = positions.get(c.id);
       if (pos) {
-        c.x = pos.x;
-        c.y = pos.y;
+        setCardGeometry(c, { x: pos.x, y: pos.y });
       }
     });
 
@@ -213,6 +229,20 @@ export function createCanvasViewController(deps) {
     fitViewportToCluster(visibleCardsForFraming());
     const selectedCardId = getSelectedCardId ? getSelectedCardId() : null;
     recordSnapshot?.(cards, selectedCardId);
+  }
+
+  // 重置或居中视口：有卡片居中可见集群，无卡片重置到初始原点 (60, 40, scale=1)
+  function resetView() {
+    if (checkDisposed()) return;
+    const cards = assertCardsArray(getCards(), 'canvas-view:resetView');
+    if (cards.length > 0) {
+      fitViewportToCluster(visibleCardsForFraming());
+      return;
+    }
+    view.x = 60;
+    view.y = 40;
+    view.scale = 1;
+    updateTransform();
   }
 
   let viewportController = null;
@@ -261,6 +291,7 @@ export function createCanvasViewController(deps) {
     navigateCardFocus,
     autoTidyLayout,
     visibleCardsForFraming,
+    resetView,
     bind,
     cleanup,
   };

@@ -1,3 +1,6 @@
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertString, assertMethod } from './panel-contracts.js';
+import { setCardDraft, setCardSavedScrollTop, setMessageAsidesOpen } from './panel-cards.js';
+
 /**
  * 会话快照的拍取与应用，以及跨窗口的状态广播。
  *
@@ -8,6 +11,29 @@
  */
 
 export function createSessionState(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createSessionState: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'setCards', 'getView', 'getSelectedCardId', 'getCurrentAgent',
+    'getIsDisposed', 'initialCards', 'clearRemovedCardArchive', 'restoreAgent',
+    'updateHeaderStatus', 'updateTransform', 'renderCards', 'clearHistory',
+    'recordSnapshot', 'abortAllDocumentTasks', 'cancelAllRequests',
+    'getSessionController'
+  ], 'createSessionState');
+
+  assertObject(deps.bus, 'bus', 'createSessionState');
+  assertMethod(deps.bus, 'postMessage', 'createSessionState');
+  assertString(deps.canvasId, 'canvasId', 'createSessionState');
+
+  if (deps.documentRef != null) {
+    assertObject(deps.documentRef, 'documentRef', 'createSessionState');
+    assertMethod(deps.documentRef, 'getElementById', 'createSessionState');
+  }
+
+  assertOptionalFunctions(deps, ['getDeleteIntent', 'getReasoningEffort'], 'createSessionState');
+
   const {
     documentRef,
     getCards,
@@ -53,14 +79,14 @@ export function createSessionState(deps) {
     const cards = getCards();
     if (!Array.isArray(cards)) throw new TypeError('createSessionState: getCards must return an array');
     for (const card of cards) {
-      const input = doc.getElementById(`input-${card.id}`);
-      if (input && typeof input.value === 'string') card.draft = input.value;
-      const body = doc.getElementById(`body-${card.id}`);
-      if (typeof body?.scrollTop === 'number') card.savedScrollTop = body.scrollTop;
+      const input = doc?.getElementById?.(`input-${card.id}`);
+      if (input && typeof input.value === 'string') setCardDraft(card, input.value);
+      const body = doc?.getElementById?.(`body-${card.id}`);
+      if (typeof body?.scrollTop === 'number') setCardSavedScrollTop(card, body.scrollTop);
       for (const message of card.messages) {
         if (!message.requestId) continue;
-        const details = doc.getElementById(`asides-${message.requestId}`);
-        if (typeof details?.open === 'boolean') message.asidesOpen = details.open;
+        const details = doc?.getElementById?.(`asides-${message.requestId}`);
+        if (typeof details?.open === 'boolean') setMessageAsidesOpen(message, details.open);
       }
     }
     const view = getView();

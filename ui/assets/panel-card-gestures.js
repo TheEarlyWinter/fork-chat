@@ -5,12 +5,27 @@
  * 所以 mouseup 和 blur 都要能结束手势，否则类和光标会一直粘着。
  */
 
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertCardsArray } from './panel-contracts.js';
+
 const MIN_WIDTH = 260;
 const MAX_WIDTH = 1200;
 const MIN_HEIGHT = 200;
 const MAX_HEIGHT = 1600;
 
 export function createCardGestures(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createCardGestures: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'listen', 'getSession', 'getCards', 'getView', 'getSelectedCardId',
+    'renderConnectors', 'scheduleSave', 'recordSnapshot', 'getIsDisposed'
+  ], 'createCardGestures');
+
+  assertOptionalFunctions(deps, [
+    'getWindowRef', 'getDocumentRef', 'getIsSpacePressed'
+  ], 'createCardGestures');
+
   const {
     listen,
     getSession,
@@ -26,7 +41,7 @@ export function createCardGestures(deps) {
     getWindowRef,
   } = deps;
 
-  const cardsNow = () => getCards() || [];
+  const cardsNow = () => assertCardsArray(getCards(), 'card-gestures');
   // window 由入口注入：这个模块在测试里是原生 import 的，拿不到 VM 里的全局。
   const win = () => (typeof getWindowRef === 'function' ? getWindowRef() : null);
   const doc = () => (typeof getDocumentRef === 'function' ? getDocumentRef() : null);

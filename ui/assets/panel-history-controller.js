@@ -1,5 +1,6 @@
 /** Layout history adapter: live business contents never roll back with geometry. */
 import { createHistoryManager, CARD_TOPOLOGY_KEYS } from './panel-history.js';
+import { applyCardTopologySnapshot } from './panel-cards.js';
 
 export function createHistoryController(deps = {}) {
   for (const key of ['getCards', 'setCards', 'setSelectedCardId', 'renderCards', 'renderConnectors', 'scheduleSave']) {
@@ -39,12 +40,7 @@ export function createHistoryController(deps = {}) {
     }
   }
   function applyTopology(card, snapshot) {
-    for (const key of CARD_TOPOLOGY_KEYS) {
-      if (key === 'id') continue;
-      if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
-        card[key] = Array.isArray(snapshot[key]) ? [...snapshot[key]] : snapshot[key];
-      } else delete card[key];
-    }
+    applyCardTopologySnapshot(card, snapshot, CARD_TOPOLOGY_KEYS);
   }
 
   const manager = createHistoryManager({

@@ -6,7 +6,41 @@
  * 否则卡片重画十次就留十份监听，点一下发十条消息。
  */
 
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
+import { setCardDraft, clearCardDraft, getCardDraft, setMessageAsidesOpen, setCardStatusStamp } from './panel-cards.js';
+
 export function createCardEvents(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createCardEvents: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'listen', 'getCardCleanups', 'flashMessage', 'safeDetail', 'getCards',
+    'getIsDisposed', 'chainIsBusy', 'openBattleDialog', 'createBranchCard',
+    'closeCardHierarchy', 'cycleCardStatusStamp', 'selectCard',
+    'toggleMultiSelectCard', 'clearMultiSelect', 'renderCards', 'renderConnectors',
+    'scheduleSave', 'recordSnapshot', 'canMutateCanvas', 'sendCardPrompt',
+    'cancelCardRequest', 'findCardAncestorChain', 'cardParentIds',
+    'formatCardChainMarkdown'
+  ], 'createCardEvents');
+
+  assertObject(deps.documentUi, 'documentUi', 'createCardEvents');
+  assertMethod(deps.documentUi, 'attachFilesToCard', 'createCardEvents');
+  assertMethod(deps.documentUi, 'removeStagedAttachment', 'createCardEvents');
+  assertMethod(deps.documentUi, 'hideDropIndicator', 'createCardEvents');
+
+  assertObject(deps.cardGestures, 'cardGestures', 'createCardEvents');
+  assertMethod(deps.cardGestures, 'beginCardDrag', 'createCardEvents');
+  assertMethod(deps.cardGestures, 'bindResizeHandles', 'createCardEvents');
+
+  assertObject(deps.activeRequests, 'activeRequests', 'createCardEvents');
+  assertMethod(deps.activeRequests, 'get', 'createCardEvents');
+
+  assertOptionalFunctions(deps, [
+    'getDocumentRef', 'getNavigator', 'getIsSpacePressed',
+    'getSelectedCardId'
+  ], 'createCardEvents');
+
   const {
     listen,
     getCardCleanups,
@@ -39,12 +73,13 @@ export function createCardEvents(deps) {
     recordSnapshot,
     canMutateCanvas,
     sendCardPrompt,
+    cancelCardRequest,
     findCardAncestorChain,
     cardParentIds,
     formatCardChainMarkdown,
   } = deps;
 
-  const cardsNow = () => getCards() || [];
+  const cardsNow = () => assertCardsArray(getCards(), 'card-events');
   const doc = () => (typeof getDocumentRef === 'function' ? getDocumentRef() : null);
 
   function bindCardEvents(cardEl, card) {
@@ -80,7 +115,7 @@ export function createCardEvents(deps) {
       asides.open = Boolean(message.asidesOpen);
       on(asides, 'toggle', () => {
         if (message.asidesOpen !== asides.open) {
-          message.asidesOpen = asides.open;
+          setMessageAsidesOpen(message, asides.open);
           scheduleSave();
         }
       });
@@ -107,9 +142,9 @@ export function createCardEvents(deps) {
       selectCard(card.id, true);
     });
 
-    inputEl.value = card.draft || '';
+    inputEl.value = getCardDraft(card);
     on(inputEl, 'input', () => {
-      card.draft = inputEl.value;
+      setCardDraft(card, inputEl.value);
       scheduleSave();
     });
 
@@ -117,11 +152,7 @@ export function createCardEvents(deps) {
       const active = activeRequests.get(card.id);
       if (!active || active.terminalSeen) return;
       if (doc()?.activeElement === btnCancel) inputEl.focus({ preventScroll: true });
-      // 必须是 ChatError：发送引擎靠 code 区分用户取消和真失败。
-      active.controller.abort(new ChatError('REQUEST_CANCELLED', '用户取消了本次等待。'));
-      active.message.status = 'cancelled';
-      active.message.failed = true;
-      paintMessage(active.message);
+      cancelCardRequest(card.id, '用户取消了本次等待。');
     });
 
     const openBattle = (e) => {
@@ -192,7 +223,7 @@ export function createCardEvents(deps) {
       card.stagedAttachments = [];
       if (doc()?.activeElement === btnSend) inputEl.focus({ preventScroll: true });
       inputEl.value = '';
-      card.draft = '';
+      clearCardDraft(card);
       await sendCardPrompt(card, text, { attachments: staged });
     };
 
@@ -233,7 +264,7 @@ export function createCardEvents(deps) {
       on(btnStamp, 'click', (e) => {
         e.stopPropagation();
         if (getIsDisposed()) return;
-        card.statusStamp = cycleCardStatusStamp(card.statusStamp);
+        setCardStatusStamp(card, cycleCardStatusStamp(card.statusStamp));
         renderCards();
         scheduleSave();
         recordSnapshot(cardsNow(), card.id);

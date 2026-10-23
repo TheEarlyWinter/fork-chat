@@ -22,6 +22,168 @@ export const MIN_CARD_HEIGHT = 240;
 export const MAX_CARD_HEIGHT = 1200;
 
 /**
+ * 创建新画布的初始卡片模型
+ */
+export function createInitialCard() {
+  return {
+    id: 'card-1',
+    parentId: null,
+    title: '主线对话 #01',
+    x: 80,
+    y: 80,
+    width: 340,
+    messages: [
+      {
+        role: 'assistant',
+        localOnly: true,
+        text: '你好！这里是你的第一张对话卡片。\n\n在下方输入框打入你想聊的内容开启主线；随时点击卡片右侧的 [+] 按钮，即可开辟一条独立的追问分支。'
+      }
+    ]
+  };
+}
+
+export function createInitialCards() {
+  return [createInitialCard()];
+}
+
+/**
+ * 展示暂态：更新卡片输入草稿（逐字保留，含纯空格与换行）
+ */
+export function setCardDraft(card, draft) {
+  if (!card) return;
+  card.draft = String(draft ?? '');
+}
+
+/**
+ * 展示暂态：显式清除卡片输入草稿
+ */
+export function clearCardDraft(card) {
+  if (!card) return;
+  delete card.draft;
+}
+
+export function getCardDraft(card) {
+  return typeof card?.draft === 'string' ? card.draft : '';
+}
+
+/**
+ * 展示暂态：更新助手思考/副栏的展开状态
+ */
+export function setMessageAsidesOpen(message, open) {
+  if (!message) return;
+  if (typeof open === 'boolean') {
+    message.asidesOpen = open;
+  } else {
+    delete message.asidesOpen;
+  }
+}
+
+/**
+ * 展示暂态：标记卡片是否需滚动到底部
+ */
+export function setCardScrollToEnd(card, scrollToEnd) {
+  if (!card) return;
+  if (Boolean(scrollToEnd)) {
+    card.scrollToEnd = true;
+  } else {
+    delete card.scrollToEnd;
+  }
+}
+
+/**
+ * 展示暂态：记录或清除卡片主体滚动高度（保留合法 0 滚动位置，不当作缺省）
+ */
+export function setCardSavedScrollTop(card, scrollTop) {
+  if (!card) return;
+  if (typeof scrollTop === 'number' && !Number.isNaN(scrollTop) && scrollTop >= 0) {
+    card.savedScrollTop = scrollTop;
+  } else if (scrollTop === undefined) {
+    delete card.savedScrollTop;
+  }
+}
+
+/**
+ * 几何尺寸与坐标更新命令：部分更新必须保留未提供字段，使用 hasOwn 判定
+ */
+export function setCardGeometry(card, patch) {
+  if (!card || !patch || typeof patch !== 'object') return;
+  if (Object.hasOwn(patch, 'x') && typeof patch.x === 'number' && !Number.isNaN(patch.x)) {
+    card.x = patch.x;
+  }
+  if (Object.hasOwn(patch, 'y') && typeof patch.y === 'number' && !Number.isNaN(patch.y)) {
+    card.y = patch.y;
+  }
+  if (Object.hasOwn(patch, 'width')) {
+    if (typeof patch.width === 'number' && !Number.isNaN(patch.width)) {
+      card.width = patch.width;
+    } else if (patch.width === undefined) {
+      delete card.width;
+    }
+  }
+  if (Object.hasOwn(patch, 'height')) {
+    if (typeof patch.height === 'number' && !Number.isNaN(patch.height)) {
+      card.height = patch.height;
+    } else if (patch.height === undefined) {
+      delete card.height;
+    }
+  }
+}
+
+/**
+ * 完整历史快照恢复：回填几何与结构字段，快照中缺省的字段予以删除，保留活对象身份与原始数值
+ */
+export function applyCardTopologySnapshot(card, snapshot, keys = [
+  'parentId', 'parentIds', 'title', 'x', 'y', 'width', 'height',
+  'isCollapsed', 'zIndex', 'isDoc', 'isBattle', 'isMerge', 'statusStamp',
+]) {
+  if (!card || !snapshot || typeof snapshot !== 'object') return;
+  for (const key of keys) {
+    if (key === 'id') continue;
+    if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
+      card[key] = Array.isArray(snapshot[key]) ? [...snapshot[key]] : snapshot[key];
+    } else {
+      delete card[key];
+    }
+  }
+}
+
+/**
+ * 拓扑结构：更新卡片子树折叠状态
+ */
+export function setCardCollapsed(card, isCollapsed) {
+  if (!card) return;
+  if (Boolean(isCollapsed)) {
+    card.isCollapsed = true;
+  } else {
+    delete card.isCollapsed;
+  }
+}
+
+/**
+ * 标记状态：更新卡片状态徽章
+ */
+export function setCardStatusStamp(card, statusStamp) {
+  if (!card) return;
+  if (typeof statusStamp === 'string' && statusStamp) {
+    card.statusStamp = statusStamp;
+  } else {
+    delete card.statusStamp;
+  }
+}
+
+/**
+ * 视觉层级：更新卡片 zIndex
+ */
+export function setCardZIndex(card, zIndex) {
+  if (!card) return;
+  if (typeof zIndex === 'number' && !Number.isNaN(zIndex)) {
+    card.zIndex = zIndex;
+  } else {
+    delete card.zIndex;
+  }
+}
+
+/**
  * 限制卡片宽度在合法安全区间内
  */
 export function clampCardWidth(width, min = MIN_CARD_WIDTH, max = MAX_CARD_WIDTH) {

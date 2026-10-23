@@ -1,3 +1,5 @@
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertCardsArray } from './panel-contracts.js';
+
 /**
  * 多选与合流控制器 (Merge Controller)
  *
@@ -6,19 +8,41 @@
  */
 
 export function createMergeController(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createMergeController: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'getSelectedCardId', 'canMutateCanvas', 'chainIsBusy',
+    'calculateBranchYPositions', 'fitViewportToCluster', 'renderCards',
+    'scheduleSave', 'recordSnapshot', 'sendCardPrompt'
+  ], 'createMergeController');
+
+  assertObject(deps.multiSelectedCardIds, 'multiSelectedCardIds', 'createMergeController');
+  if (
+    typeof deps.multiSelectedCardIds.has !== 'function' ||
+    typeof deps.multiSelectedCardIds.add !== 'function' ||
+    typeof deps.multiSelectedCardIds.delete !== 'function' ||
+    typeof deps.multiSelectedCardIds.clear !== 'function'
+  ) {
+    throw new TypeError('createMergeController: multiSelectedCardIds must be a Set-like object with has, add, delete, clear');
+  }
+
+  assertOptionalFunctions(deps, ['isDisposed', 'listen', 'uniqueId', 'outputFor'], 'createMergeController');
+
   const {
     multiSelectedCardIds,
-    getCards = () => [],
-    getSelectedCardId = () => null,
-    canMutateCanvas = () => true,
+    getCards,
+    getSelectedCardId,
+    canMutateCanvas,
     isDisposed = () => false,
-    chainIsBusy = () => false,
+    chainIsBusy,
     calculateBranchYPositions,
     fitViewportToCluster,
-    renderCards = () => {},
-    scheduleSave = () => {},
-    recordSnapshot = () => {},
-    sendCardPrompt = () => {},
+    renderCards,
+    scheduleSave,
+    recordSnapshot,
+    sendCardPrompt,
     uniqueId = prefix => `${prefix}_${Date.now()}`,
     outputFor = msg => ({ body: msg?.text || '' }),
     documentRef,
@@ -53,7 +77,7 @@ export function createMergeController(deps) {
   }
 
   function updateMultiSelectionUI() {
-    const cards = getCards() || [];
+    const cards = assertCardsArray(getCards(), 'merge:updateMultiSelectionUI');
     cards.forEach(c => {
       const el = documentRef?.getElementById ? documentRef.getElementById(`dom-${c.id}`) : null;
       if (el) {
@@ -93,7 +117,7 @@ export function createMergeController(deps) {
 
   async function createMergeCardFromSelected() {
     if (!canMutateCanvas()) return null;
-    const cards = getCards() || [];
+    const cards = assertCardsArray(getCards(), 'merge:createMergeCardFromSelected');
     const selectedCards = cards.filter(c => multiSelectedCardIds.has(c.id));
     if (selectedCards.length < 2 || selectedCards.some(chainIsBusy)) return null;
 

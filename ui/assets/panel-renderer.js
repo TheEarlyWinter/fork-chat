@@ -1,3 +1,6 @@
+import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
+import { setCardDraft, setMessageAsidesOpen, setCardSavedScrollTop, setCardScrollToEnd } from './panel-cards.js';
+
 /**
  * 卡片层的重建。
  *
@@ -7,11 +10,33 @@
  */
 
 export function createRenderer(deps) {
+  if (!deps || typeof deps !== 'object') {
+    throw new TypeError('createRenderer: deps must be an object');
+  }
+
+  assertFunctions(deps, [
+    'getCards', 'getCardsLayer', 'getSelectedCardId', 'getCurrentAgent',
+    'getSession', 'getMultiSelectedCardIds', 'chainIsBusy', 'drain',
+    'getCardCleanups', 'computeVisibleCards', 'collectSubtreeCardIds',
+    'cardParentIds', 'buildCardHtml', 'escapeHtml', 'messageMarkup',
+    'statusText', 'formatFileSize', 'bindCardEvents', 'renderConnectors',
+    'getIsDisposed'
+  ], 'createRenderer');
+
+  assertObject(deps.activeRequests, 'activeRequests', 'createRenderer');
+  assertMethod(deps.activeRequests, 'has', 'createRenderer');
+
+  assertObject(deps.documentRef, 'documentRef', 'createRenderer');
+  assertMethod(deps.documentRef, 'getElementById', 'createRenderer');
+  assertMethod(deps.documentRef, 'createElement', 'createRenderer');
+
+  assertOptionalFunctions(deps, ['getBadgeStats', 'getEmptyState'], 'createRenderer');
+
   const {
     documentRef,
     getCardsLayer,
-    getBadgeStats,
-    getEmptyState,
+    getBadgeStats = () => null,
+    getEmptyState = () => null,
     getIsDisposed,
     getCards,
     getSelectedCardId,
@@ -46,7 +71,7 @@ export function createRenderer(deps) {
 
     const doc = documentRef;
     const cardsLayer = getCardsLayer();
-    const cards = getCards() || [];
+    const cards = assertCardsArray(getCards(), 'renderer');
     const selectedCardId = getSelectedCardId();
     const multiSelected = getMultiSelectedCardIds();
 
@@ -56,15 +81,15 @@ export function createRenderer(deps) {
     if (preserve) {
       for (const input of cardsLayer.querySelectorAll?.('.card-input') || []) {
         const card = cards.find(item => `input-${item.id}` === input.id);
-        if (card) card.draft = input.value;
+        if (card) setCardDraft(card, input.value);
       }
       for (const card of cards) {
         const body = doc.getElementById(`body-${card.id}`);
-        if (typeof body?.scrollTop === 'number') card.savedScrollTop = body.scrollTop;
+        if (typeof body?.scrollTop === 'number') setCardSavedScrollTop(card, body.scrollTop);
         for (const message of card.messages) {
           if (!message.requestId) continue;
           const asides = doc.getElementById(`asides-${message.requestId}`);
-          if (typeof asides?.open === 'boolean') message.asidesOpen = asides.open;
+          if (typeof asides?.open === 'boolean') setMessageAsidesOpen(message, asides.open);
         }
       }
     }
@@ -133,7 +158,7 @@ export function createRenderer(deps) {
           ? bodyEl.scrollHeight
           : card.savedScrollTop;
       }
-      card.scrollToEnd = false;
+      setCardScrollToEnd(card, false);
     });
 
     if (focusId) {
