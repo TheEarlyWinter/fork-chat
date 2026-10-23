@@ -22,8 +22,6 @@ build/
 
 # Internal development, documentation and test suites
 /tests/
-/docs/
-/README.md
 /REPAIR-NOTES.md
 *.test.mjs
 

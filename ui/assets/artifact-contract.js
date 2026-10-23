@@ -10,7 +10,8 @@ export function normalizeArtifactMetadata(value) {
   return { artifactId: value.artifactId, status: 'ready', name: value.name, mime: value.mime, format: value.format,
     bytes: value.bytes, sha256: value.sha256, createdAt: value.createdAt.slice(0, 40),
     cardId: typeof value.cardId === 'string' ? value.cardId.slice(0, 100) : '', requestId: typeof value.requestId === 'string' ? value.requestId.slice(0, 100) : '',
-    preview: typeof value.preview === 'string' ? value.preview.slice(0, 800) : '' };
+    preview: typeof value.preview === 'string' ? value.preview.slice(0, 800) : '',
+    origin: value.origin === 'imported' ? 'imported' : 'generated' };
 }
 export function normalizeArtifactList(value) {
   if (!Array.isArray(value)) return [];
