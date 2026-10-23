@@ -678,6 +678,8 @@ html, body {
   color: #18181b;
 }
 
+.msg-delivered:empty { display: none; }
+.msg-delivered { margin-bottom: 6px; }
 .msg-attachments-list {
   display: flex;
   flex-direction: column;

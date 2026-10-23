@@ -93,6 +93,27 @@ export function asidesText(output, message) {
   }).join('\n\n');
 }
 
+/**
+ * 已交付文件的展示块。复用附件那套样式，卡片里也能展开看一眼正文。
+ * 单独成函数是因为流式过程中 markup 先生成、文件后到，painter 要能重画这一块。
+ */
+export function deliveredFilesHtml(message) {
+  const files = Array.isArray(message?.deliveredFiles) ? message.deliveredFiles : [];
+  if (files.length === 0) return '';
+  return `<div class="msg-attachments-list">
+      ${files.map(file => `
+        <details class="msg-attachment-item">
+          <summary class="msg-attachment-header">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            <span class="msg-attachment-name">${escapeHtml(file?.name || '文档')}</span>
+            <span class="msg-attachment-meta">${formatFileSize(file?.bytes || 0)}${file?.session ? ` · 已存入「${escapeHtml(file.session)}」` : ''}</span>
+          </summary>
+          <pre class="msg-attachment-preview">${escapeHtml(file?.preview || '')}</pre>
+        </details>
+      `).join('')}
+    </div>`;
+}
+
 export function messageMarkup(message) {
   if (!message) return '';
   const output = outputFor(message);
@@ -118,8 +139,9 @@ export function messageMarkup(message) {
       `).join('')}
     </div>
   ` : '';
-  if (!message.requestId || message.role !== 'assistant') return `${attachmentsHtml}${bubble}${docPreviewHtml}`;
-  return `${attachmentsHtml}${bubble}${docPreviewHtml}
+  const deliveredHtml = `<div class="msg-delivered" id="delivered-${message.requestId || ''}">${deliveredFilesHtml(message)}</div>`;
+  if (!message.requestId || message.role !== 'assistant') return `${attachmentsHtml}${deliveredHtml}${bubble}${docPreviewHtml}`;
+  return `${attachmentsHtml}${deliveredHtml}${bubble}${docPreviewHtml}
     <details class="assistant-asides" id="asides-${message.requestId}" ${message.asidesOpen ? 'open' : ''} ${output.blocks.length ? '' : 'hidden'}>
       <summary id="asides-toggle-${message.requestId}">心境 / 沉思</summary>
       <div class="assistant-asides-text" id="asides-text-${message.requestId}">${escapeHtml(asidesText(output, message))}</div>
@@ -141,6 +163,12 @@ export function createMessagePainter({ documentRef, isDisposed }) {
     if (asideText) asideText.textContent = asidesText(output, message);
     const status = doc.getElementById(`status-${message.requestId}`);
     if (status) status.textContent = statusText(message);
+    // 文件是流式结束前后才到的，markup 早就生成过了，这里得自己补画
+    const delivered = doc.getElementById(`delivered-${message.requestId}`);
+    if (delivered) {
+      const html = deliveredFilesHtml(message);
+      if (delivered.innerHTML !== html) delivered.innerHTML = html;
+    }
   }
   paintMessage.paintMessage = paintMessage;
   return paintMessage;
