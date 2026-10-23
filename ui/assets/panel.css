@@ -1734,6 +1734,8 @@ body.is-card-resizing.resizing-se {
   align-items: center;
   gap: 6px;
   padding: 2px 2px 4px;
+  /* 「向后续分支提供上下文」很长，和「预览」挤一行时后者会被压到只剩半个字 */
+  flex-wrap: wrap;
 }
 
 .ctx-toggle,
@@ -1741,6 +1743,8 @@ body.is-card-resizing.resizing-se {
   font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1.6;
+  white-space: nowrap;
+  flex: 0 0 auto;
   padding: 1px 7px;
   color: var(--text-muted);
   background: transparent;
