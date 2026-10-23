@@ -11,10 +11,30 @@ const panelId = 'panel_' + Math.random().toString(36).slice(2, 10);
 // 面板被关掉或换页时把通道解绑。侧边栏虽然多半随页面一起销毁，
 // 但在后台标签页里它可能比主画布活得更久，留着就是一份白占的监听。
 let functionPanelReleased = false;
+let sessionStoreUnsubscribe = null;
+
+function invokeUnsubscribe(unsub) {
+  if (typeof unsub !== 'function') return;
+  try {
+    const res = unsub();
+    if (res && typeof res.then === 'function') {
+      res.catch(() => {});
+    }
+  } catch {}
+}
+
 function releaseFunctionPanel() {
   if (functionPanelReleased) return;
   functionPanelReleased = true;
-  try { channel.close(); } catch {}
+  const unsub = sessionStoreUnsubscribe;
+  sessionStoreUnsubscribe = null;
+  try {
+    if (unsub) {
+      invokeUnsubscribe(unsub);
+    }
+  } finally {
+    try { channel.close(); } catch {}
+  }
 }
 if (typeof window !== 'undefined' && window.addEventListener) {
   window.addEventListener('pagehide', releaseFunctionPanel);
@@ -108,9 +128,29 @@ channel.addEventListener('message', (event) => {
 });
 
 // 监听宿主存储变更
-sessionStore.watch(() => {
+const watchResult = sessionStore.watch(() => {
+  if (functionPanelReleased) return;
   sessionController.loadSessions();
 });
+
+if (typeof watchResult === 'function') {
+  if (functionPanelReleased) {
+    invokeUnsubscribe(watchResult);
+  } else {
+    sessionStoreUnsubscribe = watchResult;
+  }
+} else if (watchResult && typeof watchResult.then === 'function') {
+  watchResult
+    .then(unsub => {
+      if (typeof unsub !== 'function') return;
+      if (functionPanelReleased) {
+        invokeUnsubscribe(unsub);
+      } else {
+        sessionStoreUnsubscribe = unsub;
+      }
+    })
+    .catch(() => {});
+}
 
 // ---- 云端解析设置（App 自管） ----
 const parserEls = {

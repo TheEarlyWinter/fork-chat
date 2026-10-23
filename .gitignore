@@ -20,10 +20,10 @@ build/
 !lib/vendor/**/dist/
 !lib/vendor/**/dist/**
 
-# Internal development and test suites
-tests/
-REPAIR-NOTES.md
-docs/delivery-*.md
-docs/known-*.md
+# Internal development, documentation and test suites
+/tests/
+/docs/
+/README.md
+/REPAIR-NOTES.md
 *.test.mjs
 
