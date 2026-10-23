@@ -56,19 +56,18 @@ html, body {
   align-items: center;
   justify-content: space-between;
   padding: 10px 20px;
-  height: 48px;
-  /* 窄窗口下按钮文字不许折行：一旦折成竖排，整条工具栏就废了 */
+  min-height: 48px;
+  /* 窄窗口下按钮文字不许折行：一旦折成竖排，整条工具栏就废了。
+     折行交给整条工具栏去做——宁可多占一行，也不能把「新对话卡片」滚出屏幕。 */
   white-space: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  box-sizing: border-box;
   background-color: var(--bg-app);
   border-bottom: 1px solid var(--border-subtle);
   z-index: 10;
-}
-
-.canvas-header::-webkit-scrollbar {
-  display: none;
 }
 
 .header-left {
