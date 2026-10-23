@@ -158,6 +158,8 @@ export function createChatEngine(deps = {}) {
         modelRef: targetAgent.provider && targetAgent.model ? `${targetAgent.provider}/${targetAgent.model}` : targetAgent.model,
         messages: contextMessages,
         ...(targetEffort && targetEffort !== 'default' ? { reasoningEffort: targetEffort } : {}),
+        // 带上当前会话，模型要交文件时才有地方落
+        ...(getSession()?.state?.activeId ? { deliverSessionId: getSession().state.activeId } : {}),
       }, {
         signal: active.controller.signal,
         onWaiting() {
@@ -187,6 +189,20 @@ export function createChatEngine(deps = {}) {
             asstMsg.text += event.delta;
             if (event.delta) asstMsg.status = 'generating';
           }
+          if (event.type === 'tool-call') {
+            // 交付型工具在跑的时候正文还没有，状态上要看得出来在忙什么
+            asstMsg.status = 'delivering';
+            asstMsg.delivering = event.name === 'deliver_document' ? '文档' : event.name;
+          }
+          if (event.type === 'tool-result') {
+            asstMsg.delivering = '';
+            if (event.ok === true) {
+              if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
+              asstMsg.deliveredFiles.push(event.result);
+            } else {
+              asstMsg.deliverError = event.result?.message || '交付失败';
+            }
+          }
           if (['done', 'error', 'cancelled'].includes(event.type)) active.terminalSeen = true;
           paintMessage(asstMsg);
           scheduleSave();
@@ -196,7 +212,10 @@ export function createChatEngine(deps = {}) {
       });
       if (getSession().generation !== requestGeneration) return;
       asstMsg.text = result.text;
-      if (!parseAssistantOutput(result.text).body.trim()) {
+      if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
+      // 只交了文件、没写正文也算成功，不能按「只有心境」判死
+      const deliveredOnly = asstMsg.deliveredFiles.length > 0;
+      if (!parseAssistantOutput(result.text).body.trim() && !deliveredOnly) {
         throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
       }
       asstMsg.status = 'completed';

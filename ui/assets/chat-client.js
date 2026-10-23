@@ -25,6 +25,8 @@ export async function readChatStream(response, requestId, { signal, onEvent = ()
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let buffer = '', started = false, terminal = null, text = '';
+  // 模型可以只交付文件、不写正文；那种情况不该按「空响应」判失败
+  const delivered = [];
   const accept = line => {
     if (!line.trim()) return;
     if (line.length > 1024 * 1024) throw new ChatError('STREAM_FRAME_TOO_LARGE', '响应帧超过限制');
@@ -40,6 +42,11 @@ export async function readChatStream(response, requestId, { signal, onEvent = ()
       if (event.type === 'text-delta') {
         if (typeof event.delta !== 'string') throw new ChatError('STREAM_INVALID_DELTA', '响应增量格式无效');
         text += event.delta;
+      } else if (event.type === 'tool-call') {
+        if (typeof event.name !== 'string' || typeof event.id !== 'string') throw new ChatError('STREAM_INVALID_TOOL_EVENT', '工具调用事件格式无效');
+      } else if (event.type === 'tool-result') {
+        if (typeof event.name !== 'string' || typeof event.id !== 'string') throw new ChatError('STREAM_INVALID_TOOL_EVENT', '工具结果事件格式无效');
+        if (event.ok === true) delivered.push(event.result);
       } else if (['done', 'error', 'cancelled'].includes(event.type)) {
         terminal = event;
       } else throw new ChatError('STREAM_UNKNOWN_EVENT', '未知响应事件');
@@ -64,12 +71,12 @@ export async function readChatStream(response, requestId, { signal, onEvent = ()
       error.remoteTerminal = true;
       throw error;
     }
-    if (!text.trim()) {
+    if (!text.trim() && delivered.length === 0) {
       const error = new ChatError('EMPTY_RESPONSE', '模型未返回正文。');
       error.remoteTerminal = true;
       throw error;
     }
-    return { requestId, text };
+    return { requestId, text, delivered };
   } finally {
     // reader.cancel is essential for parser errors and local aborts too.
     void reader.cancel().catch(() => {});

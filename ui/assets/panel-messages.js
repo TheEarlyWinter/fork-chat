@@ -57,6 +57,8 @@ export function statusText(message) {
   const labels = {
     waiting: message.waitingLong ? '仍在等待模型响应，可取消' : '等待模型响应…',
     generating: '生成中…',
+    // 交付工具在跑的时候正文还没出来，光显示「生成中」看不出在干什么
+    delivering: message.delivering ? `正在生成${message.delivering}…` : '正在生成文件…',
     completed: '已完成',
     cancelled: '已停止接收',
     failed: '失败',
@@ -65,7 +67,11 @@ export function statusText(message) {
   const cancellation = message.cancelConfirmed === false && ['cancelled', 'failed'].includes(message.status)
     ? ` · 服务端取消未确认${message.cancelError ? `：${message.cancelError}` : ''}`
     : '';
-  return `${labels[message.status] || '等待'}${error}${cancellation} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
+  const delivered = Array.isArray(message.deliveredFiles) && message.deliveredFiles.length
+    ? ` · 已交付 ${message.deliveredFiles.map(f => f?.name || '文档').join('、')}`
+    : '';
+  const deliverFailed = message.deliverError ? ` · 交付失败：${message.deliverError}` : '';
+  return `${labels[message.status] || '等待'}${error}${cancellation}${delivered}${deliverFailed} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
 }
 
 // message.text remains the raw model reply, including explicit mood tags.

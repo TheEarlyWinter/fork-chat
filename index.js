@@ -26,6 +26,7 @@ export default defineApp(async (sdk) => {
   const chatService = createChatService(sdk, {
     getAgentFullProfile,
     timeoutMs: 120000,
+    dataDir,
   });
 
   /** App 自管的设置（云端解析的 Token 与开关），启动时读一次，之后同步取 */
