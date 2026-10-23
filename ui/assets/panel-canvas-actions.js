@@ -119,6 +119,9 @@ export function createCanvasActions(deps) {
     currentCards.push(newRoot);
     if (setCards) setCards(currentCards);
     renderCards?.();
+    // 网格是固定跨度，第四张起就排到视口外了；新建后把视图带过去，
+    // 否则用户点了按钮却看不见卡片，以为没生效。
+    focusCardInViewport?.(newRoot);
     scheduleSave?.();
     recordSnapshot?.(currentCards, newRoot.id);
     return newRoot;

@@ -236,11 +236,15 @@
       align-items: center;
       justify-content: space-between;
       gap: 6px;
+      min-width: 0;
     }
     .agent-thinking-label {
       font-size: 10px;
       color: var(--text-muted);
       letter-spacing: 0.02em;
+      /* 侧栏一窄就把「思考深度」压成竖字，标签必须争到自己的宽度 */
+      white-space: nowrap;
+      flex: 0 0 auto;
     }
     .thinking-select {
       background: #ffffff;
@@ -252,6 +256,8 @@
       color: var(--text);
       outline: none;
       cursor: pointer;
+      min-width: 0;
+      max-width: 100%;
       transition: all 0.15s ease;
       max-width: 140px;
     }

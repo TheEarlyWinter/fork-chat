@@ -57,15 +57,25 @@ html, body {
   justify-content: space-between;
   padding: 10px 20px;
   height: 48px;
+  /* 窄窗口下按钮文字不许折行：一旦折成竖排，整条工具栏就废了 */
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   background-color: var(--bg-app);
   border-bottom: 1px solid var(--border-subtle);
   z-index: 10;
+}
+
+.canvas-header::-webkit-scrollbar {
+  display: none;
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
 }
 
 .brand-tag {
@@ -105,6 +115,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 /* 按钮规范 */
@@ -117,6 +128,9 @@ html, body {
   cursor: pointer;
   transition: all 0.15s ease;
   outline: none;
+  /* 同理：按钮只该横向变长，不能被压成一条竖字 */
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .btn-primary {
