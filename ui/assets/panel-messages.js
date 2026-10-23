@@ -1,6 +1,7 @@
 import { parseAssistantOutput } from './assistant-output.js';
 import { formatFileSize, escapeHtml } from './panel-format.js';
 import katex from '../vendor/katex/katex.mjs';
+import { artifactFilesHtml } from './panel-artifact-markup.js';
 
 /**
  * 消息投影与状态格式化纯函数模块。
@@ -72,7 +73,8 @@ export function statusText(message) {
     ? ` · 已交付 ${message.deliveredFiles.map(f => `${f?.name || '文档'}${f?.session ? ` → ${f.session}` : ''}`).join('、')}`
     : '';
   const deliverFailed = message.deliverError ? ` · 交付失败：${message.deliverError}` : '';
-  return `${labels[message.status] || '等待'}${error}${cancellation}${delivered}${deliverFailed} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
+  const generated = message.artifacts?.length ? ` · 已生成 ${message.artifacts.length} 个文件` : '';
+  return `${labels[message.status] || '等待'}${error}${cancellation}${delivered}${generated}${deliverFailed} · ${message.requestId}${message.modelRef ? ` · ${message.modelRef}` : ''}`;
 }
 
 // message.text remains the raw model reply, including explicit mood tags.
@@ -99,8 +101,9 @@ export function asidesText(output, message) {
  */
 export function deliveredFilesHtml(message) {
   const files = Array.isArray(message?.deliveredFiles) ? message.deliveredFiles : [];
-  if (files.length === 0) return '';
-  return `<div class="msg-attachments-list">
+  const artifacts = artifactFilesHtml(message);
+  if (files.length === 0) return artifacts;
+  return `${artifacts}<div class="msg-attachments-list">
       ${files.map(file => `
         <details class="msg-attachment-item">
           <summary class="msg-attachment-header">

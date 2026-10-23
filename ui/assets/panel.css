@@ -1,4 +1,5 @@
 /* 纯白极简对话画布规范 - Canvas Conversation */
+@import url('./panel-artifacts.css');
 :root {
   --bg-app: #ffffff;
   --bg-card: #ffffff;

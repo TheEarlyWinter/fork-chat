@@ -1,6 +1,7 @@
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { createAgentDirectory } from "./lib/agents.js";
 import { createChatService } from "./lib/chat.js";
+import { createArtifactService } from "./lib/document-artifacts.js";
 import { parseDocumentSmart } from "./lib/parse-router.js";
 import { resolveMineruOptions, sweepMineruCache } from "./lib/mineru-parse.js";
 import { createAppSettings } from "./lib/app-settings.js";
@@ -23,10 +24,12 @@ export default defineApp(async (sdk) => {
   const getAgentFullProfile = agentDirectory.getProfile;
   const listAllAgents = agentDirectory.list;
 
+  const artifactService = createArtifactService({ dataDir });
   const chatService = createChatService(sdk, {
     getAgentFullProfile,
     timeoutMs: 120000,
     dataDir,
+    artifactService,
   });
 
   /** App 自管的设置（云端解析的 Token 与开关），启动时读一次，之后同步取 */
@@ -185,6 +188,7 @@ export default defineApp(async (sdk) => {
   if (sdk.routes?.register) {
     await sdk.routes.register((app) => {
       documents.register(app);
+      artifactService.register(app);
       bridgeService.register(app);
       // 1. 获取系统助手列表接口 (包含人格与绑定模型及思考能力契约)
       app.get("/api/agents", async (c) => {

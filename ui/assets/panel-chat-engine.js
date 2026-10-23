@@ -1,5 +1,6 @@
 import { parseAssistantOutput } from './assistant-output.js';
 import { createPendingUserMessage } from './panel-context.js';
+import { normalizeArtifactMetadata } from './artifact-contract.js';
 
 /**
  * 流式请求引擎。
@@ -190,11 +191,17 @@ export function createChatEngine(deps = {}) {
           if (event.type === 'tool-call') {
             // 交付型工具在跑的时候正文还没有，状态上要看得出来在忙什么
             asstMsg.status = 'delivering';
-            asstMsg.delivering = event.name === 'deliver_document' ? '文档' : event.name;
+            asstMsg.delivering = ['create_document', 'deliver_document'].includes(event.name) ? '文档' : event.name;
           }
           if (event.type === 'tool-result') {
             asstMsg.delivering = '';
-            if (event.ok === true) {
+            if (event.ok === true && (event.name === 'create_document' || event.name === 'deliver_document' && event.result?.artifactId)) {
+              const artifact = normalizeArtifactMetadata(event.result);
+              if (artifact) {
+                if (!Array.isArray(asstMsg.artifacts)) asstMsg.artifacts = [];
+                if (!asstMsg.artifacts.some(item => item.artifactId === artifact.artifactId)) asstMsg.artifacts.push(artifact);
+              } else asstMsg.deliverError = '生成文件的回执无效';
+            } else if (event.ok === true) {
               if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
               asstMsg.deliveredFiles.push(event.result);
             } else {
@@ -212,7 +219,7 @@ export function createChatEngine(deps = {}) {
       asstMsg.text = result.text;
       if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
       // 只交了文件、没写正文也算成功，不能按「只有心境」判死
-      const deliveredOnly = asstMsg.deliveredFiles.length > 0;
+      const deliveredOnly = asstMsg.deliveredFiles.length > 0 || (asstMsg.artifacts?.length || 0) > 0;
       if (!parseAssistantOutput(result.text).body.trim() && !deliveredOnly) {
         throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
       }

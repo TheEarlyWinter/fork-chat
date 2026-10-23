@@ -1,0 +1,351 @@
+{
+  "docx": "9.5.1",
+  "pdfmake": "0.2.20",
+  "font": "DroidSansFallbackFull (Apache-2.0) + DejaVu Sans (Bitstream Vera/public-domain DejaVu changes)",
+  "packages": [
+    {
+      "name": "@foliojs-fork/fontkit",
+      "version": "1.9.2",
+      "license": "MIT"
+    },
+    {
+      "name": "@foliojs-fork/linebreak",
+      "version": "1.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "@foliojs-fork/pdfkit",
+      "version": "0.15.3",
+      "license": "MIT"
+    },
+    {
+      "name": "@foliojs-fork/restructure",
+      "version": "2.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "@types/node",
+      "version": "24.19.2",
+      "license": "MIT"
+    },
+    {
+      "name": "base64-js",
+      "version": "1.3.1",
+      "license": "MIT"
+    },
+    {
+      "name": "brotli",
+      "version": "1.3.3",
+      "license": "MIT"
+    },
+    {
+      "name": "browserify-zlib",
+      "version": "0.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "call-bind",
+      "version": "1.0.9",
+      "license": "MIT"
+    },
+    {
+      "name": "call-bind-apply-helpers",
+      "version": "1.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "call-bound",
+      "version": "1.0.4",
+      "license": "MIT"
+    },
+    {
+      "name": "clone",
+      "version": "1.0.4",
+      "license": "MIT"
+    },
+    {
+      "name": "core-util-is",
+      "version": "1.0.3",
+      "license": "MIT"
+    },
+    {
+      "name": "crypto-js",
+      "version": "4.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "deep-equal",
+      "version": "1.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "define-data-property",
+      "version": "1.1.4",
+      "license": "MIT"
+    },
+    {
+      "name": "define-properties",
+      "version": "1.2.1",
+      "license": "MIT"
+    },
+    {
+      "name": "dfa",
+      "version": "1.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "docx",
+      "version": "9.5.1",
+      "license": "MIT"
+    },
+    {
+      "name": "dunder-proto",
+      "version": "1.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "es-define-property",
+      "version": "1.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "es-errors",
+      "version": "1.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "es-object-atoms",
+      "version": "1.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "function-bind",
+      "version": "1.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "functions-have-names",
+      "version": "1.2.3",
+      "license": "MIT"
+    },
+    {
+      "name": "get-intrinsic",
+      "version": "1.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "get-proto",
+      "version": "1.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "gopd",
+      "version": "1.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "has-property-descriptors",
+      "version": "1.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "has-symbols",
+      "version": "1.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "has-tostringtag",
+      "version": "1.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "hash.js",
+      "version": "1.1.7",
+      "license": "MIT"
+    },
+    {
+      "name": "hasown",
+      "version": "2.0.4",
+      "license": "MIT"
+    },
+    {
+      "name": "iconv-lite",
+      "version": "0.6.3",
+      "license": "MIT"
+    },
+    {
+      "name": "immediate",
+      "version": "3.0.6",
+      "license": "MIT"
+    },
+    {
+      "name": "inherits",
+      "version": "2.0.4",
+      "license": "ISC"
+    },
+    {
+      "name": "is-arguments",
+      "version": "1.2.0",
+      "license": "MIT"
+    },
+    {
+      "name": "is-date-object",
+      "version": "1.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "is-regex",
+      "version": "1.2.1",
+      "license": "MIT"
+    },
+    {
+      "name": "isarray",
+      "version": "1.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "jpeg-exif",
+      "version": "1.1.4",
+      "license": "MIT"
+    },
+    {
+      "name": "jszip",
+      "version": "3.10.2",
+      "license": "(MIT OR GPL-3.0-or-later)"
+    },
+    {
+      "name": "lie",
+      "version": "3.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "math-intrinsics",
+      "version": "1.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "minimalistic-assert",
+      "version": "1.0.1",
+      "license": "ISC"
+    },
+    {
+      "name": "nanoid",
+      "version": "5.1.16",
+      "license": "MIT"
+    },
+    {
+      "name": "object-is",
+      "version": "1.1.6",
+      "license": "MIT"
+    },
+    {
+      "name": "object-keys",
+      "version": "1.1.1",
+      "license": "MIT"
+    },
+    {
+      "name": "pako",
+      "version": "1.0.11",
+      "license": "(MIT AND Zlib)"
+    },
+    {
+      "name": "pdfmake",
+      "version": "0.2.20",
+      "license": "MIT"
+    },
+    {
+      "name": "png-js",
+      "version": "1.1.0"
+    },
+    {
+      "name": "process-nextick-args",
+      "version": "2.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "readable-stream",
+      "version": "2.3.8",
+      "license": "MIT"
+    },
+    {
+      "name": "regexp.prototype.flags",
+      "version": "1.5.4",
+      "license": "MIT"
+    },
+    {
+      "name": "safe-buffer",
+      "version": "5.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "safer-buffer",
+      "version": "2.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "sax",
+      "version": "1.6.1",
+      "license": "BlueOak-1.0.0"
+    },
+    {
+      "name": "set-function-length",
+      "version": "1.2.2",
+      "license": "MIT"
+    },
+    {
+      "name": "set-function-name",
+      "version": "2.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "setimmediate",
+      "version": "1.0.5",
+      "license": "MIT"
+    },
+    {
+      "name": "string_decoder",
+      "version": "1.1.1",
+      "license": "MIT"
+    },
+    {
+      "name": "tiny-inflate",
+      "version": "1.0.3",
+      "license": "MIT"
+    },
+    {
+      "name": "undici-types",
+      "version": "7.24.6",
+      "license": "MIT"
+    },
+    {
+      "name": "unicode-properties",
+      "version": "1.4.1",
+      "license": "MIT"
+    },
+    {
+      "name": "unicode-trie",
+      "version": "2.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "util-deprecate",
+      "version": "1.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "xml",
+      "version": "1.0.1",
+      "license": "MIT"
+    },
+    {
+      "name": "xml-js",
+      "version": "1.6.11",
+      "license": "MIT"
+    },
+    {
+      "name": "xmldoc",
+      "version": "2.0.3",
+      "license": "MIT"
+    }
+  ]
+}

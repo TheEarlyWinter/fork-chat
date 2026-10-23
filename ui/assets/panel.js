@@ -32,6 +32,7 @@ import { createCardGestures } from './panel-card-gestures.js';
 import { createCardEvents, createInputRecoveryBuffer } from './panel-card-events.js';
 import { createRenderer } from './panel-renderer.js';
 import { createSearchController } from './panel-search-controller.js';
+import { createArtifactView } from './panel-artifact-view.js';
 import { createSessionState } from './panel-session-state.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
@@ -74,6 +75,12 @@ const documentUi = createDocumentUi({
   getIsDisposed: () => isDisposed,
   later: (fn, ms) => later(fn, ms),
   cancelLater: (id) => cancelLater(id),
+});
+
+const artifactView = createArtifactView({
+  hana, requestHost, flashMessage: message => flashMessage(message),
+  getCards: () => cards, getGeneration: () => sessionController?.generation,
+  isDisposed: () => isDisposed,
 });
 
 // 卡片上的全部事件
@@ -497,6 +504,7 @@ selectionController.attach();
 panelCleanups.add(() => selectionController.dispose());
 
 function resetTransientUI() {
+  artifactView.dismiss();
   try { selectionController?.reset?.() || selectionController?.hide?.(); } catch {}
   try { refController?.closeManager?.(); } catch {}
 }
@@ -625,6 +633,7 @@ function renderCards(preserve = true, options = {}) {
 
 function bindCardEvents(cardEl, card) {
   cardEvents.bindCardEvents(cardEl, card);
+  artifactView.bind(cardEl, card, (target, type, handler) => listen(target, type, handler, undefined, cardCleanups));
 }
 
 // 全局卡片搜索控制器 (Ctrl+F)
@@ -1017,6 +1026,7 @@ function disposePanel() {
   if (isDisposed) return Promise.resolve();
   isDisposed = true; // Close the command gate synchronously, before any await.
   panelAbort.abort(inactiveError());
+  artifactView.dispose();
   for (const stop of [unbindKeyboardShortcuts, stopWatchingSessions]) { try { stop?.(); } catch {} }
   drain(cardCleanups); drain(battleCleanups); drain(panelCleanups);
   for (const timer of panelTimers) clearTimeout(timer);

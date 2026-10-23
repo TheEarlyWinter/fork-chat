@@ -6,6 +6,7 @@
  */
 
 import { normalizeContextRefs } from './fork-context-policy.js';
+import { normalizeArtifactList } from './artifact-contract.js';
 
 /** 卡片 id 的合法形式 */
 export const ID_REGEX = /^[A-Za-z0-9_-]{1,100}$/;
@@ -237,6 +238,7 @@ export function normalizeForkSnapshot(input) {
         };
       }
       if (rawMsg.partial === true) msg.partial = true;
+      if (Array.isArray(rawMsg.artifacts)) msg.artifacts = normalizeArtifactList(rawMsg.artifacts);
 
       if (Array.isArray(rawMsg.attachments)) {
         msg.attachments = rawMsg.attachments.slice(0, 10).map(att => ({
