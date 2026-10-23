@@ -109,7 +109,11 @@ export function createRenderer(deps) {
     if (entries.some(({ card, element }) => (
       !liveCards.has(card) || element.__boundCard !== card
       || documentRef.getElementById(`dom-${card.id}`) !== element
-    ))) return true;
+    ))) {
+      // 结构对不上了：这次布局作废，必须交回完整重绘，
+      // 返回 true 会让调用方以为已经画完，结果是整次渲染被跳过。
+      return false;
+    }
     for (const { card, element } of entries) {
       element.style.left = `${card.x}px`;
       element.style.top = `${card.y}px`;

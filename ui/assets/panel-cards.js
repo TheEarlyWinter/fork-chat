@@ -135,6 +135,8 @@ export function setCardGeometry(card, patch) {
 export function applyCardTopologySnapshot(card, snapshot, keys = [
   'parentId', 'parentIds', 'title', 'x', 'y', 'width', 'height',
   'isCollapsed', 'zIndex', 'isDoc', 'isBattle', 'isMerge', 'statusStamp',
+  // 上下文策略也是用户操作结果，默认调用同样要还原它
+  'contextMode', 'contextRefs',
 ]) {
   if (!card || !snapshot || typeof snapshot !== 'object') return;
   for (const key of keys) {

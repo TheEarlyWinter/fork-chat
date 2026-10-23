@@ -8,147 +8,10 @@
 
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
 import { setCardDraft, clearCardDraft, getCardDraft, setMessageAsidesOpen, setCardStatusStamp } from './panel-cards.js';
+import { createInputRecoveryBuffer } from './panel-input-recovery.js';
 
-/**
- * 生产受控有界恢复缓冲工厂（默认容量 8 份 FIFO）
- * 绑定代际与卡片活对象身份，不写 localStorage、不记正文日志
- */
-export function createInputRecoveryBuffer({ getSession, getGeneration, getCards, maxCapacity = 8 } = {}) {
-  const validCapacity = Number.isInteger(maxCapacity) && maxCapacity > 0 ? maxCapacity : 8;
-  const bufferEntries = [];
-  const currentGen = () => {
-    if (typeof getSession === 'function') return getSession()?.generation ?? null;
-    if (typeof getGeneration === 'function') return getGeneration();
-    return null;
-  };
-  const activeCards = () => (typeof getCards === 'function' ? getCards() : null);
-
-  return {
-    save(entry) {
-      if (!entry || !entry.cardId) return;
-      const existingIdx = bufferEntries.findIndex(e => e.cardId === entry.cardId);
-      if (existingIdx !== -1) bufferEntries.splice(existingIdx, 1);
-      if (bufferEntries.length >= validCapacity) {
-        bufferEntries.shift();
-      }
-      bufferEntries.push({
-        cardId: entry.cardId,
-        cardRef: entry.cardRef,
-        generation: entry.generation,
-        inputValue: entry.inputValue,
-        draft: entry.draft,
-        hasDraftProp: entry.hasDraftProp,
-        stagedAttachments: entry.stagedAttachments,
-        timestamp: Date.now(),
-      });
-    },
-
-    get(cardId) {
-      const gen = currentGen();
-      const cards = activeCards();
-      const idx = bufferEntries.findIndex(e => e.cardId === cardId);
-      if (idx === -1) return null;
-      const entry = bufferEntries[idx];
-      // 代际变化或卡片活对象已失效（包括 cards 为空列表），主动失效并清除
-      const genMismatch = gen !== null && entry.generation !== gen;
-      const cardMismatch = Array.isArray(cards) && !cards.includes(entry.cardRef);
-
-      if (genMismatch || cardMismatch) {
-        bufferEntries.splice(idx, 1);
-        return null;
-      }
-      return {
-        cardId: entry.cardId,
-        generation: entry.generation,
-        cardRef: entry.cardRef,
-        hasDraft: entry.hasDraftProp,
-        hasAttachments: Array.isArray(entry.stagedAttachments) && entry.stagedAttachments.length > 0,
-        inputValue: entry.inputValue,
-        draft: entry.draft,
-        stagedAttachments: entry.stagedAttachments,
-      };
-    },
-
-    has(cardId) {
-      return Boolean(this.get(cardId));
-    },
-
-    restore(cardId, { targetCard, inputEl, generation } = {}) {
-      const gen = currentGen();
-      const cards = activeCards();
-      const idx = bufferEntries.findIndex(e => e.cardId === cardId);
-      if (idx === -1) return false;
-      const entry = bufferEntries[idx];
-
-      // 强校验：代际、活对象身份必须严格匹配
-      if (gen !== null && entry.generation !== gen) {
-        bufferEntries.splice(idx, 1);
-        return false;
-      }
-      if (generation !== undefined && generation !== entry.generation) return false;
-      if (Array.isArray(cards)) {
-        if (cards.length === 0) {
-          bufferEntries.splice(idx, 1);
-          return false;
-        }
-        if (!cards.includes(targetCard) || !cards.includes(entry.cardRef)) return false;
-      }
-      if (targetCard && entry.cardRef && targetCard !== entry.cardRef) return false;
-
-      // 绝不覆盖后续编辑：如果卡片当前已有新输入、新草稿或新附件，拒绝覆盖
-      if (inputEl && inputEl.value !== '') return false;
-      if (targetCard && targetCard.draft !== undefined && targetCard.draft !== '') return false;
-      if (targetCard && Array.isArray(targetCard.stagedAttachments) && targetCard.stagedAttachments.length > 0) return false;
-
-      let draftOk = true;
-      let attOk = true;
-      let inputOk = true;
-
-      if (targetCard) {
-        try {
-          if (entry.hasDraftProp) setCardDraft(targetCard, entry.draft);
-          else clearCardDraft(targetCard);
-        } catch {
-          draftOk = false;
-        }
-
-        try {
-          if (Array.isArray(entry.stagedAttachments)) {
-            targetCard.stagedAttachments = entry.stagedAttachments;
-          }
-        } catch {
-          attOk = false;
-        }
-      }
-
-      if (inputEl) {
-        try {
-          inputEl.value = entry.inputValue;
-        } catch {
-          inputOk = false;
-        }
-      }
-
-      if (draftOk && attOk && inputOk) {
-        bufferEntries.splice(idx, 1);
-        return true;
-      }
-      return false;
-    },
-
-    clear() {
-      bufferEntries.length = 0;
-    },
-
-    dispose() {
-      bufferEntries.length = 0;
-    },
-
-    size() {
-      return bufferEntries.length;
-    },
-  };
-}
+// 兼容旧入口：调用方仍可从本模块取到工厂，实现已搬到 panel-input-recovery.js
+export { createInputRecoveryBuffer };
 
 export function createCardEvents(deps) {
   if (!deps || typeof deps !== 'object') {
@@ -259,7 +122,7 @@ export function createCardEvents(deps) {
     });
 
     // 折叠区的开合状态要存，不然重绘后又弹回去
-    for (const message of card.messages) {
+    for (const message of (Array.isArray(card.messages) ? card.messages : [])) {
       if (!message.requestId) continue;
       const asides = cardEl.querySelector(`#asides-${message.requestId}`);
       if (!asides) continue;
@@ -307,7 +170,7 @@ export function createCardEvents(deps) {
     on(btnCancel, 'click', () => {
       const active = activeRequests.get(card.id);
       if (!active || active.terminalSeen) return;
-      if (doc()?.activeElement === btnCancel) inputEl.focus({ preventScroll: true });
+      if (doc()?.activeElement === btnCancel) inputEl?.focus?.({ preventScroll: true });
       cancelCardRequest(card.id, '用户取消了本次等待。');
     });
 
@@ -329,6 +192,11 @@ export function createCardEvents(deps) {
       const files = Array.from(e.target.files || []);
       if (files.length === 0) return;
       fileInput.value = ''; // 先清空，同一个文件再选一次也要能触发 change
+      // 原生文件选择器会挡住主线程，回来时卡片可能已经进入请求或被锁定
+      if (chainIsBusy(card) || !canMutateCanvas()) {
+        flashMessage('这张卡现在正忙，文件没有挂上去');
+        return;
+      }
       await documentUi.attachFilesToCard(card, files);
     });
 
@@ -568,7 +436,7 @@ export function createCardEvents(deps) {
     if (btnContextMode) {
       on(btnContextMode, 'click', (e) => {
         e.stopPropagation();
-        if (getIsDisposed()) return;
+        if (getIsDisposed() || !canMutateCanvas()) return;
         if (card.contextMode === 'exclude') delete card.contextMode;
         else card.contextMode = 'exclude';
         renderCards();
@@ -612,8 +480,12 @@ export function createCardEvents(deps) {
     const copyText = async text => {
       const nav = typeof getNavigator === 'function' ? getNavigator() : null;
       if (nav?.clipboard?.writeText) {
-        await nav.clipboard.writeText(text);
-        return;
+        try {
+          await nav.clipboard.writeText(text);
+          return;
+        } catch {
+          // 权限受限或非安全上下文：继续走下面的 textarea 兜底
+        }
       }
       const root = doc();
       const ta = root.createElement('textarea');

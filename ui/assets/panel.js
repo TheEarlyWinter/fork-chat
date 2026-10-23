@@ -1024,6 +1024,10 @@ function disposePanel() {
   bus.onmessage = null;
   try { bus.close?.(); } catch {}
   for (const intentId of getOwnedClaims()) void releaseBridgeClaim(intentId);
+  // 全局句柄会一直握着 cards、历史与 DOM 引用，销毁时要摘掉
+  if (typeof window !== 'undefined' && window.__forkChat) {
+    try { delete window.__forkChat; } catch { window.__forkChat = undefined; }
+  }
   btnUseLastPrompt.onclick = null;
   const sendText = document.getElementById('bridge-send-text');
   if (sendText) sendText.oninput = null;
@@ -1046,6 +1050,11 @@ function disposePanel() {
   sessionUi?.dispose();
   feedbackService?.dispose();
   // close() cancels generation-bound work and flushes the last snapshot once.
+  // 初始化没完成就 pagehide 时这里还是 null，不能让它把整个销毁流程打断。
+  if (!sessionController) {
+    disposalPromise = Promise.resolve();
+    return disposalPromise;
+  }
   disposalPromise = sessionController.close();
   void disposalPromise.catch(() => {});
   return disposalPromise;
@@ -1057,7 +1066,12 @@ listen(window, 'pagehide', () => {
 
 // Ready precedes host storage requests; initialization failures remain visible.
 updateTransform(); renderCards(); hana.ready();
-await sessionController.init();
+try {
+  await sessionController.init();
+} catch (err) {
+  // 存储或宿主没起来：画面留着，把原因说清楚，别让整页静默死掉
+  flashMessage(`会话初始化失败：${safeDetail(err?.message || String(err))}`);
+}
 if (bridge.isInitialized() && !isDisposed) void pollBridgeIntents();
 
 if (typeof window !== 'undefined') {
