@@ -158,8 +158,6 @@ export function createChatEngine(deps = {}) {
         modelRef: targetAgent.provider && targetAgent.model ? `${targetAgent.provider}/${targetAgent.model}` : targetAgent.model,
         messages: contextMessages,
         ...(targetEffort && targetEffort !== 'default' ? { reasoningEffort: targetEffort } : {}),
-        // 带上当前会话，模型要交文件时才有地方落
-        ...(getSession()?.state?.activeId ? { deliverSessionId: getSession().state.activeId } : {}),
       }, {
         signal: active.controller.signal,
         onWaiting() {
