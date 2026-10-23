@@ -9,6 +9,8 @@
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertMethod, assertCardsArray } from './panel-contracts.js';
 import { setCardDraft, clearCardDraft, getCardDraft, setMessageAsidesOpen, setCardStatusStamp } from './panel-cards.js';
 import { createInputRecoveryBuffer } from './panel-input-recovery.js';
+import { createClipboardWriter } from './panel-clipboard.js';
+import { bindCardExportHandlers } from './panel-card-export.js';
 
 // 兼容旧入口：调用方仍可从本模块取到工厂，实现已搬到 panel-input-recovery.js
 export { createInputRecoveryBuffer };
@@ -476,68 +478,13 @@ export function createCardEvents(deps) {
       });
     }
 
-    // 两个导出入口共用同一套剪贴板路径：优先异步 API，退回复制文本框
-    const copyText = async text => {
-      const nav = typeof getNavigator === 'function' ? getNavigator() : null;
-      if (nav?.clipboard?.writeText) {
-        try {
-          await nav.clipboard.writeText(text);
-          return;
-        } catch {
-          // 权限受限或非安全上下文：继续走下面的 textarea 兜底
-        }
-      }
-      const root = doc();
-      const ta = root.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      root.body.appendChild(ta);
-      ta.select();
-      root.execCommand('copy');
-      root.body.removeChild(ta);
-    };
-
-    // 结构大纲：只导节点与父边，不含正文，可以放心给人看
-    const btnExportTopology = cardEl.querySelector('[data-action="export-topology"]');
-    if (btnExportTopology) {
-      on(btnExportTopology, 'click', async (e) => {
-        e.stopPropagation();
-        if (getIsDisposed()) return;
-        try {
-          const outline = buildTopologyOutline({
-            cards: cardsNow(),
-            targetCard: card,
-            title: `结构大纲：${card.title || '长文'}`,
-          });
-          await copyText(outline);
-          flashMessage('已复制结构大纲（只含节点与父边，不含正文）');
-        } catch (err) {
-          flashMessage(`结构大纲导出失败：${safeDetail(err?.message || String(err))}`);
-        }
-      });
-    }
-
-    // 顺藤摸瓜：整链导出为 Markdown 并复制
-    const btnExportChain = cardEl.querySelector('[data-action="export-chain"]');
-    if (btnExportChain) {
-      on(btnExportChain, 'click', async (e) => {
-        e.stopPropagation();
-        if (getIsDisposed()) return;
-        const chain = findCardAncestorChain({ cards: cardsNow(), targetCardId: card.id, cardParentIds });
-        if (!chain || chain.length === 0) {
-          flashMessage('未找到该卡片的推导链路');
-          return;
-        }
-        const markdown = formatCardChainMarkdown(chain, { title: `链路推导：${card.title || '长文'}` });
-        try {
-          await copyText(markdown);
-          flashMessage(`已顺藤摸瓜将 ${chain.length} 个节点的完整推导长文复制到剪贴板！`);
-        } catch (err) {
-          flashMessage(`导出复制失败：${safeDetail(err?.message || String(err))}`);
-        }
-      });
-    }
+    // 导出与剪贴板在 panel-card-export.js / panel-clipboard.js，这里只做接线
+    bindCardExportHandlers({
+      cardEl, card, on, getIsDisposed, cardsNow, cardParentIds,
+      buildTopologyOutline, findCardAncestorChain, formatCardChainMarkdown,
+      copyText: createClipboardWriter({ doc, getNavigator }),
+      flashMessage, safeDetail,
+    });
 
     // 折叠/展开子分支
     const btnCollapseList = cardEl.querySelectorAll('[data-action="toggle-collapse"]');
