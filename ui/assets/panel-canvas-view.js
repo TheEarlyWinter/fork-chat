@@ -25,6 +25,19 @@ import { findCardByDirection } from './panel-shortcuts.js';
 import { assertFunction, assertFunctions, assertOptionalFunctions, assertObject, assertCardsArray } from './panel-contracts.js';
 import { setCardGeometry } from './panel-cards.js';
 
+/**
+ * 按下工具按钮时，是否该拦住这次焦点迁移。
+ *
+ * 卡片输入框里可能正有一段没提交的草稿，甚至正在输入法组合中。
+ * 此时让按钮抢走焦点，组合输入会被打断、preedit 直接消失。
+ * 只拦"焦点在卡片输入框上的主键按下"，键盘激活和别的焦点维持原样。
+ */
+export function shouldPreserveCardInputFocus(event, activeElement) {
+  if (!event || event.button !== 0) return false;
+  if (!activeElement || typeof activeElement.matches !== 'function') return false;
+  return activeElement.matches('.card-input');
+}
+
 export function createCanvasViewController(deps) {
   if (!deps || typeof deps !== 'object') {
     throw new TypeError('createCanvasViewController: deps must be an object');
@@ -229,7 +242,8 @@ export function createCanvasViewController(deps) {
       }
     });
 
-    renderCards?.();
+    // 纯布局更新不重建卡片与输入 DOM，保留新草稿及输入法现场。
+    renderCards(true, { layoutOnly: true });
     scheduleSave?.();
     // 只框可见的那部分。折叠起来的子孙如果也参与包围盒，
     // 视野会被压得很小，屏幕上留一大片空白。

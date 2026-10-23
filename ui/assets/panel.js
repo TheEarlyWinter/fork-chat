@@ -10,7 +10,7 @@ import { collectSubtreeCardIds, computeVisibleCards } from './panel-layout.js';
 import { bindKeyboardShortcuts } from './panel-shortcuts.js';
 import { formatFileSize, rootSlotPosition, escapeHtml } from './panel-format.js';
 import { createAgentController } from './panel-agents.js';
-import { createCanvasViewController } from './panel-canvas-view.js';
+import { createCanvasViewController, shouldPreserveCardInputFocus } from './panel-canvas-view.js';
 import { statusText, outputFor, asidesText, messageMarkup, createMessagePainter } from './panel-messages.js';
 import { cardParentIds, cardHasParent } from './panel-context.js';
 import { createDocumentPipeline } from './panel-documents.js';
@@ -396,7 +396,7 @@ const canvasViewController = createCanvasViewController({
   btnZoomOut,
   getIsSpacePressed: () => isSpacePressed,
   canMutateCanvas: () => canMutateCanvas(),
-  renderCards: () => renderCards(),
+  renderCards: (preserve, options) => renderCards(preserve, options),
   scheduleSave: () => sessionController?.scheduleSave(),
   recordSnapshot: (c, sId) => historyManager.recordSnapshot(c, sId),
   clearMultiSelect: () => clearMultiSelect(),
@@ -619,8 +619,8 @@ function createMergeCardFromSelected() {
 // 输入法合成（拼音选词）期间的重建会把合成会话打断，打的字直接没。
 // 这段时间先记下来，等 compositionend 再补一次。
 
-function renderCards(preserve = true) {
-  renderer.renderCards(preserve);
+function renderCards(preserve = true, options = {}) {
+  renderer.renderCards(preserve, options);
 }
 
 function bindCardEvents(cardEl, card) {
@@ -689,6 +689,13 @@ const unbindKeyboardShortcuts = bindKeyboardShortcuts({
     isBusy: () => activeRequests.size > 0 || !sessionController?.state.ready || sessionController.state.busy,
     openSearchBar: () => searchController?.open(),
   },
+});
+
+// 整理按钮按下时会把焦点从输入框抢走，正在输入法组合的那截字当场就没了。
+// 这里只拦这一次焦点迁移：点击照样触发，整理照做，输入框和组合输入都留着。
+listen(btnAutoTidy, 'mousedown', (event) => {
+  if (!shouldPreserveCardInputFocus(event, document.activeElement)) return;
+  event.preventDefault();
 });
 
 listen(btnAutoTidy, 'click', () => {

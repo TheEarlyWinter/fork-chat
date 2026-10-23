@@ -6,7 +6,8 @@ import { setCardDraft, clearCardDraft, setMessageAsidesOpen, setCardSavedScrollT
  *
  * 这里有个容易被改坏的守卫：输入法正在组词时绝不重建 DOM。
  * 重建会把正在编辑的那个 input 换掉，候选框消失、拼音变成裸字母。
- * 组词期间只记一个待办标记，compositionend 之后补一次。
+ * 完整重绘在组词期间只记待办，compositionend 之后补一次；纯布局更新
+ * 不替换任何输入节点，可以直接更新坐标。
  */
 
 export function createRenderer(deps) {
@@ -64,8 +65,65 @@ export function createRenderer(deps) {
   let composingInputId = null;
   let pendingRenderCards = false;
 
-  function renderCards(preserve = true) {
+  // 整理只改变坐标。复用完整且仍绑定活卡的 DOM，避免拆掉输入框、
+  // 光标和 IME 会话；结构发生变化时才回退到下方的完整重绘。
+  function renderLayoutOnly() {
+    const cardsLayer = getCardsLayer();
+    if (typeof cardsLayer?.querySelectorAll !== 'function') return false;
+    const cards = assertCardsArray(getCards(), 'renderer:layout');
+    const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
+    const mounted = new Set(cardsLayer.querySelectorAll('.chat-card'));
+    if (mounted.size !== visibleCards.length) return false;
+
+    const entries = [];
+    for (const card of visibleCards) {
+      const element = documentRef.getElementById(`dom-${card.id}`);
+      if (!mounted.has(element) || element.__boundCard !== card) return false;
+      const input = element.querySelector?.('.card-input');
+      if ((!card.isDoc && !input) || (input && (
+        input.__boundCard !== card || input.id !== `input-${card.id}`
+      ))) return false;
+      entries.push({ card, element, input });
+    }
+
+    // 全量核验后再收拢草稿，确保布局后的保存拿到当前输入，而非旧值。
+    // 不写 input.value，也不 drain/rebind：原生输入现场保持原样。
+    for (const { card, input } of entries) {
+      if (input) {
+        if (input.value) setCardDraft(card, input.value);
+        else clearCardDraft(card);
+      }
+      const body = documentRef.getElementById(`body-${card.id}`);
+      if (typeof body?.scrollTop === 'number') setCardSavedScrollTop(card, body.scrollTop);
+      for (const message of card.messages) {
+        if (!message.requestId) continue;
+        const asides = documentRef.getElementById(`asides-${message.requestId}`);
+        if (typeof asides?.open === 'boolean') setMessageAsidesOpen(message, asides.open);
+      }
+    }
+    if (typeof onBeforeRender === 'function') {
+      try { onBeforeRender(); } catch {}
+    }
+    if (getIsDisposed()) return true;
+    const liveCards = new Set(getCards());
+    if (entries.some(({ card, element }) => (
+      !liveCards.has(card) || element.__boundCard !== card
+      || documentRef.getElementById(`dom-${card.id}`) !== element
+    ))) return true;
+    for (const { card, element } of entries) {
+      element.style.left = `${card.x}px`;
+      element.style.top = `${card.y}px`;
+    }
+    renderConnectors();
+    if (typeof onAfterRender === 'function') {
+      try { onAfterRender(); } catch {}
+    }
+    return true;
+  }
+
+  function renderCards(preserve = true, options = {}) {
     if (getIsDisposed()) return;
+    if (preserve && options?.layoutOnly === true && renderLayoutOnly()) return;
     if (typeof onBeforeRender === 'function') {
       try { onBeforeRender(); } catch {}
     }
