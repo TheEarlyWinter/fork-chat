@@ -274,8 +274,15 @@ export function createPanelSessionUi(deps) {
       lastNotice = state.notice;
       flashMessage(state.notice);
     }
-    sessionStatusEl.textContent = state.error
-      ? `${state.dirty ? '未保存' : '会话操作失败'} · ${safeDetail(state.error)}`
+    // 同一 STORAGE_QUOTA_EXCEEDED 同时覆盖 100 会话数与整库 12MiB 两种限制，
+    // 底层英文不适合直接展示：统一给出泛化中文文案，不猜具体触发的是哪个限制。
+    const statusError = state.error
+      ? (typeof state.error === 'string' && state.error.includes('STORAGE_QUOTA_EXCEEDED')
+          ? '会话存储已达上限（最多 100 个会话，所有会话合计 12MiB）。本次更改未保存，原有内容未被覆盖；请备份需要保留的内容后清理不再需要的会话再重试'
+          : safeDetail(state.error))
+      : null;
+    sessionStatusEl.textContent = statusError
+      ? `${state.dirty ? '未保存' : '会话操作失败'} · ${statusError}`
       : !state.ready
       ? '正在恢复会话…'
       : !state.activeId

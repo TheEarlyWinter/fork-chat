@@ -90,6 +90,15 @@ export function createChatEngine(deps = {}) {
       safeReportIssue(plan?.errors?.[0]?.message || '这次请求没有通过上下文检查');
       return false;
     }
+    // 水位警告必须可见：lib 只裁投影不动历史，用户得知道这次模型看不到全部过往，
+    // 否则长对话里模型"忘了"早期内容会被当成 bug 而不是设计行为
+    if (Array.isArray(plan.warnings)) {
+      for (const warning of plan.warnings) {
+        if (warning?.code === 'CONTEXT_HISTORY_TRUNCATED') {
+          safeReportIssue(warning.message);
+        }
+      }
+    }
 
     // 独立复制冻结 accepted user DTO 及 attachments 数组/DTO，不冻结 live 输入附件对象
     const acceptedAttachments = Array.isArray(userMsg.attachments)

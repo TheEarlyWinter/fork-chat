@@ -1,4 +1,5 @@
 import { outputFor } from './panel-messages.js';
+import { applyContextWatermark } from './context-watermark.js';
 import { artifactContextText } from './artifact-context.js';
 import { collectChainCards } from './panel-cards.js';
 import {
@@ -14,11 +15,11 @@ import {
  * 把「卡片拓扑 + 上下文策略」编译成一次请求的 messages。
  *
  * 与旧 buildChainContext 的默认行为逐项等价：没有任何 exclude、没有任何引用时
- * 输出相同。策略只在被显式设置后才改变结果。
+ * 输出相同（未触发请求水位时）。超水位只裁剪本次投影，不改活历史或持久化快照。
  *
  * 四件事必须分清：
  *   - exclude 只跳过该节点的贡献，祖先照常遍历（不剪枝、不删卡）；
- *   - target 自己的消息永远保留，哪怕它自己被标了 exclude；
+ *   - target 自己不受 exclude 过滤，但历史仍参与请求预算；pending 完整保护；
  *   - 引用只取捕获时的原文，不递归来源的祖先，也不继承来源自己的引用；
  *   - 「消息历史能不能编译」与「这次请求能不能发」是两件事：没有 pending 时
  *     仍然给出历史投影和来源说明，但 isRequestReady 必须是 false。
@@ -39,12 +40,15 @@ export const CONTEXT_PLAN_ERRORS = Object.freeze({
   INVALID_PENDING_MESSAGE: 'INVALID_PENDING_MESSAGE',
   CONFLICTING_PENDING_MESSAGE: 'CONFLICTING_PENDING_MESSAGE',
   INVALID_CONTEXT_TARGET: 'INVALID_CONTEXT_TARGET',
+  CONTEXT_PENDING_TOO_LARGE: 'CONTEXT_PENDING_TOO_LARGE',
+  CONTEXT_PROJECTION_FAILED: 'CONTEXT_PROJECTION_FAILED',
 });
 
 export const CONTEXT_PLAN_WARNINGS = Object.freeze({
   REFERENCE_SOURCE_EXCLUDED: 'REFERENCE_SOURCE_EXCLUDED',
   REFERENCE_SOURCE_MISSING: 'REFERENCE_SOURCE_MISSING',
   NO_PENDING_PROMPT: 'NO_PENDING_PROMPT',
+  CONTEXT_HISTORY_TRUNCATED: 'CONTEXT_HISTORY_TRUNCATED',
 });
 
 /**
@@ -352,30 +356,30 @@ function emptyPlan({ errors, warnings }) {
   };
 }
 
-function messageContent(message) {
-  const text = typeof message.text === 'string' ? message.text : '';
-  let content = outputFor(message).body;
+function messageContentParts(message) {
+  const parts = [];
   if (message.role === 'user' && Array.isArray(message.attachments) && message.attachments.length > 0) {
-    const attSections = message.attachments
-      .map(att => `【附件资料：《${att.name}》】\n${att.content || ''}`)
-      .join('\n\n');
-    if (attSections) content = `${attSections}\n\n${content}`;
+    message.attachments.forEach((att, index) => {
+      if (index) parts.push('\n\n');
+      // Keep large bodies as references until the exact escaped-byte budget accepts the whole message.
+      parts.push(`【附件资料：《${att.name}》】\n`, String(att.content || ''));
+    });
+    parts.push('\n\n');
   }
-  // 已准入消息的文档引用清单：只作定位提示，不改 message.text；预览与发送共用同一编译
+  parts.push(outputFor(message).body);
   const artifactHint = artifactContextText(message);
-  if (artifactHint) content = content ? `${content}\n\n${artifactHint}` : artifactHint;
-  return content;
+  if (artifactHint) {
+    if (parts.some(part => part.length > 0)) parts.push('\n\n');
+    parts.push(artifactHint);
+  }
+  return parts;
 }
 
 function isProjectable(message) {
-  if (!message) return false;
-  const hasText = Boolean(message.text);
-  const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
-  const hasArtifactHint = Boolean(artifactContextText(message));
-  if (!hasText && !hasAttachments && !hasArtifactHint) return false;
-  if (message.localOnly || message.streaming || message.failed) return false;
+  if (!message || message.localOnly || message.streaming || message.failed) return false;
   if (message.status && message.status !== 'completed') return false;
-  return true;
+  if (message.text || Array.isArray(message.attachments) && message.attachments.length > 0) return true;
+  return Boolean(artifactContextText(message));
 }
 
 /**
@@ -397,6 +401,7 @@ export function buildContextPlan({
   pendingUserMessage,
   pendingMessage,
   maxReferenceBytes,
+  contextLimits,
 } = {}) {
   const cardList = Array.isArray(cards) ? cards : [];
   const warnings = [];
@@ -427,7 +432,7 @@ export function buildContextPlan({
   const includedChain = [];
   const excludedCardIds = [];
   const contributors = [];
-  const msgs = [];
+  const entries = [];
 
   for (const card of chain) {
     const isTarget = card.id === targetCard?.id;
@@ -440,34 +445,23 @@ export function buildContextPlan({
     contributors.push(card.id);
 
     if (card.isDoc && card.docContent) {
-      msgs.push({
-        role: 'user',
-        content: `【前置参考资料：《${card.title}》】\n${card.docContent}`,
-      });
-      msgs.push({
-        role: 'assistant',
-        content: `已阅读并完全解析前置资料《${card.title}》。将以此文档为事实基座回答后续分析推导。`,
-      });
+      entries.push({ role: 'user', parts: () => [`【前置参考资料：《${card.title}》】\n`, card.docContent] });
+      entries.push({ role: 'assistant', parts: () => [`已阅读并完全解析前置资料《${card.title}》。将以此文档为事实基座回答后续分析推导。`] });
     }
 
     for (const message of (Array.isArray(card.messages) ? card.messages : [])) {
       if (!isProjectable(message)) continue;
-      msgs.push({ role: message.role, content: messageContent(message) });
+      entries.push({ role: message.role, parts: () => messageContentParts(message) });
     }
   }
 
-  // 预检发生在提问写进卡片之前：pending 只参与这一次编译，不先 push 进活卡
-  if (pending) {
-    msgs.push({ role: 'user', content: messageContent(pending) });
-  }
-
-  // 去掉失败的助手回复后，它对应的提问也不能留：两条相邻 user 会让严格校验轮次的接口直接 400
+  // Preserve legacy turn balancing without projecting all historical bodies first.
   const balanced = [];
-  for (const message of msgs) {
-    const prev = balanced[balanced.length - 1];
-    if (message.role === 'user' && prev && prev.role === 'user') balanced.pop();
-    balanced.push(message);
+  for (const entry of entries) {
+    if (entry.role === 'user' && balanced.at(-1)?.role === 'user') balanced.pop();
+    balanced.push(entry);
   }
+  if (pending && balanced.at(-1)?.role === 'user') balanced.pop();
 
   const references = collectPlanReferences({ cards: cardList, chain: includedChain, warnings });
   const prefixLimit = resolveReferencePrefixLimit(maxReferenceBytes);
@@ -495,17 +489,31 @@ export function buildContextPlan({
     }
   }
 
-  let messages = balanced;
-  if (errors.length === 0 && pending && referencePrefix && messages.length > 0) {
-    const lastIndex = messages.length - 1;
-    const last = messages[lastIndex];
-    if (last.role === 'user') {
-      messages = messages.slice();
-      messages[lastIndex] = { ...last, content: `${referencePrefix}\n\n${last.content}` };
+  const groups = [];
+  for (const entry of balanced) {
+    if (entry.role === 'user' || groups.length === 0) groups.push([]);
+    groups.at(-1).push(entry);
+  }
+  let budget = applyContextWatermark();
+  if (errors.length === 0) {
+    try {
+      budget = applyContextWatermark({ groups, limits: contextLimits,
+        pending: pending ? { role: 'user', parts: () => [
+          ...(referencePrefix ? [referencePrefix, '\n\n'] : []), ...messageContentParts(pending),
+        ] } : null,
+      });
+      errors.push(...budget.errors);
+      if (budget.stats.watermarked) warnings.push({
+        code: CONTEXT_PLAN_WARNINGS.CONTEXT_HISTORY_TRUNCATED,
+        message: `本次上下文省略了较早的${budget.stats.omittedMessageCount}条消息，完整历史与文档未删除`,
+        omittedMessageCount: budget.stats.omittedMessageCount,
+        retainedMessageCount: budget.stats.retainedMessageCount,
+      });
+    } catch {
+      errors.push({ code: CONTEXT_PLAN_ERRORS.CONTEXT_PROJECTION_FAILED, message: '上下文消息无法安全投影，未发送部分内容' });
     }
   }
-  // errors 非空时 messages 必须是空集：不允许「部分发送」
-  if (errors.length > 0) messages = [];
+  const messages = errors.length > 0 ? [] : budget.messages;
 
   const mainlineSources = includedChain.map(card => ({
     kind: 'mainline',
@@ -526,7 +534,8 @@ export function buildContextPlan({
       mainlineCardCount: mainlineSources.length,
       effectiveReferenceCount: references.kept.length,
       referencePrefixBytes,
-      wireBytes: contextByteLength(JSON.stringify(messages)),
+      ...budget.stats,
+      wireBytes: errors.length > 0 ? 2 : budget.stats.wireBytes,
     },
     referencePrefix,
     isRequestReady: errors.length === 0 && Boolean(pending) && messages.length > 0,

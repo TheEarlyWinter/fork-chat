@@ -37,5 +37,37 @@ export function createArtifactView({ hana, requestHost, flashMessage, getCards, 
       else if (target.dataset.artifactAction === 'save') void actions.save(id);
     });
   }
-  return { bind, dismiss, dispose: dismiss };
+  /*
+   * 面板 overlay 级委托（2.2 文档面板）：overlay 挂在 body 上不在任何 cardEl 内，
+   * 卡片级 bind 够不到。这里从全部卡片消息里跨卡查找 artifact
+   * （面板数据本就来自同一聚合源），actions/预览弹窗/owner 鉴权与卡片级完全同源。
+   */
+  function handleOverlayClick(event) {
+    const target = event.target?.closest?.('[data-artifact-action]');
+    if (!target) return false;
+    const id = target.dataset.artifactId;
+    const cardList = getCards();
+    if (!Array.isArray(cardList)) return true; // 画布数据不可用时不执行任何动作
+    const artifact = cardList.flatMap(card => (card?.messages || []).flatMap(message => message.artifacts || [])).find(item => item?.artifactId === id);
+    if (!artifact || isDisposed()) return true;
+    event.preventDefault(); event.stopPropagation();
+    const actions = contextForCanvas().actions;
+    if (target.dataset.artifactAction === 'preview') void actions.preview(id);
+    else if (target.dataset.artifactAction === 'save') void actions.save(id);
+    return true;
+  }
+  function contextForCanvas() {
+    const cardList = getCards();
+    const first = Array.isArray(cardList) ? cardList[0] : null;
+    if (!first) return null;
+    let context = contexts.get(first);
+    if (!context) {
+      const generation = getGeneration();
+      const active = () => !isDisposed() && getGeneration() === generation;
+      context = { generation, actions: createArtifactActions({ hana, requestHost, flashMessage, isActive: active, showPreview }) };
+      contexts.set(first, context);
+    }
+    return context;
+  }
+  return { bind, dismiss, dispose: dismiss, handleOverlayClick };
 }

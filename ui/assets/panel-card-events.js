@@ -15,6 +15,44 @@ import { bindCardExportHandlers } from './panel-card-export.js';
 // 兼容旧入口：调用方仍可从本模块取到工厂，实现已搬到 panel-input-recovery.js
 export { createInputRecoveryBuffer };
 
+/**
+ * 上下文开关绑定（两段式确认，防误触）。
+ * 单击只弹确认态（文案+样式），3 秒无操作或指针离开自动还原；
+ * 确认态下再点一次才真正切换 contextMode。
+ * rc.1 实机验收教训：旧版单击即切换，坐标误触把卡片静默设为 exclude。
+ */
+export function bindContextToggle({ cardEl, card, on, getIsDisposed, canMutateCanvas, renderCards, scheduleSave, recordSnapshot, cardsNow = () => [], setTimeout: schedule = setTimeout, clearTimeout: cancel = clearTimeout } = {}) {
+  const btn = cardEl?.querySelector?.('[data-action="toggle-context-mode"]');
+  if (!btn) return;
+  let confirmTimer = null;
+  const label = () => card.contextMode === 'exclude' ? '不向后续分支提供上下文' : '向后续分支提供上下文';
+  const armConfirm = () => {
+    btn.dataset.confirm = '1';
+    btn.textContent = card.contextMode === 'exclude' ? '确认恢复提供上下文？' : '确认停止提供上下文？';
+    btn.classList.add('is-confirming');
+    if (confirmTimer) cancel(confirmTimer);
+    confirmTimer = schedule(() => disarmConfirm(), 3000);
+  };
+  const disarmConfirm = () => {
+    if (confirmTimer) { cancel(confirmTimer); confirmTimer = null; }
+    delete btn.dataset.confirm;
+    btn.classList.remove('is-confirming');
+    btn.textContent = label();
+  };
+  on(btn, 'click', (e) => {
+    e.stopPropagation();
+    if (getIsDisposed() || !canMutateCanvas()) return;
+    if (btn.dataset.confirm !== '1') { armConfirm(); return; }
+    disarmConfirm();
+    if (card.contextMode === 'exclude') delete card.contextMode;
+    else card.contextMode = 'exclude';
+    renderCards();
+    scheduleSave();
+    recordSnapshot(cardsNow(), card.id);
+  });
+  on(btn, 'pointerleave', () => { if (btn.dataset.confirm === '1') disarmConfirm(); });
+}
+
 export function createCardEvents(deps) {
   if (!deps || typeof deps !== 'object') {
     throw new TypeError('createCardEvents: deps must be an object');
@@ -433,19 +471,8 @@ export function createCardEvents(deps) {
       closeCardHierarchy(card);
     });
 
-    // 是否向后续分支提供上下文。这是策略，不是标签：不动卡片内容，也不删历史
-    const btnContextMode = cardEl.querySelector('[data-action="toggle-context-mode"]');
-    if (btnContextMode) {
-      on(btnContextMode, 'click', (e) => {
-        e.stopPropagation();
-        if (getIsDisposed() || !canMutateCanvas()) return;
-        if (card.contextMode === 'exclude') delete card.contextMode;
-        else card.contextMode = 'exclude';
-        renderCards();
-        scheduleSave();
-        recordSnapshot(cardsNow(), card.id);
-      });
-    }
+    // 是否向后续分支提供上下文。这是策略，不是标签：不动卡片内容，也不删历史。
+    bindContextToggle({ cardEl, card, on, getIsDisposed, canMutateCanvas, renderCards, scheduleSave, recordSnapshot, cardsNow });
 
     const btnContextPreview = cardEl.querySelector('[data-action="preview-context"]');
     if (btnContextPreview) {

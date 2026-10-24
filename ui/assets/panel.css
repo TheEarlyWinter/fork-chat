@@ -1957,3 +1957,15 @@ body.is-card-resizing.resizing-se {
   border-radius: 3px;
   word-break: break-word;
 }
+
+/* 上下文开关确认态：单击先弹确认，防坐标误触静默改策略；脉冲提醒 3 秒窗口 */
+.ctx-toggle.is-confirming {
+  color: #6b5b2a;
+  border-color: #d4c48a;
+  background: #faf5df;
+  animation: ctx-confirm-pulse 1s ease-in-out infinite;
+}
+@keyframes ctx-confirm-pulse {
+  0%, 100% { background: #faf5df; }
+  50% { background: #f3e9c8; }
+}

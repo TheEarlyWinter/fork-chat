@@ -34,6 +34,7 @@ import { createRenderer } from './panel-renderer.js';
 import { cardContentSignature, canReuseCardElement } from './panel-render-diff.js';
 import { createSearchController } from './panel-search-controller.js';
 import { createArtifactView } from './panel-artifact-view.js';
+import { createArtifactPanel } from './panel-artifact-panel.js';
 import { createSessionState } from './panel-session-state.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
@@ -82,6 +83,16 @@ const artifactView = createArtifactView({
   hana, requestHost, flashMessage: message => flashMessage(message),
   getCards: () => cards, getGeneration: () => sessionController?.generation,
   isDisposed: () => isDisposed,
+});
+
+const artifactPanel = createArtifactPanel({
+  getDocument: () => document,
+  getCards: () => cards,
+  getGeneration: () => sessionController?.generation,
+  locateCard: cardId => { try { canvasActions.focusCardInViewport?.(cards.find(card => card.id === cardId)); } catch {} },
+  // 面板按钮与卡片文件卡共用同一 actions/预览弹窗；overlay 在 body 上，
+  // 卡片级委托够不到，交给 artifactView 的跨卡查找（owner 鉴权语义不变）
+  onAction: (artifactId, action, event) => { artifactView.handleOverlayClick(event); },
 });
 
 // 卡片上的全部事件
@@ -508,6 +519,7 @@ panelCleanups.add(() => selectionController.dispose());
 
 function resetTransientUI() {
   artifactView.dismiss();
+  artifactPanel.close();
   try { selectionController?.reset?.() || selectionController?.hide?.(); } catch {}
   try { refController?.closeManager?.(); } catch {}
 }
@@ -1030,6 +1042,7 @@ function disposePanel() {
   isDisposed = true; // Close the command gate synchronously, before any await.
   panelAbort.abort(inactiveError());
   artifactView.dispose();
+  artifactPanel.dispose();
   for (const stop of [unbindKeyboardShortcuts, stopWatchingSessions]) { try { stop?.(); } catch {} }
   drain(cardCleanups); drain(battleCleanups); drain(panelCleanups);
   for (const timer of panelTimers) clearTimeout(timer);
@@ -1078,6 +1091,7 @@ listen(window, 'pagehide', () => {
 });
 
 // Ready precedes host storage requests; initialization failures remain visible.
+listen(document.getElementById('btn-artifact-panel'), 'click', () => artifactPanel.show());
 updateTransform(); renderCards(); hana.ready();
 try {
   await sessionController.init();

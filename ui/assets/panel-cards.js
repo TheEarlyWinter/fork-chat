@@ -550,7 +550,7 @@ export function buildCardHtml({
     <div class="card-footer">
       <div class="card-context-row">
         <button class="ctx-toggle${isContextExcluded ? ' is-excluded' : ''}" data-action="toggle-context-mode"
-          title="${isContextExcluded ? '这张卡的内容不会进入后续分支的上下文，单击恢复' : '这张卡的内容会进入后续分支的上下文，单击停止提供'}">
+          title="${isContextExcluded ? '这张卡的内容不会进入后续分支的上下文，再次单击确认恢复' : '这张卡的内容会进入后续分支的上下文，再次单击确认停止提供'}">
           ${isContextExcluded ? '不向后续分支提供上下文' : '向后续分支提供上下文'}
         </button>
         <button class="ctx-preview" data-action="preview-context" title="预览这次请求会带上的内容">预览</button>

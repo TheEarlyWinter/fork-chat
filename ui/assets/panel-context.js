@@ -28,6 +28,7 @@ export function buildChainContext({
   pendingUserMessage,
   pendingMessage,
   maxReferenceBytes,
+  contextLimits,
 } = {}) {
   const plan = buildContextPlan({
     cards,
@@ -35,6 +36,7 @@ export function buildChainContext({
     ...(pendingUserMessage !== undefined ? { pendingUserMessage } : {}),
     ...(pendingMessage !== undefined ? { pendingMessage } : {}),
     ...(maxReferenceBytes !== undefined ? { maxReferenceBytes } : {}),
+    ...(contextLimits !== undefined ? { contextLimits } : {}),
   });
   if (plan.errors.length > 0) {
     const first = plan.errors[0];
