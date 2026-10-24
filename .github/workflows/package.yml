@@ -1,0 +1,79 @@
+name: Build installable App
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Test packaging orchestration
+        run: node --test scripts/release-package-tests.mjs
+      - name: Extract pinned official Hana author tools
+        shell: bash
+        run: |
+          tools="$(bash scripts/fetch-hana-tools.sh "$RUNNER_TEMP/hana-author-tools")"
+          echo "HANA_APP_TOOLS_ROOT=$tools" >> "$GITHUB_ENV"
+      - name: Package and validate final archive
+        shell: bash
+        run: |
+          args=(--out dist)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          node scripts/release-package.mjs "${args[@]}"
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Upload installation package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fork-chat-install-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: fork-chat-install-${{ github.sha }}
+          path: dist
+      - name: Publish complete Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" ./*.zip ./*.entry.json SHA256SUMS build-info.json \
+            --verify-tag --draft "${prerelease[@]}" \
+            --title "分叉对话 $RELEASE_TAG" \
+            --notes '下载安装 app-timeline-reverser-*.zip（不要选 Source code）。在 HanaAgent 的扩展管理中导入 ZIP 并确认权限即可。需兼容的 HanaAgent（建议 1.1.111-beta 或更新版本）和已配置的模型。云端 OCR 为可选功能，当前存在已知原生运行时权限问题。SHA256SUMS 提供完整性校验；entry.json 是配套市场元数据。'
+          gh release edit "$RELEASE_TAG" --draft=false

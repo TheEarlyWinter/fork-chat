@@ -177,10 +177,22 @@ fork-chat/
 
 ## 安装与使用
 
-1. 打开 **HanaAgent** 桌面客户端，进入「扩展管理」；
-2. 导入或选择 **「分叉对话」** 进行安装或更新；
-3. 安装完成后，在左侧应用导航栏点击 **「分叉对话」** 图标即可启动；
-4. 点击画布空白处开始自由发散，或从宿主会话直接将消息送入画布开辟分析分支。
+1. 从 [GitHub Releases](https://github.com/TheEarlyWinter/fork-chat/releases) 下载 **`app-timeline-reverser-版本号.zip`**，不要下载自动生成的 **Source code**；
+2. 打开 **HanaAgent** 桌面客户端，进入「扩展管理」，导入 ZIP 并核对、确认权限；升级前先保存当前会话；
+3. 安装完成后，在应用导航栏点击 **「分叉对话」**。如仍显示旧版，使用 App 的正式重载入口；
+4. 在 Hana 中配置好模型后即可对话，无需自行安装 Node、npm 或项目依赖。该 ZIP 是 Hana App，不是独立桌面程序。
+
+宿主版本须满足 `manifest.json` 的 `minAppVersion`（当前 `0.1050.9`），建议使用 **HanaAgent 1.1.111-beta 或更新的兼容版本**。可选云端 OCR 需另配 MinerU；当前原生解析助手存在 `ERR_ACCESS_DENIED` 已知问题，不作为本版已修复功能承诺。
+
+Release 同时提供 `SHA256SUMS`（完整性校验）、`.entry.json`（市场元数据）及 `build-info.json`（构建来源）。普通用户只需安装 ZIP。
+
+### 自动构建与发布
+
+- `main` 推送、Pull Request 和手动 Actions 运行：构建经过官方校验的安装包，保存为 Actions artifact。
+- 推送与清单版本一致的标签（例如 `v2.2.0`）：构建成功后自动创建 GitHub Release 并上传安装 ZIP；校验失败不发布，不覆盖已有版本。
+- 构建使用固定版本、SHA-256 锁定的官方 Hana 作者工具；只解包工具，不安装或启动 Hana 桌面端。包内携带完整 SDK、解析助手、第三方代码与字体，不含本地会话、凭据、测试或内部文档。
+- 本地复现：设置 `HANA_APP_TOOLS_ROOT` 指向含 `scripts/extension-pack.mjs`、`scripts/validate-app.mjs` 的官方 Server 目录，再运行 `node scripts/release-package.mjs --out dist --tag v2.2.0`。
+- CI 的打包编排测试与官方静态归档校验，不等同于全功能实机验收。
 
 ---
 
