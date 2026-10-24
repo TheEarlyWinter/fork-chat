@@ -1,6 +1,7 @@
 import { parseAssistantOutput } from './assistant-output.js';
 import { createPendingUserMessage } from './panel-context.js';
-import { normalizeArtifactMetadata } from './artifact-contract.js';
+import { normalizeArtifactMetadata, normalizeArtifactList } from './artifact-contract.js';
+import { planArtifactVersionAttachment } from './artifact-versions.js';
 
 /**
  * 流式请求引擎。
@@ -191,16 +192,38 @@ export function createChatEngine(deps = {}) {
           if (event.type === 'tool-call') {
             // 交付型工具在跑的时候正文还没有，状态上要看得出来在忙什么
             asstMsg.status = 'delivering';
-            asstMsg.delivering = ['create_document', 'deliver_document'].includes(event.name) ? '文档' : event.name;
+            asstMsg.delivering = ['create_document', 'deliver_document'].includes(event.name) ? '文档'
+              : (event.name === 'revise_document' ? '文档修订版' : event.name);
           }
           if (event.type === 'tool-result') {
             asstMsg.delivering = '';
-            if (event.ok === true && (event.name === 'create_document' || event.name === 'deliver_document' && event.result?.artifactId)) {
+            if (event.ok === true && ['create_document', 'deliver_document', 'revise_document'].includes(event.name)) {
               const artifact = normalizeArtifactMetadata(event.result);
-              if (artifact) {
+              if (!artifact) {
+                // 缺 artifactId 或字段校验失败（MIME/sha/lineage 无效）一律可见报错，不静默
+                asstMsg.deliverError = '生成文件的回执无效';
+              } else if (event.name === 'revise_document') {
+                // 修订版优先归回原文件卡所在消息（跨节点也归并）；目标满/无目标回退本轮新卡
+                const canvasMessages = readCards().flatMap(item => item.messages.map(message => ({ message, card: item })));
+                const flat = canvasMessages.map(entry => entry.message);
+                const asstIndex = flat.indexOf(asstMsg);
+                const plan = planArtifactVersionAttachment(flat, artifact, asstIndex >= 0 ? asstIndex : flat.length - 1);
+                if (plan && plan.changed) {
+                  const target = flat[plan.messageIndex];
+                  target.artifacts = plan.artifacts;
+                  if (target !== asstMsg) {
+                    // 归入旧消息：本轮消息留 refs 供后续上下文定位，不重复渲染文件卡
+                    const refs = normalizeArtifactList([...(Array.isArray(asstMsg.artifactRefs) ? asstMsg.artifactRefs : []), artifact]);
+                    if (refs.length) asstMsg.artifactRefs = refs;
+                  }
+                  if (plan.reason === 'target-full') safeReportIssue('原消息文件数已达上限，修订版已放入本轮回复');
+                } else if (plan === null) {
+                  safeReportIssue('文件组已达上限，本次修订版未能挂载到消息');
+                }
+              } else {
                 if (!Array.isArray(asstMsg.artifacts)) asstMsg.artifacts = [];
                 if (!asstMsg.artifacts.some(item => item.artifactId === artifact.artifactId)) asstMsg.artifacts.push(artifact);
-              } else asstMsg.deliverError = '生成文件的回执无效';
+              }
             } else if (event.ok === true) {
               if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
               asstMsg.deliveredFiles.push(event.result);
@@ -218,8 +241,11 @@ export function createChatEngine(deps = {}) {
       if (getSession().generation !== requestGeneration) return;
       asstMsg.text = result.text;
       if (!Array.isArray(asstMsg.deliveredFiles)) asstMsg.deliveredFiles = [];
-      // 只交了文件、没写正文也算成功，不能按「只有心境」判死
-      const deliveredOnly = asstMsg.deliveredFiles.length > 0 || (asstMsg.artifacts?.length || 0) > 0;
+      // 只交了文件、没写正文也算成功，不能按「只有心境」判死。
+      // 修订归入旧卡时本轮 artifacts 为空，须承认规范 refs 与本轮真实回执。
+      const deliveredOnly = asstMsg.deliveredFiles.length > 0
+        || (asstMsg.artifacts?.length || 0) > 0
+        || (normalizeArtifactList(asstMsg.artifactRefs || []).length > 0);
       if (!parseAssistantOutput(result.text).body.trim() && !deliveredOnly) {
         throw new ChatError('EMPTY_BODY', '模型仅返回心境或沉思，未返回正文。');
       }

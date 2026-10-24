@@ -21,7 +21,7 @@ export function createRenderer(deps) {
     'getCardCleanups', 'computeVisibleCards', 'collectSubtreeCardIds',
     'cardParentIds', 'buildCardHtml', 'escapeHtml', 'messageMarkup',
     'statusText', 'formatFileSize', 'bindCardEvents', 'renderConnectors',
-    'getIsDisposed'
+    'getIsDisposed', 'cardContentSignature', 'canReuseCardElement'
   ], 'createRenderer');
 
   assertObject(deps.activeRequests, 'activeRequests', 'createRenderer');
@@ -57,6 +57,8 @@ export function createRenderer(deps) {
     escapeHtml,
     messageMarkup,
     statusText,
+    cardContentSignature,
+    canReuseCardElement,
     formatFileSize,
     bindCardEvents,
     renderConnectors,
@@ -173,6 +175,53 @@ export function createRenderer(deps) {
       }
     }
 
+    // 增量重绘：先回填现场（滚动/折叠）并收集可复用元素。
+    // 全部可见卡签名未变 → 走轻量轨道：不 drain 不清场，只挪位/调选中态（流式高频路径）。
+    // 任何一张卡需要重建 → 整体走重建轨道（drain+清场），复用元素重新摘挂。
+    // 两条轨道互斥：轻量轨道保持全部事件绑定存活，重建轨道靠重绑恢复。
+    const renderContext = { agent: getCurrentAgent() };
+    const reusable = new Map(); // cardId -> element
+    for (const card of cards) {
+      const body = doc.getElementById(`body-${card.id}`);
+      const cardEl = doc.getElementById(`dom-${card.id}`);
+      const bound = cardEl?.__boundCard;
+      if (cardEl && bound && bound !== card) continue;
+      if (typeof body?.scrollTop === 'number') setCardSavedScrollTop(card, body.scrollTop);
+      for (const message of card.messages) {
+        if (!message.requestId) continue;
+        const asides = doc.getElementById(`asides-${message.requestId}`);
+        if (typeof asides?.open === 'boolean') setMessageAsidesOpen(message, asides.open);
+      }
+      if (cardEl && canReuseCardElement(card, cardContentSignature(card, renderContext), cardEl)) {
+        reusable.set(card.id, cardEl);
+      }
+    }
+
+    const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
+    const allReusable = visibleCards.length > 0
+      && visibleCards.every(card => reusable.has(card.id))
+      && visibleCards.every(card => reusable.get(card.id).__boundCard === card);
+    if (allReusable) {
+      // 轻量轨道：所有元素已在层内且内容未变，仅同步几何与选中态
+      if (typeof onBeforeRender === 'function') { try { onBeforeRender(); } catch {} }
+      if (getIsDisposed()) return;
+      for (const card of visibleCards) {
+        const el = reusable.get(card.id);
+        el.style.left = `${card.x}px`;
+        el.style.top = `${card.y}px`;
+        el.classList[card.id === selectedCardId ? 'add' : 'remove']('is-selected-card');
+        el.classList[multiSelected.has(card.id) ? 'add' : 'remove']('is-multi-selected');
+      }
+      renderConnectors();
+      const badgeStats = getBadgeStats();
+      if (badgeStats) {
+        const branchCount = cards.reduce((count, card) => count + cardParentIds(card).length, 0);
+        badgeStats.textContent = `${cards.length} 卡片 · ${branchCount} 追问分支`;
+      }
+      if (typeof onAfterRender === 'function') { try { onAfterRender(); } catch {} }
+      return;
+    }
+
     const focused = preserve ? doc.activeElement : null;
     const focusId = /^(input-|asides-toggle-)/.test(focused?.id || '') ? focused.id : null;
     const selection = focusId?.startsWith('input-') ? [focused.selectionStart, focused.selectionEnd] : null;
@@ -180,10 +229,11 @@ export function createRenderer(deps) {
     drain(getCardCleanups());
     cardsLayer.innerHTML = '';
 
-    const { visibleCards } = computeVisibleCards({ cards, cardParentIds });
     const currentAgent = getCurrentAgent();
     const session = getSession();
 
+    // 重建轨道：保守契约 —— 结构不完整或任何签名变化就整体重建，不做部分复用。
+    // （部分复用会让「不完整必须 full fallback」的语义失效，也把事件绑定生命周期搞复杂。）
     visibleCards.forEach(card => {
       const cardEl = doc.createElement('div');
       cardEl.className = 'chat-card';
@@ -225,6 +275,7 @@ export function createRenderer(deps) {
 
       bindCardEvents(cardEl, card);
       cardEl.__boundCard = card;
+      cardEl.__contentSignature = cardContentSignature(card, renderContext);
       const inputEl = cardEl.querySelector?.('.card-input') || cardEl.querySelector?.(`#input-${card.id}`);
       if (inputEl) inputEl.__boundCard = card;
       cardsLayer.appendChild(cardEl);

@@ -8,6 +8,8 @@
  * 失败语义：所有失败向上抛，可见；不删文件、不清空原值、不覆盖其它存储键。
  */
 
+import { normalizeArtifactRevisionFields } from './artifact-contract.js';
+
 const INDEX_KEY = 'fork-chat.artifacts.index.v1';
 const INDEX_LOCK = 'fork-chat-artifact-index-v1';
 const MAX_PARTITIONS = 32;
@@ -69,6 +71,8 @@ export function createArtifactIndexStore({ hana, locks, now = () => new Date().t
   async function upsert(scopeKey, metadata, binding) {
     if (typeof scopeKey !== 'string' || !/^[0-9a-f]{64}$/.test(scopeKey)) throw indexError('ARTIFACT_INDEX_INVALID', '索引分区键无效');
     if (!metadata?.artifactId || !/^[0-9a-f]{32}$/.test(metadata.artifactId)) throw indexError('ARTIFACT_INDEX_INVALID', '索引条目标识无效');
+    const revision = normalizeArtifactRevisionFields(metadata);
+    if (!revision) throw indexError('ARTIFACT_INDEX_INVALID', '索引版本信息无效');
     const normalizedBinding = normalizeBinding(binding);
     if (!normalizedBinding) throw indexError('ARTIFACT_INDEX_INVALID', '索引绑定信息无效');
     let outcome = 'skipped';
@@ -78,7 +82,8 @@ export function createArtifactIndexStore({ hana, locks, now = () => new Date().t
       const existing = partition.entries[metadata.artifactId];
       if (existing) {
         const duplicate = existing.bindings.some(b => sameBinding(b, normalizedBinding));
-        if (duplicate && existing.sha256 === metadata.sha256 && existing.bytes === metadata.bytes) { outcome = 'idempotent'; return false; }
+        if (duplicate && existing.sha256 === metadata.sha256 && existing.bytes === metadata.bytes
+          && JSON.stringify(normalizeArtifactRevisionFields(existing)) === JSON.stringify(revision)) { outcome = 'idempotent'; return false; }
         if (!duplicate) {
           if (existing.bindings.length >= MAX_BINDINGS_PER_ENTRY) throw indexError('ARTIFACT_INDEX_LIMIT', '单条目绑定数超限，本次未保存');
           existing.bindings.push(normalizedBinding);
@@ -86,6 +91,8 @@ export function createArtifactIndexStore({ hana, locks, now = () => new Date().t
         existing.name = metadata.name;
         existing.bytes = metadata.bytes;
         existing.sha256 = metadata.sha256;
+        for (const field of ['revisedFrom', 'version', 'revisionRootId', 'revisionSource', 'revisionNotice']) delete existing[field];
+        Object.assign(existing, revision);
         existing.lastSeenAt = now();
         outcome = 'merged';
         return true;
@@ -104,6 +111,7 @@ export function createArtifactIndexStore({ hana, locks, now = () => new Date().t
         bindings: [normalizedBinding],
         origin: metadata.origin === 'imported' ? 'imported' : 'generated',
         lastSeenAt: now(),
+        ...revision,
       };
       outcome = 'created';
       return true;

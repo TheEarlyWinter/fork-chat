@@ -1,7 +1,7 @@
 import { parseAssistantOutput } from './assistant-output.js';
 import { formatFileSize, escapeHtml } from './panel-format.js';
 import katex from '../vendor/katex/katex.mjs';
-import { artifactFilesHtml } from './panel-artifact-markup.js';
+import { artifactFilesHtml, artifactRefsHtml } from './panel-artifact-markup.js';
 
 /**
  * 消息投影与状态格式化纯函数模块。
@@ -101,7 +101,7 @@ export function asidesText(output, message) {
  */
 export function deliveredFilesHtml(message) {
   const files = Array.isArray(message?.deliveredFiles) ? message.deliveredFiles : [];
-  const artifacts = artifactFilesHtml(message);
+  const artifacts = artifactFilesHtml(message) + artifactRefsHtml(message);
   if (files.length === 0) return artifacts;
   return `${artifacts}<div class="msg-attachments-list">
       ${files.map(file => `

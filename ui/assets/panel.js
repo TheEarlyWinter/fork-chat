@@ -31,6 +31,7 @@ import { createDocumentUi } from './panel-document-ui.js';
 import { createCardGestures } from './panel-card-gestures.js';
 import { createCardEvents, createInputRecoveryBuffer } from './panel-card-events.js';
 import { createRenderer } from './panel-renderer.js';
+import { cardContentSignature, canReuseCardElement } from './panel-render-diff.js';
 import { createSearchController } from './panel-search-controller.js';
 import { createArtifactView } from './panel-artifact-view.js';
 import { createSessionState } from './panel-session-state.js';
@@ -132,6 +133,8 @@ const cardEvents = createCardEvents({
 
 // 卡片层的重建与输入法守卫
 const renderer = createRenderer({
+  cardContentSignature,
+  canReuseCardElement,
   documentRef: document,
   getCardsLayer: () => cardsLayer,
   getBadgeStats: () => badgeStats,

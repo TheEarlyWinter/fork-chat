@@ -1,4 +1,5 @@
 import { outputFor } from './panel-messages.js';
+import { artifactContextText } from './artifact-context.js';
 import { collectChainCards } from './panel-cards.js';
 import {
   MAX_REFS_PER_CARD,
@@ -360,6 +361,9 @@ function messageContent(message) {
       .join('\n\n');
     if (attSections) content = `${attSections}\n\n${content}`;
   }
+  // 已准入消息的文档引用清单：只作定位提示，不改 message.text；预览与发送共用同一编译
+  const artifactHint = artifactContextText(message);
+  if (artifactHint) content = content ? `${content}\n\n${artifactHint}` : artifactHint;
   return content;
 }
 
@@ -367,7 +371,8 @@ function isProjectable(message) {
   if (!message) return false;
   const hasText = Boolean(message.text);
   const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
-  if (!hasText && !hasAttachments) return false;
+  const hasArtifactHint = Boolean(artifactContextText(message));
+  if (!hasText && !hasAttachments && !hasArtifactHint) return false;
   if (message.localOnly || message.streaming || message.failed) return false;
   if (message.status && message.status !== 'completed') return false;
   return true;

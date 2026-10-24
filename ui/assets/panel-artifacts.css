@@ -13,3 +13,9 @@
 .artifact-preview-dialog p { margin: 8px 0; color: var(--text-sub); font-size: 12px; }
 .artifact-preview-dialog iframe { display: block; width: 100%; height: min(65vh, 680px); border: 1px solid var(--border-subtle); background: white; }
 .artifact-preview-dialog > button { margin-top: 12px; padding: 6px 14px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-app); cursor: pointer; }
+
+/* 本轮修订引用卡：比完整文件卡轻，表明版本组在原消息上 */
+.artifact-ref-card { margin: 8px 0; padding: 10px 14px; border: 1px dashed var(--border-subtle); border-radius: 10px; background: var(--bg-card); }
+.artifact-ref-badge { background: transparent; border: 1px solid var(--border-subtle); }
+.artifact-ref-version { margin-left: auto; font-size: 12px; color: var(--text-muted, #6b7280); }
+.artifact-ref-card .artifact-file-heading { display: flex; align-items: center; gap: 8px; }

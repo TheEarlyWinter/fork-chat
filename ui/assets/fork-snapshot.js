@@ -239,6 +239,8 @@ export function normalizeForkSnapshot(input) {
       }
       if (rawMsg.partial === true) msg.partial = true;
       if (Array.isArray(rawMsg.artifacts)) msg.artifacts = normalizeArtifactList(rawMsg.artifacts);
+      // A revision can update an older file card while this message keeps only a context reference.
+      if (Array.isArray(rawMsg.artifactRefs)) msg.artifactRefs = normalizeArtifactList(rawMsg.artifactRefs);
 
       if (Array.isArray(rawMsg.attachments)) {
         msg.attachments = rawMsg.attachments.slice(0, 10).map(att => ({
