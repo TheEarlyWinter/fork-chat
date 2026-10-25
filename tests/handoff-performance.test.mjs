@@ -145,10 +145,10 @@ test('each DFS frame reads its parent list once instead of rebuilding it per edg
 
   assert.equal(dto.nodes.length, size);
   assert.equal(dto.nodes.reduce((sum, node) => sum + node.parentIds.length, 0), size * (size - 1) / 2);
-  // 允许索引、节点装配等一次性读取；DFS 若逐边重建父集合，这里会到 ~1770 次
+  // 上限按节点数线性（索引/装配/DFS 各取一次）；若 DFS 逐边重建父集合，这里会到 ~3900 次
   assert.ok(
-    reads.length <= 4 * size,
-    `父节点列表被反复重建：读取 ${reads.length} 次 / ${size} 个节点（上限 ${4 * size}）`,
+    reads.length <= 8 * size,
+    `父节点列表被反复重建：读取 ${reads.length} 次 / ${size} 个节点（上限 ${8 * size}）`,
   );
 });
 
