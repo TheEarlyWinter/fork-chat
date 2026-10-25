@@ -9,6 +9,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   let notice = '';
   let conflict = null;
   let refreshQueued = false;
+  let installing = false;
   let saveOwner = null, saveOwnerSeq = 0;
 
   const detail = err => `${err?.code || 'SESSION_STORAGE_ERROR'}: ${err?.message || '会话保存失败'}`;
@@ -110,15 +111,19 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     return owner;
   }
 
+  function drainQueuedRefresh() {
+    if (refreshQueued && !closed && !saving && !busy) {
+      refreshQueued = false;
+      void refresh().catch(() => {});
+    }
+  }
+
   function releaseSaving(owner) {
     if (saveOwner !== owner) return;
     saveOwner = null;
     saving = false;
     notify();
-    if (refreshQueued && !closed) {
-      refreshQueued = false;
-      void refresh().catch(() => {});
-    }
+    drainQueuedRefresh();
   }
 
   async function adoptExternal(record, guard = null) {
@@ -136,7 +141,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   }
 
   async function refresh() {
-    if (saving) {
+    if (saving || busy) {
       refreshQueued = true;
       return { activeId: active?.id || null, sessions };
     }
@@ -212,7 +217,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   }
 
   function scheduleSave() {
-    if (!ready || busy || closed) return;
+    if (!ready || busy || closed || installing) return;
     const alreadyDirty = changed > saved;
     changed++;
     // A sticky conflict records later input but never schedules an implicit
@@ -353,7 +358,14 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     active = record || null;
     changed = saved = 0;
     clearConflict();
-    await apply(record ? clone(record.snapshot) : null);
+    const previousInstalling = installing;
+    installing = true;
+    try {
+      await apply(record ? clone(record.snapshot) : null);
+    } finally {
+      installing = previousInstalling;
+      changed = saved = 0;
+    }
   }
 
   async function init() {
@@ -372,7 +384,12 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       busy = false;
       notify();
     }
-    if (ready && !closed) await refresh();
+    if (ready && !closed) {
+      refreshQueued = false;
+      await refresh();
+    } else {
+      drainQueuedRefresh();
+    }
   }
 
   async function transition(id) {
@@ -391,7 +408,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
-    finally { busy = false; notify(); }
+    finally { busy = false; notify(); drainQueuedRefresh(); }
   }
 
   async function newSession(snapshot) {
@@ -410,7 +427,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
-    finally { busy = false; notify(); }
+    finally { busy = false; notify(); drainQueuedRefresh(); }
   }
 
   async function saveCopy() {
@@ -430,7 +447,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
-    finally { busy = false; notify(); }
+    finally { busy = false; notify(); drainQueuedRefresh(); }
   }
 
   function resumeDirty() {
@@ -459,7 +476,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       // A failed flush already set `error`; preserve that true storage failure.
       return { ok: false, error: detail(err) };
     }
-    finally { busy = false; resumeDirty(); notify(); }
+    finally { busy = false; resumeDirty(); notify(); drainQueuedRefresh(); }
   }
 
   async function remove(id, expectedRevision, fallbackSnapshot) {
@@ -481,7 +498,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
       await refresh().catch(() => {});
       return { ok: true };
     } catch (err) { return { ok: false, error: detail(err) }; }
-    finally { busy = false; resumeDirty(); notify(); }
+    finally { busy = false; resumeDirty(); notify(); drainQueuedRefresh(); }
   }
 
   function close() {

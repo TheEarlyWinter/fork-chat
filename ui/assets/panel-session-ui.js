@@ -174,7 +174,7 @@ export function createPanelSessionUi(deps) {
         ? '已保存版本较本窗口记录更新（可能来自其他窗口）。确认后会删除最新已保存版本，以及本窗口未保存的内容。'
         : isCurrent && activeBusy
         ? '当前仍在生成，确认删除后会先停止请求。'
-        : '确认后将永久删除该会话及其全部卡片记录。';
+        : '当前已保存版本可能来自其他窗口。确认后将永久删除该会话及其全部卡片记录。';
       btnDeleteConfirm.disabled = false;
     } catch (err) {
       if (!checkDisposed() && deleteIntent === intent) {
