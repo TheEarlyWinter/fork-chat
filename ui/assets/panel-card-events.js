@@ -82,7 +82,7 @@ export function createCardEvents(deps) {
 
   assertOptionalFunctions(deps, [
     'getDocumentRef', 'getNavigator', 'getIsSpacePressed',
-    'getSelectedCardId'
+    'getSelectedCardId', 'openHandoff'
   ], 'createCardEvents');
 
   const {
@@ -124,6 +124,7 @@ export function createCardEvents(deps) {
     buildTopologyOutline,
     openContextPreview,
     openRefManager,
+    openHandoff,
   } = deps;
 
   const cardsNow = () => assertCardsArray(getCards(), 'card-events');
@@ -160,6 +161,17 @@ export function createCardEvents(deps) {
         flashMessage(`跳回失败：${safeDetail(err?.message || String(err))}`);
       }
     });
+
+    const btnHandoff = cardEl.querySelector('[data-action="handoff"]');
+    if (btnHandoff) {
+      on(btnHandoff, 'click', (e) => {
+        e.stopPropagation();
+        if (getIsDisposed()) return;
+        if (typeof openHandoff === 'function') {
+          openHandoff(card.id);
+        }
+      });
+    }
 
     // 折叠区的开合状态要存，不然重绘后又弹回去
     for (const message of (Array.isArray(card.messages) ? card.messages : [])) {

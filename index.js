@@ -8,6 +8,7 @@ import { createAppSettings } from "./lib/app-settings.js";
 import { createDocumentService } from "./lib/document-service.js";
 import { createBridgeService } from "./lib/bridge-service.js";
 import { createBridgeIntents } from "./lib/bridge-intents.js";
+import { createHandoffService } from "./lib/handoff-service.js";
 import { parserError } from "./lib/parser-network.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -51,6 +52,9 @@ export default defineApp(async (sdk) => {
   /** 本体会话桥：只读优先，投递走 Outbox 的 prepare / confirm */
   const bridgeIntents = createBridgeIntents({ dataDir, logger: sdk.logger });
   const bridgeService = createBridgeService({ sdk, dataDir, intents: bridgeIntents });
+
+  /** 在 Hana 中继续（分支交接服务） */
+  const handoffService = createHandoffService({ sdk, dataDir, artifacts: artifactService });
 
   /** 脱敏 token：只露头尾，够用户认出是哪一把 */
   const maskToken = (token) => {
@@ -190,6 +194,7 @@ export default defineApp(async (sdk) => {
       documents.register(app);
       artifactService.register(app);
       bridgeService.register(app);
+      handoffService.register(app);
       // 1. 获取系统助手列表接口 (包含人格与绑定模型及思考能力契约)
       app.get("/api/agents", async (c) => {
         try {

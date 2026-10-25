@@ -555,6 +555,7 @@ export function buildCardHtml({
         </button>
         <button class="ctx-preview" data-action="preview-context" title="预览这次请求会带上的内容">预览</button>
         ${refCount > 0 ? `<button class="ctx-preview" data-action="manage-refs" title="管理这张卡引用的原文快照">引用 ${refCount}</button>` : ''}
+        <button class="ctx-preview btn-handoff" data-action="handoff" title="以当前分支为基础，在 Hana 中继续">在 Hana 中继续</button>
       </div>
       ${attachmentsHtml}
       <div class="card-input-row">

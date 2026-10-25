@@ -216,5 +216,11 @@ async function extractDocumentFileActive(file, signal) {
   }
 }
 
-  return { extractDocumentFile, abortDocumentTasksFor, abortAll, get pendingCount() { return documentTasks.size; } };
+  function isPending(cardId) {
+    if (!cardId) return false;
+    const bucket = documentTasks.get(cardId);
+    return Boolean(bucket && bucket.size > 0);
+  }
+
+  return { extractDocumentFile, abortDocumentTasksFor, abortAll, get pendingCount() { return documentTasks.size; }, isPending };
 }

@@ -231,5 +231,17 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     // Best effort only: the last acknowledged autosave is the recovery boundary.
     return flush(true);
   }
-  return { get state() { return state(); }, takeNotice() { const current = notice; notice = ''; return current; }, get generation() { return generation; }, init, refresh, scheduleSave, flush, switchTo: transition, newSession, saveCopy, rename, remove, close };
+  function getSavedSnapshot() {
+    if (!ready || busy || closed || saving || (changed > saved) || Boolean(error) || !active) {
+      const err = new Error('当前会话尚未保存或正忙');
+      err.code = 'SESSION_NOT_SAVED';
+      throw err;
+    }
+    return {
+      id: active.id,
+      revision: active.revision,
+      snapshot: JSON.parse(JSON.stringify(active.snapshot)),
+    };
+  }
+  return { get state() { return state(); }, takeNotice() { const current = notice; notice = ''; return current; }, get generation() { return generation; }, init, refresh, scheduleSave, flush, switchTo: transition, newSession, saveCopy, rename, remove, close, getSavedSnapshot };
 }

@@ -33,6 +33,7 @@ import { createCardEvents, createInputRecoveryBuffer } from './panel-card-events
 import { createRenderer } from './panel-renderer.js';
 import { cardContentSignature, canReuseCardElement } from './panel-render-diff.js';
 import { createSearchController } from './panel-search-controller.js';
+import { createPanelHandoff } from './panel-handoff.js';
 import { createArtifactView } from './panel-artifact-view.js';
 import { createArtifactPanel } from './panel-artifact-panel.js';
 import { createSessionState } from './panel-session-state.js';
@@ -139,6 +140,7 @@ const cardEvents = createCardEvents({
   buildTopologyOutline: (...args) => buildTopologyOutline(...args),
   openContextPreview: card => contextPreview.show(card),
   openRefManager: card => refController.showManager(card),
+  openHandoff: cardId => handoffController?.open(cardId),
 });
 
 
@@ -496,6 +498,20 @@ const refController = createRefController({
   getIsDisposed: () => isDisposed,
 });
 panelCleanups.add(() => refController.dispose());
+
+// 在 Hana 中继续（Handoff 控制器）
+const handoffController = createPanelHandoff({
+  hana,
+  requestHost,
+  sessionController,
+  getCards: () => cards,
+  isCardBusy: card => chainIsBusy(card),
+  flashMessage: message => flashMessage(message),
+  safeDetail: value => safeDetail(value),
+  getIsDisposed: () => isDisposed,
+  documentRef: document,
+});
+panelCleanups.add(() => handoffController.dispose());
 
 const createRootCard = () => canvasActions.createRootCard();
 const createBranchCard = (card, opts) => canvasActions.createBranchCard(card, opts);
