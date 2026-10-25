@@ -1,15 +1,17 @@
 /**
  * 分支交接控制器：协调已保存不可变快照、祖先拓扑忙碌检查、Agent 选择、准备与确认流程。
  *
- * 遵循原则（Task 3 Round 2 状态架构）：
- * 1. 业务操作归每次独立的 op 对象拥有，彻底淘汰全局共享锁。
- * 2. 统一 isCurrent(op) 门禁：动态重新获取会话控制器，核验实例引用、generation、activeId 以及 op 闭合状态。
- * 3. 模态对话框与 loading 状态在首次异步等待（flush/caps/actions/agents）前尽早挂载并置 open，阻断背景交互；关闭后迟到响应直接废弃，杜绝复活。
- * 4. capabilities 准入（supported/available/home）严格执行，失败固定提示且绝对阻断 prepare POST。
- * 5. actions 历史查询失败 fail-closed，严禁静默漏进新准备流程。
- * 6. 历史记录与新预览共存：历史动作展示元数据与恢复入口；提供显式【新建预览】按钮，未点击前 0 POST；query 获得新 sessionId 后 focus 准确消费最新 ID。
- * 7. 显式有界遍历检查祖先忙碌状态（HANDOFF_LIMITS.maxNodes），在 prepare/confirm 发送前复核；读操作（query/focus）不被无关忙碌阻断。
- * 8. 预览正文与准备 DTO 权威一致：通过 formatHandoffTranscript 保证完整保底正文与实际 POST DTO 逐字吻合。
+ * 遵循原则（Task 3 Round 3 三种意图边界与架构规范）：
+ * 1. open(targetCardId)：只读 metadata 意图。早期真正 modal/loading 挂载，直接获取 capabilities 与 actions，
+ *    不得提前执行 flush/getSavedSnapshot，不被当前保存失败或祖先忙碌阻断已有历史查看与聚焦；
+ *    相同 targetCardId 在途 open 请求单飞去重并复用同一 Promise。
+ * 2. 历史动作选择：只读特定动作意图。支持展示与切换本画布同一目标下的多个历史动作；切换历史动作使用全新作用域，
+ *    旧动作在途 query 响应决不覆盖当前选中的历史动作。
+ * 3. 明确新建预览或首次无历史：建立全新 preview op（不继承旧 savedSnapshot）。
+ *    彻底作废旧 op，重新核实控制器可保存态与依赖忙碌，执行 flush 成功后捕获点击时的最新 savedSnapshot（最新 revision 与内容）。
+ * 4. 历史 GET 失败提供独立的 GET-only 重试回调，单飞去重，0 flush 且 0 POST。
+ * 5. 保留已闭合项：动态 getSessionController、POST 前有界拓扑忙碌即时复核、严格 capabilities 准入、
+ *    中性确认失败提示、ID-only focus、无假 Agent 权威正文、输入 stale 标记与同 DTO canonical 一致性。
  */
 
 import { buildHandoffContext } from './fork-handoff-context.js';
@@ -34,6 +36,7 @@ export function createPanelHandoff(deps = {}) {
   let isDisposed = false;
   let activeOp = null;
   let opSeq = 0;
+  let pendingOpen = null; // { targetCardId, activeId, generation, controller, promise }
 
   const view = createHandoffView({ documentRef });
 
@@ -263,6 +266,10 @@ export function createPanelHandoff(deps = {}) {
       const resp = await requestHost(hana, `/api/handoff/actions/${encodeURIComponent(targetActionId)}`);
       const data = await resp.json();
       if (!isCurrent(op)) return;
+      // 历史模式下，若当前选中的动作已切换，丢弃旧动作迟到响应
+      if (op.isHistoryMode && op.selectedActionId && op.selectedActionId !== targetActionId) {
+        return;
+      }
       if (!data || !data.ok || !data.action) {
         throw new Error(data?.error || '查询动作状态失败');
       }
@@ -271,9 +278,15 @@ export function createPanelHandoff(deps = {}) {
         return;
       }
       op.currentAction = data.action;
+      const idx = op.historyActions.findIndex(a => a.actionId === targetActionId);
+      if (idx >= 0) op.historyActions[idx] = data.action;
+
       applyActionResult(op, data.action);
     } catch (err) {
       if (!isCurrent(op)) return;
+      if (op.isHistoryMode && op.selectedActionId && op.selectedActionId !== targetActionId) {
+        return;
+      }
       view.setError('查询恢复失败：' + safeDetail(err?.message || err));
     } finally {
       op.isQuerying = false;
@@ -294,13 +307,28 @@ export function createPanelHandoff(deps = {}) {
     }
   }
 
-  function setupHistoryView(op, action) {
-    op.currentAction = action;
-    const hasSessionId = Boolean(action.sessionId);
+  function selectHistoryAction(op, actionId, matchingActions = op.historyActions) {
+    if (!isCurrent(op)) return;
+    const currentMatching = matchingActions.filter(
+      a => a?.source?.canvasId === op.activeId && a?.source?.targetCardId === op.targetCardId
+    );
+    const targetAction = currentMatching.find(a => a.actionId === actionId) || currentMatching[0];
+    if (!targetAction) return;
+
+    op.selectedActionId = targetAction.actionId;
+    op.currentAction = targetAction;
+
+    const hasSessionId = Boolean(targetAction.sessionId);
 
     view.renderHistory({
-      action,
+      actions: currentMatching,
+      selectedActionId: targetAction.actionId,
+      action: targetAction,
       hasSessionId,
+      onActionSelect: (newActionId) => {
+        if (!isCurrent(op)) return;
+        selectHistoryAction(op, newActionId, currentMatching);
+      },
       onRecover: () => handleRecover(op),
       onFocus: () => handleFocus(op),
       onNewPreview: async () => {
@@ -312,9 +340,7 @@ export function createPanelHandoff(deps = {}) {
           view.setError(reason);
           return;
         }
-        op.isHistoryMode = false;
-        op.currentAction = null;
-        await setupNewPreview(op);
+        await startNewPreview(op, { isInitial: false });
       },
       onClose: () => {
         op.closed = true;
@@ -323,11 +349,111 @@ export function createPanelHandoff(deps = {}) {
       },
     });
 
-    applyActionResult(op, action);
+    applyActionResult(op, targetAction);
   }
 
-  async function setupNewPreview(op) {
-    if (!op.agents || op.agents.length === 0) {
+  async function startNewPreview(parentOp, { isInitial = false } = {}) {
+    // 1. 彻底作废旧 op
+    parentOp.closed = true;
+
+    // 2. 获取当前控制器与状态
+    const controller = getActiveSessionController();
+    const sState = controller?.state;
+    if (!sState || !sState.ready || sState.busy || sState.saving || !sState.activeId) {
+      const msg = '当前会话正在保存或正忙，请稍后重试。';
+      if (isInitial) {
+        view.close();
+        flashMessage(msg);
+      } else {
+        view.setError(msg);
+      }
+      return;
+    }
+
+    // 3. 建立全新 preview op（不继承旧 savedSnapshot！）
+    const previewOp = {
+      token: ++opSeq,
+      controller,
+      generation: sState.generation,
+      activeId: sState.activeId,
+      targetCardId: parentOp.targetCardId,
+      closed: false,
+      inputEpoch: 0,
+      savedSnapshot: null,
+      caps: parentOp.caps,
+      capsOk: parentOp.capsOk,
+      agents: parentOp.agents || [],
+      currentAction: null,
+      selectedAgentId: '',
+      nextStepText: '',
+      isPreparing: false,
+      isConfirming: false,
+      isQuerying: false,
+      isFocusing: false,
+      isHistoryMode: false,
+    };
+    activeOp = previewOp;
+
+    // 4. 新预览准入校验：检查 capabilities
+    if (!previewOp.capsOk) {
+      const reason = (previewOp.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || previewOp.caps?.home === false)
+        ? '缺少主页会话创建权限，无法交接'
+        : '宿主环境暂不支持分支交接';
+      view.setError(reason);
+      return;
+    }
+
+    // 5. 检查祖先忙碌与依赖上限
+    try {
+      if (checkAnyBusy(previewOp.targetCardId, getCards())) {
+        const msg = '目标卡片或其祖先节点正在处理中，请等待完成后再继续。';
+        if (isInitial) {
+          view.close();
+          flashMessage(msg);
+        } else {
+          view.setError(msg);
+        }
+        return;
+      }
+    } catch (err) {
+      const msg = safeDetail(err?.message || err);
+      if (isInitial) {
+        view.close();
+        flashMessage(msg);
+      } else {
+        view.setError(msg);
+      }
+      return;
+    }
+
+    // 6. 执行 flush 并核实版本
+    try {
+      await controller.flush(true);
+    } catch (err) {
+      if (!isCurrent(previewOp)) return;
+      view.setError('会话保存失败：' + safeDetail(err?.message || err));
+      return;
+    }
+    if (!isCurrent(previewOp)) return;
+
+    // 7. 获取不可变已保存快照（重新读取最新 savedSnapshot！）
+    let savedSnapshot;
+    try {
+      savedSnapshot = controller.getSavedSnapshot();
+    } catch (err) {
+      if (!isCurrent(previewOp)) return;
+      view.setError('获取已保存快照失败：' + safeDetail(err?.message || err));
+      return;
+    }
+    if (!isCurrent(previewOp)) return;
+    if (!savedSnapshot || savedSnapshot.id !== previewOp.activeId) {
+      view.setError('会话快照与当前画布不匹配');
+      return;
+    }
+    previewOp.savedSnapshot = savedSnapshot;
+
+    // 8. 获取 agents
+    if (!previewOp.agents || previewOp.agents.length === 0) {
       let agents = [];
       try {
         const resp = await requestHost(hana, '/api/agents');
@@ -336,46 +462,48 @@ export function createPanelHandoff(deps = {}) {
           agents = data.agents.filter(a => a && typeof a.id === 'string' && a.id.trim());
         }
       } catch {}
-      if (!isCurrent(op)) return;
+      if (!isCurrent(previewOp)) return;
       if (agents.length === 0) {
         view.setError('获取可用智能体列表失败或当前无可用智能体');
         return;
       }
-      op.agents = agents;
+      previewOp.agents = agents;
     }
 
-    const snapshotAgentId = op.savedSnapshot.snapshot?.agent?.id || '';
-    const match = op.agents.some(a => a.id === snapshotAgentId);
-    op.selectedAgentId = match ? snapshotAgentId : '';
-    op.nextStepText = '';
-    op.inputEpoch = 0;
-    op.currentAction = null;
+    // 9. 确定默认选中 Agent 并初始化上下文
+    const snapshotAgentId = savedSnapshot.snapshot?.agent?.id || '';
+    const match = previewOp.agents.some(a => a.id === snapshotAgentId);
+    previewOp.selectedAgentId = match ? snapshotAgentId : '';
+    previewOp.nextStepText = '';
+    previewOp.inputEpoch = 0;
+    previewOp.currentAction = null;
 
     let initialDto = null;
-    if (op.selectedAgentId) {
+    if (previewOp.selectedAgentId) {
       try {
-        initialDto = buildContext(op.selectedAgentId, op.nextStepText, op.savedSnapshot, op.targetCardId);
+        initialDto = buildContext(previewOp.selectedAgentId, previewOp.nextStepText, savedSnapshot, previewOp.targetCardId);
       } catch (err) {
         view.setError('生成交接上下文失败：' + safeDetail(err?.message || err));
         return;
       }
     }
 
+    // 10. 渲染新预览视图
     view.renderNewPreview({
       context: initialDto,
-      agents: op.agents,
-      selectedAgentId: op.selectedAgentId,
-      nextStepText: op.nextStepText,
+      agents: previewOp.agents,
+      selectedAgentId: previewOp.selectedAgentId,
+      nextStepText: previewOp.nextStepText,
       onAgentChange: (newAgentId) => {
-        if (!isCurrent(op)) return;
-        op.inputEpoch++;
-        op.selectedAgentId = newAgentId;
-        op.currentAction = null;
+        if (!isCurrent(previewOp)) return;
+        previewOp.inputEpoch++;
+        previewOp.selectedAgentId = newAgentId;
+        previewOp.currentAction = null;
         view.setError('');
         view.setStage('init');
-        if (op.selectedAgentId) {
+        if (previewOp.selectedAgentId) {
           try {
-            const dto = buildContext(op.selectedAgentId, op.nextStepText, op.savedSnapshot, op.targetCardId);
+            const dto = buildContext(previewOp.selectedAgentId, previewOp.nextStepText, previewOp.savedSnapshot, previewOp.targetCardId);
             view.updatePreview(dto);
           } catch (err) {
             view.setError(safeDetail(err?.message || err));
@@ -385,17 +513,17 @@ export function createPanelHandoff(deps = {}) {
         }
       },
       onNextStepChange: (newNextStep) => {
-        if (!isCurrent(op)) return;
-        op.inputEpoch++;
-        op.nextStepText = newNextStep;
-        op.currentAction = null;
+        if (!isCurrent(previewOp)) return;
+        previewOp.inputEpoch++;
+        previewOp.nextStepText = newNextStep;
+        previewOp.currentAction = null;
         view.setError('');
         view.setStage('init');
         view.markPreviewStale(newNextStep);
       },
       onCopyDraft: () => {
-        if (!isCurrent(op)) return;
-        const targetSavedCard = op.savedSnapshot.snapshot.cards.find(c => c.id === op.targetCardId);
+        if (!isCurrent(previewOp)) return;
+        const targetSavedCard = previewOp.savedSnapshot.snapshot.cards.find(c => c.id === previewOp.targetCardId);
         const draft = typeof targetSavedCard?.draft === 'string' ? targetSavedCard.draft : '';
         if (!draft) {
           view.setError('目标卡片没有可复制的草稿');
@@ -409,21 +537,21 @@ export function createPanelHandoff(deps = {}) {
           flashMessage(msg);
           return;
         }
-        op.inputEpoch++;
-        op.nextStepText = draft;
+        previewOp.inputEpoch++;
+        previewOp.nextStepText = draft;
         view.setNextStepValue(draft);
-        op.currentAction = null;
+        previewOp.currentAction = null;
         view.setError('');
         view.setStage('init');
         view.markPreviewStale(draft);
       },
-      onPrepare: () => handlePrepare(op),
-      onConfirm: () => handleConfirm(op),
-      onRecover: () => handleRecover(op),
-      onFocus: () => handleFocus(op),
+      onPrepare: () => handlePrepare(previewOp),
+      onConfirm: () => handleConfirm(previewOp),
+      onRecover: () => handleRecover(previewOp),
+      onFocus: () => handleFocus(previewOp),
       onClose: () => {
-        op.closed = true;
-        if (activeOp === op) activeOp = null;
+        previewOp.closed = true;
+        if (activeOp === previewOp) activeOp = null;
         view.close();
       },
     });
@@ -431,35 +559,92 @@ export function createPanelHandoff(deps = {}) {
     view.setStage('init');
   }
 
-  async function open(targetCardId) {
-    if (isDisposed || getIsDisposed()) return;
-    const cards = getCards();
-    const targetCard = cards.find(c => c.id === targetCardId);
-    if (!targetCard) {
-      flashMessage('目标卡片不存在');
+  async function loadHistoryActions(op) {
+    let historyActions = [];
+    try {
+      const resp = await requestHost(hana, '/api/handoff/actions');
+      const data = await resp.json();
+      if (resp.status < 200 || resp.status >= 300 || !data || !data.ok || !Array.isArray(data.actions)) {
+        throw new Error(data?.error || '查询历史动作失败');
+      }
+      historyActions = data.actions;
+    } catch (err) {
+      if (!isCurrent(op)) return false;
+      view.renderError({
+        message: '查询历史交接记录失败：' + safeDetail(err?.message || err) + '，请点击重试。',
+        onRetry: () => retryLoadHistory(op),
+        onClose: () => {
+          op.closed = true;
+          if (activeOp === op) activeOp = null;
+          view.close();
+        },
+      });
+      return false;
+    }
+    if (!isCurrent(op)) return false;
+    op.historyActions = historyActions;
+    return true;
+  }
+
+  async function retryLoadHistory(op) {
+    if (!isCurrent(op) || op.isRetrying) return;
+    op.isRetrying = true;
+    try {
+      const ok = await loadHistoryActions(op);
+      if (ok && isCurrent(op)) {
+        await processHistoryOrNewPreview(op);
+      }
+    } finally {
+      op.isRetrying = false;
+    }
+  }
+
+  async function processHistoryOrNewPreview(op) {
+    if (!isCurrent(op)) return;
+
+    // 匹配当前画布与目标卡片的所有历史动作
+    const matchingActions = op.historyActions.filter(
+      a => a?.source?.canvasId === op.activeId && a?.source?.targetCardId === op.targetCardId
+    );
+
+    if (matchingActions.length > 0) {
+      // 存在历史动作：进入历史模式（不检查 busy，不 flush，不校验快照）
+      op.isHistoryMode = true;
+      selectHistoryAction(op, matchingActions[0].actionId, matchingActions);
       return;
     }
 
-    // 1. 显式有界遍历检查初始忙碌状态
+    // 无历史动作：进入新预览意图
+    if (!op.capsOk) {
+      const reason = (op.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || op.caps?.home === false)
+        ? '缺少主页会话创建权限，无法交接'
+        : '宿主环境暂不支持分支交接';
+      view.setError(reason);
+      return;
+    }
+
+    // 检查祖先忙碌与依赖上限（无历史时忙碌直接关闭并 flash，符合 C2/I1）
     try {
-      if (checkAnyBusy(targetCardId, cards)) {
+      if (checkAnyBusy(op.targetCardId, getCards())) {
+        view.close();
         flashMessage('目标卡片或其祖先节点正在处理中，请等待完成后再继续。');
+        op.closed = true;
+        if (activeOp === op) activeOp = null;
         return;
       }
     } catch (err) {
+      view.close();
       flashMessage(safeDetail(err?.message || err));
+      op.closed = true;
+      if (activeOp === op) activeOp = null;
       return;
     }
 
-    // 2. 检查会话控制器状态
-    const controller = getActiveSessionController();
-    const sState = controller?.state;
-    if (!sState || !sState.ready || sState.busy || sState.saving || !sState.activeId) {
-      flashMessage('当前会话正在保存或正忙，请稍后重试。');
-      return;
-    }
+    // 启动全新新预览 scope
+    await startNewPreview(op, { isInitial: true });
+  }
 
-    // 作废旧操作
+  async function executeOpen(targetCardId, controller, sState) {
     if (activeOp) {
       activeOp.closed = true;
     }
@@ -471,24 +656,20 @@ export function createPanelHandoff(deps = {}) {
       activeId: sState.activeId,
       targetCardId,
       closed: false,
-      inputEpoch: 0,
-      savedSnapshot: null,
       caps: null,
       capsOk: false,
       agents: [],
       historyActions: [],
+      selectedActionId: '',
       currentAction: null,
-      selectedAgentId: '',
-      nextStepText: '',
-      isPreparing: false,
-      isConfirming: false,
       isQuerying: false,
       isFocusing: false,
+      isRetrying: false,
       isHistoryMode: false,
     };
     activeOp = op;
 
-    // 3. 早期挂载模态对话框与 loading 态（在首次异步等待前）
+    // 早期挂载模态对话框与 loading 态（在首次异步等待前）
     const earlyOpened = view.openLoading({
       onClose: () => {
         op.closed = true;
@@ -503,33 +684,7 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    // 4. 执行 flush 并核实版本
-    try {
-      await controller.flush(true);
-    } catch (err) {
-      if (!isCurrent(op)) return;
-      view.setError('会话保存失败：' + safeDetail(err?.message || err));
-      return;
-    }
-    if (!isCurrent(op)) return;
-
-    // 5. 获取不可变已保存快照
-    let savedSnapshot;
-    try {
-      savedSnapshot = controller.getSavedSnapshot();
-    } catch (err) {
-      if (!isCurrent(op)) return;
-      view.setError('获取已保存快照失败：' + safeDetail(err?.message || err));
-      return;
-    }
-    if (!isCurrent(op)) return;
-    if (!savedSnapshot || savedSnapshot.id !== op.activeId) {
-      view.setError('会话快照与当前画布不匹配');
-      return;
-    }
-    op.savedSnapshot = savedSnapshot;
-
-    // 6. 查询 capabilities
+    // 1. 查询 capabilities（只读 metadata，不 flush，不 getSavedSnapshot）
     let caps = null;
     try {
       const resp = await requestHost(hana, '/api/handoff/capabilities');
@@ -549,51 +704,61 @@ export function createPanelHandoff(deps = {}) {
       caps.home === true
     );
 
-    // 7. 查询历史动作 actions
-    let historyActions = [];
-    try {
-      const resp = await requestHost(hana, '/api/handoff/actions');
-      const data = await resp.json();
-      if (resp.status < 200 || resp.status >= 300 || !data || !data.ok || !Array.isArray(data.actions)) {
-        throw new Error(data?.error || '查询历史动作失败');
+    // 2. 查询历史动作 actions
+    const ok = await loadHistoryActions(op);
+    if (!ok || !isCurrent(op)) return;
+
+    // 3. 处理历史记录或进入新预览
+    await processHistoryOrNewPreview(op);
+  }
+
+  async function open(targetCardId) {
+    if (isDisposed || getIsDisposed()) return;
+    const cards = getCards();
+    const targetCard = cards.find(c => c.id === targetCardId);
+    if (!targetCard) {
+      flashMessage('目标卡片不存在');
+      return;
+    }
+
+    const controller = getActiveSessionController();
+    const sState = controller?.state;
+    if (!sState || !sState.activeId) return;
+
+    // 如果针对同一 targetCardId、activeId、generation 的 open 已在途挂起，复用在途 Promise（单飞去重）
+    if (
+      pendingOpen &&
+      pendingOpen.targetCardId === targetCardId &&
+      pendingOpen.activeId === sState.activeId &&
+      pendingOpen.generation === sState.generation &&
+      pendingOpen.controller === controller
+    ) {
+      return pendingOpen.promise;
+    }
+
+    const openPromise = (async () => {
+      try {
+        await executeOpen(targetCardId, controller, sState);
+      } finally {
+        if (pendingOpen?.promise === openPromise) {
+          pendingOpen = null;
+        }
       }
-      historyActions = data.actions;
-    } catch (err) {
-      if (!isCurrent(op)) return;
-      view.setError('查询历史交接记录失败：' + safeDetail(err?.message || err) + '，请点击重试。');
-      view.setStage('error-recoverable');
-      return;
-    }
-    if (!isCurrent(op)) return;
-    op.historyActions = historyActions;
+    })();
 
-    const matchingAction = historyActions.find(
-      a => a?.source?.canvasId === savedSnapshot.id && a?.source?.targetCardId === targetCardId
-    );
-
-    // 8. 存在历史动作时，进入历史模式
-    if (matchingAction) {
-      op.isHistoryMode = true;
-      op.currentAction = matchingAction;
-      setupHistoryView(op, matchingAction);
-      return;
-    }
-
-    // 9. 无历史动作时，若准入失败直接阻断
-    if (!op.capsOk) {
-      const reason = (caps?.reason === 'HANDOFF_PERMISSION_MISSING' || caps?.home === false)
-        ? '缺少主页会话创建权限，无法交接'
-        : '宿主环境暂不支持分支交接';
-      view.setError(reason);
-      return;
-    }
-
-    // 10. 进入新预览流程
-    await setupNewPreview(op);
+    pendingOpen = {
+      targetCardId,
+      activeId: sState.activeId,
+      generation: sState.generation,
+      controller,
+      promise: openPromise,
+    };
+    return openPromise;
   }
 
   function dispose() {
     isDisposed = true;
+    pendingOpen = null;
     if (activeOp) {
       activeOp.closed = true;
       activeOp = null;

@@ -5,7 +5,7 @@
  * 3. 窄布局自适应，不撑破对话框。
  * 4. 拦截 Escape 键，关闭后焦点恢复至原触发元素。
  * 5. 模态 API (showModal) 不可用或抛错时 fail closed，绝不降级为 open=true 伪模态。
- * 6. 支持早期 loading 态挂载、历史记录查看与新建预览切换。
+ * 6. 支持早期 loading 态挂载、历史记录查看与多历史选择、新建预览切换以及错误重试绑定。
  * 7. 提供基于 formatHandoffTranscript 的完整权威正文保底预览。
  */
 
@@ -73,6 +73,16 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     const noticesEl = createEl('div', 'handoff-notices');
     noticesEl.setAttribute('role', 'note');
 
+    // 历史动作选择行
+    const historyRow = createEl('div', 'handoff-field-row handoff-history-row');
+    historyRow.style.display = 'none';
+    const historyLabel = createEl('label', 'handoff-label', '历史交接记录');
+    historyLabel.setAttribute('for', 'handoff-history-select');
+    const historySelect = createEl('select', 'handoff-select handoff-history-select');
+    historySelect.id = 'handoff-history-select';
+    historyRow.appendChild(historyLabel);
+    historyRow.appendChild(historySelect);
+
     // 表单区
     const formSection = createEl('div', 'handoff-form-section');
 
@@ -129,6 +139,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     errorEl.style.display = 'none';
 
     body.appendChild(noticesEl);
+    body.appendChild(historyRow);
     body.appendChild(formSection);
     body.appendChild(metaSummary);
     body.appendChild(previewSection);
@@ -166,6 +177,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
 
     els = {
       dialog: dlg,
+      body,
       closeBtn,
       cancelBtn,
       newPreviewBtn,
@@ -176,6 +188,8 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       confirmBtn,
       recoverBtn,
       focusBtn,
+      historyRow,
+      historySelect,
       formSection,
       noticesEl,
       metaSummary,
@@ -450,6 +464,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     if (els.recoverBtn) els.recoverBtn.style.display = 'none';
     if (els.focusBtn) els.focusBtn.style.display = 'none';
     if (els.newPreviewBtn) els.newPreviewBtn.style.display = 'none';
+    if (els.historyRow) els.historyRow.style.display = 'none';
 
     if (els.metaSummary) {
       els.metaSummary.textContent = '正在获取会话快照与环境配置…';
@@ -462,7 +477,10 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
   }
 
   function renderHistory({
+    actions = [],
+    selectedActionId = '',
     action,
+    onActionSelect = () => {},
     onRecover = () => {},
     onFocus = () => {},
     onNewPreview = () => {},
@@ -496,11 +514,73 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       '如需为同卡片新版本或不同智能体交接，请点击【新建预览】。',
     ]);
 
-    if (els.metaSummary) {
+    // 多个历史记录时展示历史动作切换下拉
+    if (Array.isArray(actions) && actions.length > 1 && els.historyRow && els.historySelect) {
+      els.historyRow.style.display = 'flex';
+      els.historySelect.innerHTML = '';
+      const currentSelectedId = selectedActionId || action?.actionId || '';
+      for (const act of actions) {
+        const opt = doc().createElement('option');
+        opt.value = act.actionId;
+        opt.textContent = `[r${act.source?.revision ?? '0'}] ${act.actionId} (${act.state}${act.agentId ? ` · ${act.agentId}` : ''})`;
+        if (act.actionId === currentSelectedId) opt.selected = true;
+        els.historySelect.appendChild(opt);
+      }
+      addListener(els.historySelect, 'change', (e) => onActionSelect(e.target.value));
+    } else if (els.historyRow) {
+      els.historyRow.style.display = 'none';
+    }
+
+    if (els.metaSummary && action) {
       els.metaSummary.textContent = `历史动作: ${action.actionId} (状态: ${action.state}) | 来源版本 r${action.source?.revision ?? '0'} | 智能体: ${action.agentId || '未指定'}`;
     }
     if (els.transcriptPre) {
       els.transcriptPre.textContent = '历史动作不包含正文快照，点击【新建预览】可基于当前最新保存版本交接。';
+    }
+    return true;
+  }
+
+  function renderError({
+    message = '',
+    onRetry = () => {},
+    onClose = () => {},
+  } = {}) {
+    if (!ensureMounted(onClose)) return false;
+    clearListeners();
+
+    const handleClose = () => {
+      close();
+      onClose();
+    };
+
+    if (els.closeBtn) addListener(els.closeBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.cancelBtn) addListener(els.cancelBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.recoverBtn) addListener(els.recoverBtn, 'click', () => onRetry());
+
+    addListener(dialog, 'keydown', (e) => {
+      if (e.key === 'Escape') {
+        e?.preventDefault?.();
+        handleClose();
+      }
+    });
+
+    if (els.formSection) els.formSection.style.display = 'none';
+    if (els.historyRow) els.historyRow.style.display = 'none';
+    if (els.nodesContainer) els.nodesContainer.innerHTML = '';
+    if (els.metaSummary) els.metaSummary.textContent = '历史交接记录查询异常';
+    if (els.transcriptPre) els.transcriptPre.textContent = '';
+
+    setError(message);
+
+    if (els.prepareBtn) els.prepareBtn.style.display = 'none';
+    if (els.confirmBtn) els.confirmBtn.style.display = 'none';
+    if (els.focusBtn) els.focusBtn.style.display = 'none';
+    if (els.newPreviewBtn) els.newPreviewBtn.style.display = 'none';
+
+    if (els.recoverBtn) {
+      els.recoverBtn.style.display = 'inline-block';
+      els.recoverBtn.disabled = false;
+      els.recoverBtn.textContent = '重试查询';
     }
     return true;
   }
@@ -543,6 +623,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       }
     });
 
+    if (els.historyRow) els.historyRow.style.display = 'none';
     if (els.formSection) els.formSection.style.display = 'flex';
 
     // 绑定 Agent 下拉
@@ -695,6 +776,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     open,
     openLoading,
     renderHistory,
+    renderError,
     renderNewPreview,
     updatePreview,
     markPreviewStale,
