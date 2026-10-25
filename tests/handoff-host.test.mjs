@@ -37,7 +37,8 @@ function homeReceipt(overrides = {}) {
     path: '/sessions/sess-1.jsonl',
     agentId: 'agent-a',
     visibility: 'public',
-    ownerPluginId: null,
+    // 真实宿主用创建者 App 盖章，home 不等于 owner 为 null
+    ownerPluginId: 'timeline-reverser',
     ...overrides,
   };
 }
@@ -65,6 +66,8 @@ function customReceipt(overrides = {}) {
 function makeSdk(options = {}) {
   const calls = { capabilities: [], create: [], context: [], stageFile: [], sendCustom: [], send: [], list: [] };
   const contextResults = Array.isArray(options.contextResults) ? [...options.contextResults] : null;
+  const createReceipts = Array.isArray(options.createReceipts) ? [...options.createReceipts] : null;
+  let createIndex = 0;
   let customIndex = 0;
 
   const sdk = {
@@ -72,6 +75,9 @@ function makeSdk(options = {}) {
       async create(input) {
         calls.create.push({ input, receiver: this });
         if (options.createError) throw options.createError;
+        if (createReceipts) {
+          return createReceipts[Math.min(createIndex++, createReceipts.length - 1)];
+        }
         return options.createReceipt ?? homeReceipt();
       },
       async context(input) {
@@ -212,7 +218,7 @@ test('create asks for a home session with memory disabled and accepts a public h
 
 test('create rejects an app-scoped receipt but carries the trusted session id', async () => {
   const { sdk } = makeSdk({
-    createReceipt: homeReceipt({ namespace: 'app', visibility: 'private', ownerPluginId: 'timeline-reverser' }),
+    createReceipt: homeReceipt({ namespace: 'app', visibility: 'private' }),
   });
   const host = createHandoffHost({ sdk });
 
@@ -220,6 +226,32 @@ test('create rejects an app-scoped receipt but carries the trusted session id', 
     assert.equal(error.code, 'HANDOFF_INVALID_SESSION');
     assert.equal(error.sessionId, 'sess-1');
     assert.equal(error.details?.sessionId, 'sess-1');
+    return true;
+  });
+});
+
+test('create accepts a home public receipt whose owner is null or absent', async () => {
+  const { sdk } = makeSdk({
+    createReceipts: [
+      homeReceipt({ sessionId: 'sess-null', ownerPluginId: null }),
+      homeReceipt({ sessionId: 'sess-absent', ownerPluginId: undefined }),
+    ],
+  });
+  const host = createHandoffHost({ sdk });
+
+  assert.deepEqual(await host.create({ agentId: 'agent-a' }), { sessionId: 'sess-null' });
+  assert.deepEqual(await host.create({ agentId: 'agent-a' }), { sessionId: 'sess-absent' });
+});
+
+test('create rejects a receipt owned by another app but carries the trusted session id', async () => {
+  const { sdk } = makeSdk({
+    createReceipt: homeReceipt({ sessionId: 'sess-other-app', ownerPluginId: 'another-app' }),
+  });
+
+  await assert.rejects(createHandoffHost({ sdk }).create({ agentId: 'agent-a' }), error => {
+    assert.equal(error.code, 'HANDOFF_INVALID_SESSION');
+    assert.equal(error.sessionId, 'sess-other-app');
+    assert.equal(error.details?.sessionId, 'sess-other-app');
     return true;
   });
 });
@@ -280,7 +312,7 @@ test('isIdle surfaces a refused context read instead of claiming the session is 
 
   await assert.rejects(createHandoffHost({ sdk }).isIdle('sess-1'), error => {
     assert.equal(error.code, 'HANDOFF_PERMISSION_MISSING');
-    assert.match(error.message, /permission denied/);
+    assert.equal(error.message, '宿主拒绝了这项操作');
     return true;
   });
 });
@@ -378,33 +410,34 @@ test('writeContext only accepts ok with notifyOnly mode and a trusted entry id',
 // 错误可见性
 // ---------------------------------------------------------------------------
 
-test('host failures keep their message and get a stable code', async () => {
-  const denied = makeSdk({ sendCustomError: new Error('permission denied for app/sessions.manage') });
-  await assert.rejects(
-    createHandoffHost({ sdk: denied.sdk }).writeContext({ sessionId: 'sess-1', content: '正文', details: {} }),
-    error => {
-      assert.equal(error.code, 'HANDOFF_PERMISSION_MISSING');
-      assert.match(error.message, /permission denied/);
-      return true;
-    },
-  );
+test('host failures get a stable code without echoing the raw host message', async () => {
+  // 宿主报错可能夹带正文、私有路径或凭据：只允许在内存里分类，绝不回传原文
+  const sentinel = 'SecretPath-/home/user/private/report.md Bearer-sentinel-token-7f3a body-sentinel';
+  const cases = [
+    [new Error(`permission denied: ${sentinel}`), 'HANDOFF_PERMISSION_MISSING', '宿主拒绝了这项操作'],
+    [new Error(`socket closed ${sentinel}`), 'HANDOFF_HOST_ERROR', '宿主调用失败'],
+  ];
 
-  const broken = makeSdk({ sendCustomError: new Error('socket closed') });
-  await assert.rejects(
-    createHandoffHost({ sdk: broken.sdk }).writeContext({ sessionId: 'sess-1', content: '正文', details: {} }),
-    error => {
-      assert.equal(error.code, 'HANDOFF_HOST_ERROR');
-      assert.match(error.message, /socket closed/);
-      return true;
-    },
-  );
+  for (const [failure, code, safeMessage] of cases) {
+    const { sdk } = makeSdk({ sendCustomError: failure });
+    await assert.rejects(
+      createHandoffHost({ sdk }).writeContext({ sessionId: 'sess-1', content: '正文', details: {} }),
+      error => {
+        assert.equal(error.code, code);
+        assert.equal(error.message, safeMessage);
+        assert.doesNotMatch(error.message, /sentinel/i);
+        assert.doesNotMatch(JSON.stringify(error.details ?? null), /sentinel/i);
+        return true;
+      },
+    );
+  }
 });
 
 test('create failures are classified without inventing a session id', async () => {
   const { sdk } = makeSdk({ createError: new Error('host unavailable') });
   await assert.rejects(createHandoffHost({ sdk }).create({ agentId: 'agent-a' }), error => {
     assert.equal(error.code, 'HANDOFF_HOST_ERROR');
-    assert.match(error.message, /host unavailable/);
+    assert.equal(error.message, '宿主调用失败');
     assert.equal(error.sessionId, undefined);
     return true;
   });
