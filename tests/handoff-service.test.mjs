@@ -397,7 +397,8 @@ test('a failing stage keeps the known session and earlier files, and a repeated 
   const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
   const first = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
   assert.equal(first.body.ok, true);
-  assert.ok(['failed', 'partial', 'unknown'].includes(first.body.action.state));
+  // stage 调用已发出且无可信回执：未知，不是明确 failed/partial
+  assert.equal(first.body.action.state, 'unknown');
   assert.equal(first.body.action.sessionId, 'sess-1');
   assert.equal(first.body.action.files.length, 1);
   assert.equal(first.body.action.errorCode?.startsWith('HANDOFF_'), true);
@@ -506,7 +507,8 @@ test('archive and custom failures keep known receipts and stop later host writes
     const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
     const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
     assert.equal(response.body.ok, true);
-    assert.equal(response.body.action.state, 'partial', mode);
+    // 已调用 stage 但无可信回执：只能是未知，不能假定明确失败
+    assert.equal(response.body.action.state, 'unknown', mode);
     assert.equal(response.body.action.sessionId, 'sess-1', mode);
     assert.equal(response.body.action.files.length, mode === 'archive' ? 1 : 2, mode);
     if (mode === 'archive') assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
@@ -567,16 +569,70 @@ test('only two different actions can confirm at once and the third is busy befor
     harness.call('POST', '/api/handoff/confirm', { body: { actionId: first.actionId } }),
     harness.call('POST', '/api/handoff/confirm', { body: { actionId: second.actionId } }),
   ];
-  // 等两个确认都进入 stage 前的停顿
-  while (host.calls.filter(call => call[0] === 'stage').length < 2) await new Promise(resolve => setTimeout(resolve, 5));
-  const busy = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: third.actionId } });
-  assert.equal(busy.status, 409);
-  assert.equal(busy.body.code, 'HANDOFF_BUSY');
-  assert.equal((await store.get({ owner: OWNER, actionId: third.actionId })).action.state, 'prepared');
-
-  release();
+  try {
+    // 等两个确认都进入 stage 前的停顿（有界等待，失败也会释放栅栏）
+    await waitFor(() => host.calls.filter(call => call[0] === 'stage').length >= 2, '两个确认进入 stage');
+    const busy = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: third.actionId } });
+    assert.equal(busy.status, 409);
+    assert.equal(busy.body.code, 'HANDOFF_BUSY');
+    assert.equal((await store.get({ owner: OWNER, actionId: third.actionId })).action.state, 'prepared');
+  } finally {
+    release();
+  }
   const results = await Promise.all(pending);
   assert.ok(results.every(result => result.body.ok));
+});
+
+test('a precheck failure releases the confirmation slot for the next actions', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const c1 = 'c'.repeat(32);
+  const entries = {
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+    [c1]: artifactFixture(c1, 'c-body'),
+  };
+  let armed = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const seen = [];
+  const artifacts = {
+    calls: seen,
+    async read({ artifactId }) {
+      if (!entries[artifactId]) throw Object.assign(new Error('missing'), { code: 'ARTIFACT_NOT_FOUND' });
+      if (!armed) return entries[artifactId];
+      seen.push(artifactId);
+      if (artifactId === a1) {
+        throw Object.assign(new Error('precheck failed'), { code: 'ARTIFACT_NOT_FOUND' });
+      }
+      await gate;
+      return entries[artifactId];
+    },
+  };
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const first = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+  const second = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [b1] })));
+  const third = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [c1] })));
+
+  armed = true;
+  // 预检失败的确认不能把名额永久占住
+  const failed = await confirmViaRoute(harness, first.actionId);
+  assert.equal(failed.body.ok, false);
+  assert.equal((await store.get({ owner: OWNER, actionId: first.actionId })).action.state, 'prepared');
+
+  const pending = [confirmViaRoute(harness, second.actionId), confirmViaRoute(harness, third.actionId)];
+  try {
+    // 两个后续确认都拿到了名额并进入复核（预检失败没有把名额占住）
+    await waitFor(() => seen.includes(b1) && seen.includes(c1), '两个后续确认都进入复核');
+  } finally {
+    release();
+  }
+  const results = await Promise.all(pending);
+  assert.ok(results.every(result => result.body.ok), '预检失败后名额应可复用');
+  assert.ok(results.every(result => result.body.action.state === 'ready'));
 });
 
 test('all 16 artifacts plus the archive are staged and recorded as 17 files', async () => {
@@ -906,7 +962,9 @@ test('C-I3: a repeat confirm of a running action only queries and never drops th
         await gate;
         return entry;
       }
-      throw Object.assign(new Error('重复 confirm 不应再次读取产物'), { code: 'ARTIFACT_NOT_FOUND' });
+      // 第 2 次是 claim 后的正式复核，允许；第 3 次只可能是重复确认又去读产物
+      if (reads > 2) throw Object.assign(new Error('重复 confirm 不应再次读取产物'), { code: 'ARTIFACT_NOT_FOUND' });
+      return entry;
     },
   };
   const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });

@@ -106,6 +106,13 @@ test('C-I7: local 413/403/404 refusals keep their own code, status and short wor
   }
 });
 
+test('C-I7: a local error outside the status table keeps its own status and short wording', async () => {
+  const response = fail(jsonContext(), httpError('HANDOFF_PREPARE_TOO_LARGE', '交接载荷超过上限', 400));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.code, 'HANDOFF_PREPARE_TOO_LARGE');
+  assert.equal(response.body.error, '交接载荷超过上限');
+});
+
 // ---------------------------------------------------------------------------
 // M1：没有有界 raw stream 时直接拒绝，不先做无界读取
 // ---------------------------------------------------------------------------

@@ -92,6 +92,8 @@ const ARTIFACT_ID_REGEX = /^[a-f0-9]{32}$/;
 export { ARTIFACT_ID_REGEX };
 const TOKEN_REGEX = /^[A-Za-z0-9_.:@~+-]{1,200}$/;
 const MIME_REGEX = /^[A-Za-z0-9!#$&^_.+-]{1,60}\/[A-Za-z0-9!#$&^_.+-]{1,60}$/;
+/** 宿主 fileId：只允许短标识字符，绝不接受路径分隔符 */
+const FILE_ID_REGEX = /^[A-Za-z0-9_.:@~+-]{1,200}$/;
 const MESSAGE_STATUSES = Object.freeze(['ok', 'failed', 'cancelled', 'partial']);
 
 export function handoffError(code, message, details) {
@@ -619,21 +621,32 @@ export function validateHandoffContext(value) {
   return context;
 }
 
+/**
+ * 单个宿主文件回执的公共校验（纯函数，服务端与 formatter 共用这一份规则）。
+ *
+ * 只接受 fileId/name/mime 三个字段，其余字段（路径、会话、大小等）一律丢弃；
+ * 传进来的 fileId 必须是短标识，不接受 `/private/path` 这类 ID。
+ */
+export function normalizeHandoffFileReceipt(raw, index = 0) {
+  if (!isPlainObject(raw)) {
+    throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执不是对象`);
+  }
+  if (typeof raw.fileId !== 'string' || !FILE_ID_REGEX.test(raw.fileId)) {
+    throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执缺少宿主 fileId`);
+  }
+  const name = sanitizeLabel(raw.name, 120, '文件名');
+  if (!name) throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执缺少文件名`);
+  if (typeof raw.mime !== 'string' || !MIME_REGEX.test(raw.mime)) {
+    throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执的 mime 不合法`);
+  }
+  return { fileId: raw.fileId, name, mime: raw.mime };
+}
+
 function renderFileIndex(files, archiveFile) {
   const receipts = [];
   const normalizeReceipt = (raw, index, isArchive) => {
-    if (!isPlainObject(raw)) {
-      throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执不是对象`);
-    }
-    if (typeof raw.fileId !== 'string' || !/^[A-Za-z0-9_.:@~+-]{1,200}$/.test(raw.fileId)) {
-      throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执缺少宿主 fileId`);
-    }
-    const name = sanitizeLabel(raw.name, 120, '文件名');
-    if (!name) throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执缺少文件名`);
-    if (typeof raw.mime !== 'string' || !MIME_REGEX.test(raw.mime)) {
-      throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, `第 ${index + 1} 个文件回执的 mime 不合法`);
-    }
-    return { fileId: raw.fileId, name, mime: raw.mime, isArchive };
+    const receipt = normalizeHandoffFileReceipt(raw, index);
+    return { ...receipt, isArchive };
   };
   if (files !== undefined && files !== null) {
     if (!Array.isArray(files)) throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_FILE, '文件回执必须是数组');
