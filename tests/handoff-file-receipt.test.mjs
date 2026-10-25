@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  HANDOFF_LIMITS,
   formatHandoffTranscript,
   normalizeHandoffFileReceipt,
+  validateHandoffContext,
 } from '../ui/assets/fork-handoff-contract.js';
 import { buildHandoffContext } from '../ui/assets/fork-handoff-context.js';
 
@@ -118,4 +120,95 @@ test('formatter rejects exactly the receipts the helper rejects', () => {
       `formatter: ${JSON.stringify(receipt)}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// 正文预算与文件索引预算的分界：索引插入新带的 join 分隔 LF 算索引，不算正文
+// ---------------------------------------------------------------------------
+
+const BODY_BUDGET = HANDOFF_LIMITS.maxTranscriptBytes - HANDOFF_LIMITS.fileIndexReserveBytes;
+const ARCHIVE_RECEIPT = { fileId: 'file-archive', name: 'handoff.md', mime: 'text/markdown' };
+
+/** 手工构造合法 DTO（编译器会提前拒超限，这里直接造协议层输入） */
+function dtoWithText(chars) {
+  return {
+    schemaVersion: 1,
+    source: { canvasId: 'canvas-1', revision: 'rev-1', targetCardId: 'card-1' },
+    agentId: 'agent-a',
+    nextStep: '继续处理',
+    nodes: [{
+      cardId: 'card-1',
+      title: '目标',
+      parentIds: [],
+      contextMode: 'include',
+      doc: null,
+      messages: [{
+        role: 'user',
+        text: 'x'.repeat(chars),
+        agentName: '',
+        status: 'ok',
+        attachments: [],
+        artifactIds: [],
+      }],
+      artifactIds: [],
+    }],
+    references: [],
+    referenceSources: [],
+    artifactIds: [],
+    exclusions: [],
+    omissions: { localNoticeCount: 0 },
+    unsent: [],
+    notices: [],
+    stats: { nodeCount: 0, transcriptBytes: 0 },
+  };
+}
+
+function contextAtExactBodyBudget() {
+  const probeBytes = validateHandoffContext(dtoWithText(1000)).stats.transcriptBytes;
+  const chars = 1000 + (BODY_BUDGET - probeBytes);
+  const context = validateHandoffContext(dtoWithText(chars));
+  assert.equal(context.stats.transcriptBytes, BODY_BUDGET, '夹具必须恰好落在正文预算上');
+  return context;
+}
+
+function fileSectionOf(text) {
+  const start = text.indexOf('## 交付文件索引');
+  const end = text.indexOf('## 尚未执行的下一步要求');
+  assert.ok(start >= 0 && end > start, '渲染结果必须包含文件索引与下一步要求');
+  return text.slice(start, end);
+}
+
+test('a context exactly at the body budget still formats once an archive receipt is added', () => {
+  const context = contextAtExactBodyBudget();
+  const bodyOnly = formatHandoffTranscript(context);
+  assert.equal(Buffer.byteLength(bodyOnly, 'utf8'), BODY_BUDGET, '无索引时正文计量与 stats 对齐');
+
+  // 索引插入发生在正文中间，join 会多一个分隔 LF；它属于索引预算，不属于正文
+  const withArchive = formatHandoffTranscript(context, { archiveFile: ARCHIVE_RECEIPT });
+  const fileSection = fileSectionOf(withArchive);
+  assert.equal(
+    Buffer.byteLength(withArchive, 'utf8'),
+    BODY_BUDGET + 1 + Buffer.byteLength(fileSection, 'utf8'),
+    '总字节 = 正文预算 + 索引 + 一个分隔 LF',
+  );
+  assert.ok(withArchive.includes('## 交付文件索引'), '索引必须真的插进输出');
+  assert.ok(Buffer.byteLength(withArchive, 'utf8') <= HANDOFF_LIMITS.maxTranscriptBytes);
+});
+
+test('one byte over the body budget is still refused after formatting an index', () => {
+  const probeBytes = validateHandoffContext(dtoWithText(1000)).stats.transcriptBytes;
+  const chars = 1000 + (BODY_BUDGET - probeBytes) + 1;
+  const over = validateHandoffContext(dtoWithText(chars));
+  assert.equal(over.stats.transcriptBytes, BODY_BUDGET + 1);
+
+  assert.throws(
+    () => formatHandoffTranscript(over, { archiveFile: ARCHIVE_RECEIPT }),
+    error => {
+      assert.equal(error?.code, 'HANDOFF_TRANSCRIPT_TOO_LARGE');
+      assert.equal(error?.details?.bytes, BODY_BUDGET + 1, '超限计量只算正文');
+      return true;
+    },
+  );
+  // 无索引时同样拒绝，二者一致
+  assert.throws(() => formatHandoffTranscript(over), error => error?.code === 'HANDOFF_TRANSCRIPT_TOO_LARGE');
 });

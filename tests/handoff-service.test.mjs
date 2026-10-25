@@ -1470,3 +1470,36 @@ test('I1: the exact transcript budget is accepted and one byte more is refused',
   assert.equal(confirmed.body.action.state, 'ready');
 });
 
+test('I1: a prepared context exactly at the body budget reaches ready, not partial', async () => {
+  const dataDir = await makeDir();
+  const probeBytes = transcriptBytesFor(1000);
+  const exactChars = 1000 + (TRANSCRIPT_BUDGET - probeBytes);
+  const exactDto = bigHandoffDto(exactChars);
+  assert.equal(validateHandoffContext(exactDto).stats.transcriptBytes, TRANSCRIPT_BUDGET);
+
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+
+  const prepared = await prepareViaRoute(harness, exactDto);
+  assert.equal(prepared.status, 200, JSON.stringify(prepared.body).slice(0, 200));
+
+  // 归档回执进 final formatter 后不能再因那 1 字节 join 分隔变成 partial
+  const confirmed = await confirmViaRoute(harness, prepared.body.action.actionId);
+  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body).slice(0, 200));
+  assert.equal(confirmed.body.action.state, 'ready', '边界同值必须能跑完完整交付');
+  assert.equal(confirmed.body.action.entryId, 'entry-1');
+  assert.equal(confirmed.body.action.files.length, 1, '只有归档回执');
+  assert.equal(host.calls.filter(call => call[0] === 'writeContext').length, 1);
+
+  // 同样的边界 +1 仍要在副作用前被拒
+  const overContext = validateHandoffContext(bigHandoffDto(exactChars + 1));
+  assert.equal(overContext.stats.transcriptBytes, TRANSCRIPT_BUDGET + 1);
+  const seeded = await store.prepare({ owner: OWNER, context: overContext });
+  const before = host.calls.length;
+  const refused = await confirmViaRoute(harness, seeded.actionId);
+  assert.equal(refused.status, 413);
+  assert.equal(refused.body.code, 'HANDOFF_TRANSCRIPT_TOO_LARGE');
+  assert.equal(host.calls.length, before, '超限不得 create/stage/idle');
+});
+
