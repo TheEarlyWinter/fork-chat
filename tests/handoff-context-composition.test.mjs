@@ -1,3 +1,8 @@
+// 保护交接上下文的组装与呈现：节点排序、业务内容判定、notice 文案、
+// 格式化器输入校验。这三块共享同一份 build + validate + format 链路，
+// 任何一处改动都会影响另外两处，因此合在一个文件里一起回归。
+// 用例来自 handoff-meta-fixes 与 handoff-round2-fixes 中与组装相关的部分。
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -41,6 +46,12 @@ function fails(fn, code) {
     assert.equal(error.code, code, `期望 ${code}，实际 ${error.code}：${error.message}`);
     return true;
   });
+}
+
+const aid = (seed) => String(seed).padStart(2, '0').repeat(16);
+
+function ref(id, sourceCardId, text = 'REF-TEXT') {
+  return { id, sourceCardId, sourceTitle: '来源', text };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +176,58 @@ test('blank nextStep does not produce a pending notice', () => {
   assert.equal(context.nextStep, '');
   assert.equal(context.notices.some(notice => notice.code === 'NEXT_STEP_PENDING'), false);
   assert.ok(formatHandoffTranscript(context).includes('（用户没有填写下一步要求。）'));
+});
+
+// ---------------------------------------------------------------------------
+// 3) 业务内容按实际正文判断
+// ---------------------------------------------------------------------------
+
+test('blank messages without attachments are not business content', () => {
+  fails(() => build([
+    card('T', { messages: [msg('user', '   ')] }),
+  ], 'T'), 'HANDOFF_NO_CONTENT');
+
+  const context = build([
+    card('T', { messages: [msg('user', 'Q')] }),
+  ], 'T');
+  const blanked = clone(context);
+  blanked.nodes[0].messages[0].text = '   ';
+  fails(() => validateHandoffContext(blanked), 'HANDOFF_NO_CONTENT');
+});
+
+test('only excluded references are not business content', () => {
+  const context = build([
+    card('A', { messages: [msg('user', 'ROOT-BODY')] }),
+    card('S', { parents: ['A'], contextMode: 'exclude', messages: [msg('assistant', 'EXCLUDED-BODY')] }),
+    card('T', {
+      parents: ['A'],
+      messages: [msg('user', '')],
+      contextRefs: [ref('ref-1', 'S', 'SAVED-REF-TEXT')],
+    }),
+  ], 'T');
+  // 引用正文因来源被排除而不导入，目标消息又为空 → 没有业务内容
+  assert.equal(context.references[0].included, false);
+  assert.equal(context.references[0].text, '');
+  const stripped = clone(context);
+  stripped.nodes = stripped.nodes.filter(node => node.cardId === 'T');
+  stripped.nodes[0].parentIds = [];
+  stripped.exclusions = [];
+  stripped.referenceSources = [{ cardId: 'S', exists: true, contextMode: 'exclude' }];
+  fails(() => validateHandoffContext(stripped), 'HANDOFF_NO_CONTENT');
+});
+
+test('artifact-only contexts count as business content', () => {
+  const context = build([
+    card('T', { messages: [msg('user', 'Q')] }),
+  ], 'T');
+  const artifactOnly = clone(context);
+  artifactOnly.nodes[0].messages = [];
+  artifactOnly.nodes[0].artifactIds = [aid(7)];
+  artifactOnly.artifactIds = [aid(7)];
+  artifactOnly.references = [];
+  artifactOnly.referenceSources = [];
+  const validated = validateHandoffContext(artifactOnly);
+  assert.deepEqual(validated.artifactIds, [aid(7)]);
 });
 
 // ---------------------------------------------------------------------------
