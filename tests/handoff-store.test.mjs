@@ -1236,3 +1236,220 @@ test('a claim can finish after TTL and a rewound clock cannot write updatedAt ba
   const ready = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1' } });
   assert.equal(ready.state, 'ready');
 });
+
+// ---------------------------------------------------------------------------
+// 14. fix3 I5：P/D decision 矩阵与完整清理故障
+// ---------------------------------------------------------------------------
+
+async function seedTombstone(dataDir, { actionId, publish, dispatch, withRecord = true }) {
+  const root = ownerRoot(dataDir);
+  const slotDir = path.join(root, 'slots', '0');
+  const actionDir = path.join(root, 'actions', actionId);
+  await realFs.mkdir(slotDir, { recursive: true, mode: 0o700 });
+  await realFs.mkdir(actionDir, { recursive: true, mode: 0o700 });
+  await realFs.writeFile(
+    path.join(slotDir, `${actionId}.json`),
+    JSON.stringify({ actionId, payloadBytes: 10, createdAt: new Date(NOW).toISOString() }),
+    { mode: 0o600 },
+  );
+  await realFs.writeFile(path.join(actionDir, 'payload.json'), 'payload', { mode: 0o600 });
+  if (withRecord) await realFs.writeFile(path.join(actionDir, 'record.json'), '{}', { mode: 0o600 });
+  if (publish !== null) await realFs.writeFile(path.join(actionDir, 'publish.decision'), publish, { mode: 0o600 });
+  if (dispatch !== null) await realFs.writeFile(path.join(actionDir, 'dispatch.decision'), dispatch, { mode: 0o600 });
+  return actionDir;
+}
+
+async function slotHasAction(dataDir, actionId) {
+  for (const slot of await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'))) {
+    if ((await realFs.readdir(path.join(ownerRoot(dataDir), 'slots', slot))).includes(`${actionId}.json`)) return true;
+  }
+  return false;
+}
+
+test('an unknown publish decision keeps payload, record and slot instead of being cleaned as unpublished', async () => {
+  const dataDir = await makeDir();
+  let written = 0;
+  const fs = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (...args) => {
+          if (String(args[0]).endsWith('publish.decision') && args[1] === 'wx') {
+            await target.writeFile(args[0], 'garbage', { mode: 0o600 });
+            written += 1;
+            const error = new Error('injected publish failure');
+            error.code = 'EIO';
+            throw error;
+          }
+          return target.open(...args);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = createHandoffStore({ dataDir, fs, clock: () => NOW });
+
+  await assert.rejects(store.prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_IO);
+  assert.equal(written, 1);
+  const [actionId] = await realFs.readdir(path.join(ownerRoot(dataDir), 'actions'));
+  assert.equal(await realFs.readFile(path.join(ownerRoot(dataDir), 'actions', actionId, 'publish.decision'), 'utf8'), 'garbage');
+  assert.equal((await realFs.lstat(path.join(ownerRoot(dataDir), 'actions', actionId, 'payload.json'))).isFile(), true);
+  assert.equal((await realFs.lstat(path.join(ownerRoot(dataDir), 'actions', actionId, 'record.json'))).isFile(), true);
+  assert.equal(await slotHasAction(dataDir, actionId), true);
+});
+
+test('publish-retire with a claim or unknown dispatch preserves data and slot, with or without record', async () => {
+  const cases = [
+    { dispatch: JSON.stringify({ decision: 'claim', nonce: 'n1', claimedAt: new Date(NOW).toISOString() }), withRecord: true },
+    { dispatch: JSON.stringify({ decision: 'claim', nonce: 'n1', claimedAt: new Date(NOW).toISOString() }), withRecord: false },
+    { dispatch: 'garbage', withRecord: true },
+    { dispatch: 'garbage', withRecord: false },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const dataDir = await makeDir();
+    const actionId = `ha_${String(index).repeat(32)}`;
+    const actionDir = await seedTombstone(dataDir, {
+      actionId,
+      publish: 'retire',
+      dispatch: item.dispatch,
+      withRecord: item.withRecord,
+    });
+
+    await makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() });
+    assert.equal((await realFs.lstat(path.join(actionDir, 'payload.json'))).isFile(), true, `case ${index} payload 应保留`);
+    assert.equal(await slotHasAction(dataDir, actionId), true, `case ${index} slot 应保留`);
+  }
+});
+
+test('publish-retire with no dispatch or retire recovers and releases only the exact slot', async () => {
+  for (const dispatch of [null, 'retire']) {
+    const dataDir = await makeDir();
+    const actionId = 'ha_' + 'e'.repeat(32);
+    const actionDir = await seedTombstone(dataDir, { actionId, publish: 'retire', dispatch });
+    await makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() });
+    await assert.rejects(realFs.lstat(path.join(actionDir, 'payload.json')), error => error.code === 'ENOENT');
+    assert.equal(await slotHasAction(dataDir, actionId), false);
+  }
+});
+
+test('a failed reservation-sync cleanup reports the injected unlink cause and keeps the reservation', async () => {
+  const dataDir = await makeDir();
+  const fs = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (...args) => {
+          const handle = await target.open(...args);
+          const filePath = String(args[0]);
+          return {
+            writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
+            readFile: (...readArgs) => handle.readFile(...readArgs),
+            close: () => handle.close(),
+            stat: (...statArgs) => handle.stat(...statArgs),
+            sync: async () => {
+              if (filePath.endsWith('/slots')) {
+                const error = new Error('injected slot dir sync failure');
+                error.code = 'EIO';
+                throw error;
+              }
+              return handle.sync();
+            },
+          };
+        };
+      }
+      if (prop === 'unlink') {
+        return async filePath => {
+          if (String(filePath).includes('/slots/') && String(filePath).endsWith('.json')) {
+            const error = new Error('injected unlink failure');
+            error.code = 'EACCES';
+            throw error;
+          }
+          return target.unlink(filePath);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+
+  await assert.rejects(
+    createHandoffStore({ dataDir, fs, clock: () => NOW }).prepare({ owner: OWNER, context: handoffContext() }),
+    error => {
+      assert.equal(error.code, CODES.STORE_IO);
+      assert.equal(error.cause?.code, 'EACCES');
+      return true;
+    },
+  );
+  const slots = await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'));
+  assert.ok(slots.length > 0, '清理失败必须保留 slot 预约供恢复');
+});
+
+test('discard directory-sync and rmdir failures are observed and keep the reservation', async () => {
+  for (const mode of ['action-sync', 'parent-sync']) {
+    const dataDir = await makeDir();
+    const fs = new Proxy(realFs, {
+      get(target, prop) {
+        if (prop === 'open') {
+          return async (...args) => {
+            const filePath = String(args[0]);
+            if (filePath.endsWith('publish.decision') && args[1] === 'wx') {
+              const error = new Error('injected publish failure');
+              error.code = 'EIO';
+              throw error;
+            }
+            const handle = await target.open(...args);
+            return {
+              writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
+              readFile: (...readArgs) => handle.readFile(...readArgs),
+              close: () => handle.close(),
+              stat: (...statArgs) => handle.stat(...statArgs),
+              sync: async () => {
+                const shouldFail = mode === 'action-sync'
+                  ? filePath.includes('/actions/')
+                  : filePath.endsWith('/actions');
+                if (shouldFail) {
+                  const error = new Error(`injected ${mode} failure`);
+                  error.code = 'EIO';
+                  throw error;
+                }
+                return handle.sync();
+              },
+            };
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await assert.rejects(
+      createHandoffStore({ dataDir, fs, clock: () => NOW }).prepare({ owner: OWNER, context: handoffContext() }),
+      error => {
+        assert.equal(error.code, CODES.STORE_IO);
+        assert.equal(error.cause?.code, 'EIO', mode);
+        return true;
+      },
+    );
+    const reservedIds = [];
+    for (const slot of await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'))) {
+      for (const name of await realFs.readdir(path.join(ownerRoot(dataDir), 'slots', slot))) reservedIds.push(name.replace(/\.json$/, ''));
+    }
+    assert.equal(reservedIds.length, 1, mode);
+    assert.equal(await slotHasAction(dataDir, reservedIds[0]), true, mode);
+  }
+});
+
+test('an unreadable dispatch decision preserves published data and slot', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  const dispatchPath = path.join(ownerRoot(dataDir), 'actions', action.actionId, 'dispatch.decision');
+  await realFs.writeFile(dispatchPath, 'garbage', { mode: 0o600 });
+  await realFs.chmod(dispatchPath, 0o000);
+  try {
+    await assert.rejects(makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_IO);
+    assert.equal((await realFs.lstat(path.join(ownerRoot(dataDir), 'actions', action.actionId, 'payload.json'))).isFile(), true);
+    assert.equal(await slotHasAction(dataDir, action.actionId), true);
+  } finally {
+    await realFs.chmod(dispatchPath, 0o600);
+  }
+});
