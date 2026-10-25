@@ -237,7 +237,7 @@ async function loadModule(relative, imports, extra = {}) {
 }
 
 const hosts = new WeakMap();
-function createImports(hana, flashes) {
+function createImports(hana, flashes, captures = { handoff: [], documents: [] }) {
   if (!hosts.has(hana)) {
     const host = memoryHost();
     hana.storage ||= host.storage;
@@ -255,7 +255,14 @@ function createImports(hana, flashes) {
     './panel-layout.js': panelLayout,
     './panel-shortcuts.js': panelShortcuts,
     './panel-format.js': panelFormat,
-    './panel-documents.js': panelDocuments,
+    './panel-documents.js': {
+      ...panelDocuments,
+      createDocumentPipeline(deps) {
+        const pipeline = panelDocuments.createDocumentPipeline(deps);
+        captures.documents.push({ pipeline, deps });
+        return pipeline;
+      },
+    },
     './panel-artifact-view.js': panelArtifactView,
     './panel-artifact-panel.js': panelArtifactPanel,
     './panel-chat-engine.js': panelChatEngine,
@@ -276,7 +283,13 @@ function createImports(hana, flashes) {
     './panel-context.js': panelContext,
     './panel-bridge-send.js': panelBridgeSend,
     './panel-bridge-intents.js': panelBridgeIntents,
-    './panel-handoff.js': panelHandoff,
+    './panel-handoff.js': {
+      ...panelHandoff,
+      createPanelHandoff(deps) {
+        captures.handoff.push(deps);
+        return panelHandoff.createPanelHandoff(deps);
+      },
+    },
     './panel-bridge.js': panelBridge,
     './panel-document-ui.js': panelDocumentUi,
     './panel-card-gestures.js': panelCardGestures,
@@ -291,11 +304,20 @@ function createImports(hana, flashes) {
   };
 }
 
-export async function loadPanel({ onRequest = async () => Response.json({}) } = {}) {
+export async function loadPanel({
+  onRequest = async () => Response.json({}),
+  agents = [{ id: 'agent-sol', name: 'Sol Architect' }],
+} = {}) {
   const ui = uiEnvironment();
   ui.environment.Blob = Blob;
   const calls = [];
   const flashes = [];
+  const captures = { handoff: [], documents: [] };
+  const firstAgent = agents[0];
+  if (firstAgent?.id) ui.environment.localStorage.setItem('fork_chat_active_agent_id', firstAgent.id);
+  if (firstAgent?.name) ui.environment.localStorage.setItem('fork_chat_active_agent_name', firstAgent.name);
+  if (firstAgent?.model) ui.environment.localStorage.setItem('fork_chat_active_agent_model', firstAgent.model);
+  if (firstAgent?.provider) ui.environment.localStorage.setItem('fork_chat_active_agent_provider', firstAgent.provider);
   const hana = {
     ready() {},
     sessions: { onActiveChanged() { return () => {}; }, focus: async () => ({ ok: true }) },
@@ -304,7 +326,7 @@ export async function loadPanel({ onRequest = async () => Response.json({}) } = 
         const body = init.body ? JSON.parse(init.body) : null;
         const call = { route, init, body };
         calls.push(call);
-        if (route === '/api/agents') return Response.json({ ok: true, agents: [{ id: 'agent-sol', name: 'Sol Architect' }] });
+        if (route === '/api/agents') return Response.json({ ok: true, agents });
         if (route === '/api/bridge/intents') return Response.json({ intents: [] });
         if (route === '/api/bridge/sessions') return Response.json({ sessions: [] });
         if (route === '/api/bridge/actions') return Response.json({ actions: [] });
@@ -312,8 +334,17 @@ export async function loadPanel({ onRequest = async () => Response.json({}) } = 
       },
     },
   };
-  const dependencies = createImports(hana, flashes);
+  const dependencies = createImports(hana, flashes, captures);
   const host = hosts.get(hana);
   await loadModule('../../ui/assets/panel.js', dependencies, ui.environment);
-  return { ui, hana, host, calls, flashes, panel: ui.environment.window.__forkChat };
+  return {
+    ui,
+    hana,
+    host,
+    calls,
+    flashes,
+    panel: ui.environment.window.__forkChat,
+    handoffCompositions: captures.handoff,
+    documentPipelines: captures.documents,
+  };
 }
