@@ -1053,3 +1053,186 @@ test('slot names outside 0..31 and nested entries fail closed', async () => {
   await realFs.mkdir(path.join(slot0, 'nested'), { mode: 0o700 });
   await assert.rejects(makeStore(nestedDir).prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_CORRUPT);
 });
+
+// ---------------------------------------------------------------------------
+// 12. fix2 I5：未发布清理失败必须可见，可信墓碑可续次恢复
+// ---------------------------------------------------------------------------
+
+test('prepare reports a cleanup failure instead of swallowing unlink errors as a clean abort', async () => {
+  const dataDir = await makeDir();
+  let unlinkAttempts = 0;
+  const fs = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (...args) => {
+          if (String(args[0]).endsWith('publish.decision') && args[1] === 'wx') {
+            const error = new Error('injected publish failure');
+            error.code = 'EIO';
+            throw error;
+          }
+          return target.open(...args);
+        };
+      }
+      if (prop === 'unlink') {
+        return async filePath => {
+          if (String(filePath).endsWith('payload.json')) {
+            unlinkAttempts += 1;
+            const error = new Error('injected unlink failure');
+            error.code = 'EACCES';
+            throw error;
+          }
+          return target.unlink(filePath);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = createHandoffStore({ dataDir, fs, clock: () => NOW });
+
+  await assert.rejects(store.prepare({ owner: OWNER, context: handoffContext() }), error => {
+    assert.equal(error.code, CODES.STORE_IO);
+    // 命中注入点：清理失败必须是错误原因，不能被当成已清完
+    assert.equal(error.cause?.code, 'EACCES');
+    return true;
+  });
+  assert.equal(unlinkAttempts, 1);
+
+  const actionIds = await realFs.readdir(path.join(ownerRoot(dataDir), 'actions'));
+  assert.equal(actionIds.length, 1);
+  assert.equal((await realFs.lstat(path.join(ownerRoot(dataDir), 'actions', actionIds[0], 'payload.json'))).isFile(), true);
+  const slots = await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'));
+  let reserved = false;
+  for (const slot of slots) {
+    const names = await realFs.readdir(path.join(ownerRoot(dataDir), 'slots', slot));
+    if (names.includes(`${actionIds[0]}.json`)) reserved = true;
+  }
+  assert.equal(reserved, true, '清理失败时必须留下可恢复的预约');
+});
+
+test('a failed slot release after dispatch-retire is recovered by the next sweep', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+
+  const faulty = createHandoffStore({ dataDir, fs: faultyDirSync('/slots/'), clock: () => now });
+  await assert.rejects(faulty.claim({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.STORE_IO);
+
+  const tombstone = path.join(ownerRoot(dataDir), 'actions', action.actionId);
+  await assert.rejects(realFs.lstat(path.join(tombstone, 'record.json')), error => error.code === 'ENOENT');
+  assert.equal(await realFs.readFile(path.join(tombstone, 'dispatch.decision'), 'utf8'), 'retire');
+
+  await makeStore(dataDir, { clock: () => now }).prepare({ owner: OWNER, context: handoffContext() });
+  const slots = await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'));
+  const reservedIds = [];
+  for (const slot of slots) {
+    for (const name of await realFs.readdir(path.join(ownerRoot(dataDir), 'slots', slot))) reservedIds.push(name.replace(/\.json$/, ''));
+  }
+  assert.equal(reservedIds.includes(action.actionId), false, '可信 retire 墓碑应被续次清理并释放旧 slot');
+});
+
+test('a trusted publish-retire tombstone is cleaned and its slot released on the next sweep', async () => {
+  const dataDir = await makeDir();
+  const actionId = 'ha_' + 'd'.repeat(32);
+  const root = ownerRoot(dataDir);
+  const slotDir = path.join(root, 'slots', '0');
+  const actionDir = path.join(root, 'actions', actionId);
+  await realFs.mkdir(slotDir, { recursive: true, mode: 0o700 });
+  await realFs.mkdir(actionDir, { recursive: true, mode: 0o700 });
+  await realFs.writeFile(
+    path.join(slotDir, `${actionId}.json`),
+    JSON.stringify({ actionId, payloadBytes: 10, createdAt: new Date(NOW).toISOString() }),
+    { mode: 0o600 },
+  );
+  await realFs.writeFile(path.join(actionDir, 'payload.json'), 'payload', { mode: 0o600 });
+  await realFs.writeFile(path.join(actionDir, 'record.json'), '{}', { mode: 0o600 });
+  await realFs.writeFile(path.join(actionDir, 'publish.decision'), 'retire', { mode: 0o600 });
+
+  await makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() });
+  await assert.rejects(realFs.lstat(path.join(actionDir, 'payload.json')), error => error.code === 'ENOENT');
+  await assert.rejects(realFs.lstat(path.join(actionDir, 'record.json')), error => error.code === 'ENOENT');
+  assert.equal(await realFs.readFile(path.join(actionDir, 'publish.decision'), 'utf8'), 'retire');
+  const slots = await realFs.readdir(path.join(root, 'slots'));
+  let oldReserved = false;
+  for (const slot of slots) {
+    if ((await realFs.readdir(path.join(root, 'slots', slot))).includes(`${actionId}.json`)) oldReserved = true;
+  }
+  assert.equal(oldReserved, false);
+});
+
+test('an unreadable decision is not treated as unpublished and keeps payload and slot', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  const publishPath = path.join(ownerRoot(dataDir), 'actions', action.actionId, 'publish.decision');
+  await realFs.chmod(publishPath, 0o000);
+  try {
+    await assert.rejects(makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_IO);
+    assert.equal((await realFs.lstat(path.join(ownerRoot(dataDir), 'actions', action.actionId, 'payload.json'))).isFile(), true);
+    const slots = await realFs.readdir(path.join(ownerRoot(dataDir), 'slots'));
+    let reserved = false;
+    for (const slot of slots) {
+      if ((await realFs.readdir(path.join(ownerRoot(dataDir), 'slots', slot))).includes(`${action.actionId}.json`)) reserved = true;
+    }
+    assert.equal(reserved, true);
+  } finally {
+    await realFs.chmod(publishPath, 0o600);
+  }
+  assert.ok(await store.get({ owner: OWNER, actionId: action.actionId }));
+});
+
+// ---------------------------------------------------------------------------
+// 13. fix2 I7：坏时间字段与可跨 TTL 的合法确认
+// ---------------------------------------------------------------------------
+
+async function tamperRecord(dataDir, actionId, mutate) {
+  const recordPath = path.join(ownerRoot(dataDir), 'actions', actionId, 'record.json');
+  const record = JSON.parse(await realFs.readFile(recordPath, 'utf8'));
+  mutate(record);
+  await realFs.writeFile(recordPath, JSON.stringify(record), { mode: 0o600 });
+}
+
+const BAD_TIME_CASES = [
+  record => { delete record.expiresAt; },
+  record => { record.expiresAt = 'NaN'; },
+  record => { record.expiresAt = 'not-a-date'; },
+  record => { record.expiresAt = 1700000000000; },
+  record => { record.updatedAt = '2020-01-01T00:00:00.000Z'; record.createdAt = '2021-01-01T00:00:00.000Z'; },
+  record => { record.expiresAt = record.createdAt; },
+  record => { record.createdAt = 'garbage'; },
+];
+
+test('corrupt time fields cannot be read as a trusted action or bypass claim expiry', async () => {
+  for (const [index, mutate] of BAD_TIME_CASES.entries()) {
+    const dataDir = await makeDir();
+    const store = makeStore(dataDir);
+    const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+    await tamperRecord(dataDir, action.actionId, mutate);
+
+    await assert.rejects(store.get({ owner: OWNER, actionId: action.actionId }), error => {
+      assert.equal(error.code, CODES.STORE_CORRUPT, `case ${index}`);
+      return true;
+    });
+    await assert.rejects(store.claim({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.STORE_CORRUPT);
+  }
+});
+
+test('a claim can finish after TTL and a rewound clock cannot write updatedAt backwards', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+  const imported = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+  assert.ok(imported.updatedAt > action.expiresAt);
+
+  now = NOW;
+  const again = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { files: [ARCHIVE_FILE] } });
+  assert.ok(again.updatedAt >= imported.updatedAt, '回拨时钟时 updatedAt 不能倒退');
+  const ready = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1' } });
+  assert.equal(ready.state, 'ready');
+});
