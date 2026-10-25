@@ -1,0 +1,78 @@
+{
+  "package": "@hana/app-sdk",
+  "version": "1.1.111-beta",
+  "source": "hana-app-sdk.tgz",
+  "note": "按 Task 2 brief 从已安装的官方 1.1.111-beta SDK 压缩包精确提取这些生成产物，未手改。",
+  "tarball": {
+    "name": "hana-app-sdk.tgz",
+    "bytes": 1130537,
+    "sha256": "be1a4bb87035481ce74a33f1eaeb2c10c4df8fb45a7bab5e3707a6d390256a22"
+  },
+  "members": [
+    {
+      "path": "sdk/app-entity-capabilities.js",
+      "bytes": 3165,
+      "sha256": "e1aef448fe20dbd6a269ed333ffdaa7e58b996f863628690162446fcbafd9f06"
+    },
+    {
+      "path": "sdk/app-entity-capabilities.d.ts",
+      "bytes": 3224,
+      "sha256": "5e657fac38a4794b09e6615f6141599724864778280a00819f3cd1f229d43191"
+    },
+    {
+      "path": "sdk/app-entity-capabilities.js.map",
+      "bytes": 1615,
+      "sha256": "39126259e6c342e3fb146642f13bb9eed025deee7f75c2d02870cb9d644b2d8b"
+    },
+    {
+      "path": "sdk/app-entity-capabilities.d.ts.map",
+      "bytes": 788,
+      "sha256": "69742c6c3b918861d3912d79958e0b5d227aa2ebaa2487a93ea91a72a0c39079"
+    },
+    {
+      "path": "sdk/app-contract/bus-requests.d.ts",
+      "bytes": 22771,
+      "sha256": "8a49b744cb79d3b2669590c3ff8f6464ef51a53d263b14e38ed9762fabd8f0be"
+    },
+    {
+      "path": "sdk/app-contract/bus-requests.d.ts.map",
+      "bytes": 16394,
+      "sha256": "e4386566a298bc269aea3902b1b103037d3ad09d0dabea050a6eb69a13b148af"
+    },
+    {
+      "path": "sdk/app-contract/bus-requests.js.map",
+      "bytes": 1455,
+      "sha256": "918287c89d3c4a499b9e4c77f21893c32e02d422d42bedec10d50284692faf4b"
+    },
+    {
+      "path": "sdk/app-contract/sessions.d.ts",
+      "bytes": 4626,
+      "sha256": "ef2f38b0044534f67ecd99008e3cc7dc7ba7379d3bb5b50433cdfc02457d6629"
+    },
+    {
+      "path": "sdk/app-contract/sessions.d.ts.map",
+      "bytes": 4105,
+      "sha256": "bd4b1213db930d7e7b5955aa717887a5d68ce19c85e93c71cb543449d22b3886"
+    },
+    {
+      "path": "sdk/app-contract/index.js",
+      "bytes": 5930,
+      "sha256": "816c9f6be0e76296ab17364ce62a167937ac21dd939765bdbd9de903530c1a85"
+    },
+    {
+      "path": "sdk/app-contract/index.d.ts",
+      "bytes": 11730,
+      "sha256": "ce267e8292e806029e79af743194776699fac2c1e60479e9e01a3caaa29a58d1"
+    },
+    {
+      "path": "sdk/app-contract/index.js.map",
+      "bytes": 2858,
+      "sha256": "cbd61020ddd2e401f25dec0e6794c63adce0a12ed638d967b4aa84d053092946"
+    },
+    {
+      "path": "sdk/app-contract/index.d.ts.map",
+      "bytes": 5767,
+      "sha256": "443ec1f8c140d7f25b9afc1bf16005b1fc64d86655180d5fba9130fa9501b16e"
+    }
+  ]
+}

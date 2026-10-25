@@ -47,9 +47,16 @@ export interface AppSessionCreateRequestV2 {
     readonly permissionMode?: string;
     /** App ownership and visibility are stamped by the host, never selected here. */
     readonly kind?: string | null;
+    /**
+     * 会话落在哪里：app（默认，只在本 App 内可见）或 home（出现在主页列表，需要 app/sessions.home 授权）。
+     * 只增不改：缺省为 app。
+     */
+    readonly namespace?: "app" | "home";
 }
 export interface AppSessionCreateResultV2 {
     readonly ok: true;
+    /** 只读：服务端决定的空间（app / home）。 */
+    readonly namespace?: "app" | "home";
     readonly sessionId?: string;
     readonly sessionRef?: {
         readonly sessionId: string;

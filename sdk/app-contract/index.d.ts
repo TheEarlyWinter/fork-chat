@@ -100,7 +100,7 @@ export { APP_NOTIFICATIONS_SHOW_CAPABILITY, APP_NOTIFICATIONS_CAPABILITY_WORDS }
 export type { AppNotificationsCapability } from "./notifications.js";
 export { APP_USAGE_READ_CAPABILITY, APP_PROVIDER_CREDENTIALS_READ_CAPABILITY, APP_MODELS_READ_CAPABILITY, APP_QUERY_CAPABILITY_WORDS, APP_QUERY_BUS_VERBS, appQueryCapabilityForBusVerb, isAppQueryBusVerb, } from "../app-query-capabilities.js";
 export type { AppQueryCapability, AppQueryBusVerb } from "../app-query-capabilities.js";
-export { APP_AGENTS_READ_CAPABILITY, APP_AGENTS_MANAGE_CAPABILITY, APP_SESSIONS_READ_CAPABILITY, APP_SESSIONS_MANAGE_CAPABILITY, APP_SESSIONS_SEARCH_CAPABILITY, APP_ENTITY_CAPABILITY_WORDS, } from "../app-entity-capabilities.js";
+export { APP_AGENTS_READ_CAPABILITY, APP_AGENTS_MANAGE_CAPABILITY, APP_SESSIONS_READ_CAPABILITY, APP_SESSIONS_MANAGE_CAPABILITY, APP_SESSIONS_HOME_CAPABILITY, APP_SESSIONS_SEARCH_CAPABILITY, APP_ENTITY_CAPABILITY_WORDS, } from "../app-entity-capabilities.js";
 export type { AppEntityCapability } from "../app-entity-capabilities.js";
 export { APP_PUBLIC_DATA_PUBLISH_CAPABILITY, APP_PUBLIC_DATA_READ_CAPABILITY, APP_PUBLIC_DATA_CAPABILITY_WORDS, } from "./public-data.js";
 export type { AppPublicDataCapability } from "./public-data.js";
