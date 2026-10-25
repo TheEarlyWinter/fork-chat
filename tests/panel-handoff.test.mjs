@@ -1420,7 +1420,7 @@ test('[Round2-G4] capabilities false blocks prepare POST and actions GET failure
     const deps = makeControllerDeps({
       onRequest: (path) => {
         if (path === '/api/handoff/actions') {
-          return response({ ok: false, error: 'DATABASE_TIMEOUT' }, { status: 500 });
+          return response({ ok: false, error: 'DATABASE_TIMEOUT' }, 500);
         }
         if (path === '/api/handoff/prepare') {
           prepareCalls++;
@@ -1496,28 +1496,42 @@ test('[Round2-G5] modal mounts early with loading state before async awaits fini
 // [Round2-G6] 历史动作共存需显式新建预览入口，且 query 刷新 sessionId 后点击 focus 必须调用确切新 SID (I4/I5)
 test('[Round2-G6] history coexists with explicit new-preview button, and query updating sessionId focuses new SID (I4/I5)', async t => {
   await t.test('history prepared/ready shows new-preview button and requires explicit click to prepare', async () => {
-    let prepareCalls = 0;
-    const oldAction = makeAction({ actionId: ACTION_A, state: 'ready' });
-    const deps = makeControllerDeps({
-      onRequest: (path) => {
-        if (path === '/api/handoff/actions') {
-          return response({ ok: true, actions: [oldAction] });
-        }
-        if (path === '/api/handoff/prepare') {
-          prepareCalls++;
-          return response({ ok: true, action: makeAction({ actionId: ACTION_B }) });
-        }
-        return undefined;
-      },
-    });
+    for (const historyState of ['prepared', 'ready']) {
+      let prepareCalls = 0;
+      const oldAction = makeAction({ actionId: ACTION_A, state: historyState });
+      const deps = makeControllerDeps({
+        onRequest: (path) => {
+          if (path === '/api/handoff/actions') {
+            return response({ ok: true, actions: [oldAction] });
+          }
+          if (path === '/api/handoff/prepare') {
+            prepareCalls++;
+            return response({ ok: true, action: makeAction({ actionId: ACTION_B }) });
+          }
+          return undefined;
+        },
+      });
 
-    const { handoff, dialog } = await openController(deps);
-    try {
-      const newPreviewBtn = dialog.querySelector('.btn-handoff-new-preview');
-      assert.ok(newPreviewBtn, '存在历史记录时必须提供显式【新建预览】按钮供新版本交接');
-      assert.equal(prepareCalls, 0, '未点击新建预览前不得发出 prepare POST');
-    } finally {
-      handoff.dispose();
+      const { handoff, dialog } = await openController(deps);
+      try {
+        const newPreviewBtn = dialog.querySelector('.btn-handoff-new-preview');
+        assert.ok(newPreviewBtn, `历史状态为 ${historyState} 时必须提供显式【新建预览】按钮`);
+        assert.equal(prepareCalls, 0, '未点击新建预览前不得发出 prepare POST');
+
+        // 点击【新建预览】后切换至新预览流程，允许发起新的 prepare POST
+        newPreviewBtn.dispatchEvent({ type: 'click' });
+        await new Promise(r => setImmediate(r));
+
+        const prepareBtn = dialog.querySelector('.btn-handoff-prepare');
+        assert.ok(prepareBtn, '点击新建预览后必须展示准备按钮');
+        assert.notEqual(prepareBtn.style.display, 'none', '准备按钮必须可见');
+        prepareBtn.dispatchEvent({ type: 'click' });
+        await waitForPrepare(dialog);
+
+        assert.equal(prepareCalls, 1, '点击新建预览后发起 prepare 必须发送 1 次新的 POST 请求');
+      } finally {
+        handoff.dispose();
+      }
     }
   });
 
@@ -1608,8 +1622,17 @@ test('[Round2-G7] formatHandoffTranscript canonical guarantee, nextStep preview 
     }
   });
 
-  await t.test('nextStep text edit updates preview before prepare', async () => {
-    const deps = makeControllerDeps();
+  await t.test('nextStep text edit marks preview pending or updates nextStep indicator, and prepare emits canonical transcript', async () => {
+    let capturedDto = null;
+    const deps = makeControllerDeps({
+      onRequest: (path, init) => {
+        if (path === '/api/handoff/prepare') {
+          capturedDto = JSON.parse(init.body);
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
     const { handoff, dialog } = await openController(deps);
     try {
       const textarea = dialog.querySelector('.handoff-textarea');
@@ -1617,12 +1640,27 @@ test('[Round2-G7] formatHandoffTranscript canonical guarantee, nextStep preview 
       textarea.value = 'NEW_NEXT_STEP_SENTINEL';
       textarea.dispatchEvent({ type: 'input' });
 
-      const previewContainer = dialog.querySelector('.handoff-preview-section')
-        || dialog.querySelector('.handoff-nodes-container');
-      assert.ok(
-        previewContainer?.textContent?.includes('NEW_NEXT_STEP_SENTINEL'),
-        '修改下一步文本后预览区域必须包含新文本',
-      );
+      // 输入后：confirm 必须不可用（隐藏或禁用），且界面显示待更新提示或微型下一步预览更新
+      const confirmBtn = dialog.querySelector('.btn-handoff-confirm');
+      assert.ok(!confirmBtn || confirmBtn.style.display === 'none' || confirmBtn.disabled, '输入修改后旧 confirm 必须禁用或隐藏');
+
+      const previewText = dialog.querySelector('.handoff-preview-section')?.textContent || '';
+      const statusText = dialog.textContent || '';
+      const hasIndicator = previewText.includes('NEW_NEXT_STEP_SENTINEL') || statusText.includes('待更新') || statusText.includes('待重新准备');
+      assert.ok(hasIndicator, '输入修改后必须有待更新标记或下一步文本指示');
+
+      // 显式 prepare 后，完整权威转录正文必须逐字匹配实际 POST DTO
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+
+      assert.ok(capturedDto, '必须发出 prepare 请求');
+      assert.equal(capturedDto.nextStep, 'NEW_NEXT_STEP_SENTINEL', 'POST DTO 必须携带修改后的下一步文本');
+
+      const expectedTranscript = formatHandoffTranscript(capturedDto);
+      const transcriptEl = dialog.querySelector('.handoff-transcript-preview pre')
+        || dialog.querySelector('.handoff-transcript-preview');
+      assert.ok(transcriptEl, '必须存在完整权威转录正文保底预览元素');
+      assert.equal(transcriptEl.textContent.trim(), expectedTranscript.trim(), '显式 prepare 后的权威正文必须与实际 POST DTO 逐字一致');
     } finally {
       handoff.dispose();
     }
@@ -1646,6 +1684,13 @@ test('[Round2-G7] formatHandoffTranscript canonical guarantee, nextStep preview 
     try {
       const select = dialog.querySelector('.handoff-select');
       assert.equal(select.value, '', '快照 Agent 不存在时必须为空选');
+
+      // 空选 Agent 时，不得假借第一个 Agent 合成权威转录预览
+      const transcriptEl = dialog.querySelector('.handoff-transcript-preview');
+      assert.ok(
+        !transcriptEl || !transcriptEl.textContent.includes('Agent 1') || transcriptEl.textContent.includes('请选择智能体'),
+        '未选 Agent 时不得假借首个 Agent 合成权威正文',
+      );
 
       dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
       await new Promise(r => setImmediate(r));

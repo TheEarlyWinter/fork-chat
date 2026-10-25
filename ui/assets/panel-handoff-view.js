@@ -1,13 +1,15 @@
 /**
- * 分支交接视图：负责 DOM 渲染、对话框生命周期、可访问性与焦点恢复。
- *
- * 保证：
- * 1. 业务正文严格使用 textContent，绝不使用 innerHTML 注入。
+ * 分支交接模态视图：
+ * 1. 负责对话框 DOM 渲染、预览呈现、Agent 选择与操作状态绑定。
  * 2. 纯 DOM API 构建结构，兼顾测试环境与生产安全。
  * 3. 窄布局自适应，不撑破对话框。
  * 4. 拦截 Escape 键，关闭后焦点恢复至原触发元素。
  * 5. 模态 API (showModal) 不可用或抛错时 fail closed，绝不降级为 open=true 伪模态。
+ * 6. 支持早期 loading 态挂载、历史记录查看与新建预览切换。
+ * 7. 提供基于 formatHandoffTranscript 的完整权威正文保底预览。
  */
+
+import { formatHandoffTranscript } from './fork-handoff-contract.js';
 
 const STATUS_LABELS = Object.freeze({
   ok: '',
@@ -26,24 +28,23 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     return documentRef || (typeof document !== 'undefined' ? document : null);
   }
 
-  function addListener(target, type, handler) {
-    if (!target) return;
-    target.addEventListener(type, handler);
-    listeners.push({ target, type, handler });
+  function addListener(el, type, handler) {
+    if (!el || typeof el.addEventListener !== 'function') return;
+    el.addEventListener(type, handler);
+    listeners.push({ el, type, handler });
   }
 
   function clearListeners() {
-    for (const { target, type, handler } of listeners) {
-      try { target.removeEventListener(type, handler); } catch {}
+    for (const { el, type, handler } of listeners) {
+      try { el.removeEventListener(type, handler); } catch {}
     }
     listeners = [];
   }
 
-  function createEl(tag, className, textContent = '') {
-    const d = doc();
-    const el = d.createElement(tag);
+  function createEl(tag, className, text = null) {
+    const el = doc().createElement(tag);
     if (className) el.className = className;
-    if (textContent) el.textContent = textContent;
+    if (text !== null) el.textContent = text;
     return el;
   }
 
@@ -114,6 +115,14 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     previewSection.appendChild(previewTitle);
     previewSection.appendChild(nodesContainer);
 
+    // 完整权威转录正文保底预览
+    const transcriptDetails = createEl('details', 'handoff-transcript-details');
+    const transcriptSummary = createEl('summary', 'handoff-transcript-summary', '完整权威转录正文');
+    const transcriptPre = createEl('pre', 'handoff-transcript-preview handoff-transcript-pre');
+    transcriptDetails.appendChild(transcriptSummary);
+    transcriptDetails.appendChild(transcriptPre);
+    previewSection.appendChild(transcriptDetails);
+
     // 错误信息栏
     const errorEl = createEl('div', 'handoff-error');
     errorEl.setAttribute('role', 'alert');
@@ -129,6 +138,9 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     const footer = createEl('div', 'handoff-dialog-footer');
     const cancelBtn = createEl('button', 'btn btn-outline btn-handoff-cancel', '取消');
     cancelBtn.type = 'button';
+    const newPreviewBtn = createEl('button', 'btn btn-outline btn-handoff-new-preview', '新建预览');
+    newPreviewBtn.type = 'button';
+    newPreviewBtn.style.display = 'none';
     const recoverBtn = createEl('button', 'btn btn-outline btn-handoff-recover', '查询恢复状态');
     recoverBtn.type = 'button';
     recoverBtn.style.display = 'none';
@@ -142,6 +154,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     focusBtn.style.display = 'none';
 
     footer.appendChild(cancelBtn);
+    footer.appendChild(newPreviewBtn);
     footer.appendChild(recoverBtn);
     footer.appendChild(prepareBtn);
     footer.appendChild(confirmBtn);
@@ -155,6 +168,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       dialog: dlg,
       closeBtn,
       cancelBtn,
+      newPreviewBtn,
       agentSelect,
       nextStepTextarea,
       copyDraftBtn,
@@ -162,9 +176,12 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       confirmBtn,
       recoverBtn,
       focusBtn,
+      formSection,
       noticesEl,
       metaSummary,
       nodesContainer,
+      transcriptDetails,
+      transcriptPre,
       errorEl,
     };
 
@@ -172,7 +189,11 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
   }
 
   function renderSummary(context) {
-    if (!els.metaSummary || !context) return;
+    if (!els.metaSummary) return;
+    if (!context) {
+      els.metaSummary.textContent = '暂无上下文信息';
+      return;
+    }
     const stats = context.stats || {};
     const nodeCount = stats.nodeCount ?? (context.nodes?.length || 0);
     const messageCount = stats.messageCount ?? 0;
@@ -209,10 +230,25 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     }
   }
 
+  function renderTranscript(context) {
+    if (!els.transcriptPre) return;
+    if (!context || !context.agentId || context.agentId.trim() === '') {
+      els.transcriptPre.textContent = '请选择智能体后生成权威正文预览';
+      return;
+    }
+    try {
+      const text = formatHandoffTranscript(context);
+      els.transcriptPre.textContent = text;
+    } catch (err) {
+      els.transcriptPre.textContent = '权威转录正文生成失败：' + (err?.message || err);
+    }
+  }
+
   function renderNodes(context) {
-    if (!els.nodesContainer || !context) return;
+    if (!els.nodesContainer) return;
     els.nodesContainer.innerHTML = '';
     const d = doc();
+    if (!context) return;
 
     const nodes = Array.isArray(context.nodes) ? context.nodes : [];
     for (const node of nodes) {
@@ -340,26 +376,29 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
   }
 
   function updatePreview(context) {
-    if (!context) return;
     renderSummary(context);
-    renderNotices(context.notices);
+    renderNotices(context?.notices || []);
     renderNodes(context);
+    renderTranscript(context);
   }
 
-  function open({
-    context,
-    agents = [],
-    selectedAgentId = '',
-    onAgentChange = () => {},
-    onNextStepChange = () => {},
-    onCopyDraft = () => {},
-    onPrepare = () => {},
-    onConfirm = () => {},
-    onRecover = () => {},
-    onFocus = () => {},
-    onClose = () => {},
-  }) {
-    close();
+  function markPreviewStale(newText) {
+    if (!els.nodesContainer) return;
+    let nextEl = els.nodesContainer.querySelector('.handoff-next-step-preview');
+    if (!nextEl) {
+      nextEl = doc().createElement('div');
+      nextEl.className = 'handoff-next-step-preview';
+      els.nodesContainer.appendChild(nextEl);
+    }
+    if (newText) {
+      nextEl.textContent = `下一步要求：${newText} (待重新准备)`;
+    } else {
+      nextEl.textContent = '';
+    }
+  }
+
+  function ensureMounted(onClose) {
+    if (dialog && dialog.parentNode) return true;
     const d = doc();
     if (!d) return false;
 
@@ -368,65 +407,21 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     if (!dialog) return false;
     d.body.appendChild(dialog);
 
-    // 绑定 Agent 下拉
-    if (els.agentSelect) {
-      els.agentSelect.innerHTML = '';
-      const match = agents.some(a => a.id === selectedAgentId);
-      if (!match) {
-        const emptyOpt = d.createElement('option');
-        emptyOpt.value = '';
-        emptyOpt.textContent = '请选择智能体...';
-        emptyOpt.selected = true;
-        els.agentSelect.appendChild(emptyOpt);
-      }
-      for (const agent of agents) {
-        const opt = d.createElement('option');
-        opt.value = agent.id;
-        opt.textContent = agent.name || agent.id;
-        if (match && agent.id === selectedAgentId) opt.selected = true;
-        els.agentSelect.appendChild(opt);
-      }
-      addListener(els.agentSelect, 'change', (e) => onAgentChange(e.target.value));
-    }
-
-    // 绑定下一步草稿输入
-    if (els.nextStepTextarea) {
-      els.nextStepTextarea.value = context?.nextStep || '';
-      addListener(els.nextStepTextarea, 'input', (e) => onNextStepChange(e.target.value));
-    }
-
-    // 绑定复制目标草稿按钮
-    if (els.copyDraftBtn) {
-      addListener(els.copyDraftBtn, 'click', () => onCopyDraft());
-    }
-
     const handleClose = () => {
       close();
-      onClose();
+      if (typeof onClose === 'function') onClose();
     };
 
-    if (els.closeBtn) addListener(els.closeBtn, 'click', handleClose);
-    if (els.cancelBtn) addListener(els.cancelBtn, 'click', handleClose);
-    if (els.prepareBtn) addListener(els.prepareBtn, 'click', () => onPrepare());
-    if (els.confirmBtn) addListener(els.confirmBtn, 'click', () => onConfirm());
-    if (els.recoverBtn) addListener(els.recoverBtn, 'click', () => onRecover());
-    if (els.focusBtn) addListener(els.focusBtn, 'click', () => onFocus());
+    if (els.closeBtn) addListener(els.closeBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.cancelBtn) addListener(els.cancelBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
 
-    // 键盘 Escape 支持
     addListener(dialog, 'keydown', (e) => {
       if (e.key === 'Escape') {
-        e.preventDefault();
+        e?.preventDefault?.();
         handleClose();
       }
     });
 
-    if (context) {
-      renderSummary(context);
-      renderNotices(context.notices);
-      renderNodes(context);
-    }
-
-    // 必须有真实 showModal；缺失或抛错时 fail closed，绝不伪模态保留 open=true
     if (typeof dialog.showModal !== 'function') {
       if (dialog.parentNode) dialog.parentNode.removeChild(dialog);
       dialog = null;
@@ -440,8 +435,155 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       dialog = null;
       return false;
     }
-
     return true;
+  }
+
+  function openLoading({ onClose = () => {} } = {}) {
+    close();
+    if (!ensureMounted(onClose)) return false;
+
+    if (els.prepareBtn) {
+      els.prepareBtn.style.display = 'none';
+      els.prepareBtn.disabled = true;
+    }
+    if (els.confirmBtn) els.confirmBtn.style.display = 'none';
+    if (els.recoverBtn) els.recoverBtn.style.display = 'none';
+    if (els.focusBtn) els.focusBtn.style.display = 'none';
+    if (els.newPreviewBtn) els.newPreviewBtn.style.display = 'none';
+
+    if (els.metaSummary) {
+      els.metaSummary.textContent = '正在获取会话快照与环境配置…';
+    }
+    if (els.transcriptPre) {
+      els.transcriptPre.textContent = '';
+    }
+    setError('');
+    return true;
+  }
+
+  function renderHistory({
+    action,
+    onRecover = () => {},
+    onFocus = () => {},
+    onNewPreview = () => {},
+    onClose = () => {},
+  }) {
+    if (!ensureMounted(onClose)) return false;
+    clearListeners();
+
+    const handleClose = () => {
+      close();
+      onClose();
+    };
+
+    if (els.closeBtn) addListener(els.closeBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.cancelBtn) addListener(els.cancelBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.recoverBtn) addListener(els.recoverBtn, 'click', () => onRecover());
+    if (els.focusBtn) addListener(els.focusBtn, 'click', () => onFocus());
+    if (els.newPreviewBtn) addListener(els.newPreviewBtn, 'click', () => onNewPreview());
+
+    addListener(dialog, 'keydown', (e) => {
+      if (e.key === 'Escape') {
+        e?.preventDefault?.();
+        handleClose();
+      }
+    });
+
+    if (els.formSection) els.formSection.style.display = 'none';
+    if (els.nodesContainer) els.nodesContainer.innerHTML = '';
+    if (els.noticesEl) renderNotices([
+      '当前显示该卡片已有的历史交接动作。',
+      '如需为同卡片新版本或不同智能体交接，请点击【新建预览】。',
+    ]);
+
+    if (els.metaSummary) {
+      els.metaSummary.textContent = `历史动作: ${action.actionId} (状态: ${action.state}) | 来源版本 r${action.source?.revision ?? '0'} | 智能体: ${action.agentId || '未指定'}`;
+    }
+    if (els.transcriptPre) {
+      els.transcriptPre.textContent = '历史动作不包含正文快照，点击【新建预览】可基于当前最新保存版本交接。';
+    }
+    return true;
+  }
+
+  function renderNewPreview({
+    context,
+    agents = [],
+    selectedAgentId = '',
+    nextStepText = '',
+    onAgentChange = () => {},
+    onNextStepChange = () => {},
+    onCopyDraft = () => {},
+    onPrepare = () => {},
+    onConfirm = () => {},
+    onRecover = () => {},
+    onFocus = () => {},
+    onNewPreview = () => {},
+    onClose = () => {},
+  }) {
+    if (!ensureMounted(onClose)) return false;
+    clearListeners();
+
+    const handleClose = () => {
+      close();
+      onClose();
+    };
+
+    if (els.closeBtn) addListener(els.closeBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.cancelBtn) addListener(els.cancelBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.prepareBtn) addListener(els.prepareBtn, 'click', () => onPrepare());
+    if (els.confirmBtn) addListener(els.confirmBtn, 'click', () => onConfirm());
+    if (els.recoverBtn) addListener(els.recoverBtn, 'click', () => onRecover());
+    if (els.focusBtn) addListener(els.focusBtn, 'click', () => onFocus());
+    if (els.newPreviewBtn) addListener(els.newPreviewBtn, 'click', () => onNewPreview());
+
+    addListener(dialog, 'keydown', (e) => {
+      if (e.key === 'Escape') {
+        e?.preventDefault?.();
+        handleClose();
+      }
+    });
+
+    if (els.formSection) els.formSection.style.display = 'flex';
+
+    // 绑定 Agent 下拉
+    if (els.agentSelect) {
+      els.agentSelect.innerHTML = '';
+      const match = agents.some(a => a.id === selectedAgentId);
+      if (!match) {
+        const emptyOpt = doc().createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = '请选择智能体...';
+        emptyOpt.selected = true;
+        els.agentSelect.appendChild(emptyOpt);
+      }
+      for (const agent of agents) {
+        const opt = doc().createElement('option');
+        opt.value = agent.id;
+        opt.textContent = agent.name || agent.id;
+        if (match && agent.id === selectedAgentId) opt.selected = true;
+        els.agentSelect.appendChild(opt);
+      }
+      addListener(els.agentSelect, 'change', (e) => onAgentChange(e.target.value));
+    }
+
+    // 绑定下一步草稿输入
+    if (els.nextStepTextarea) {
+      els.nextStepTextarea.value = nextStepText || context?.nextStep || '';
+      addListener(els.nextStepTextarea, 'input', (e) => onNextStepChange(e.target.value));
+    }
+
+    // 绑定复制目标草稿按钮
+    if (els.copyDraftBtn) {
+      addListener(els.copyDraftBtn, 'click', () => onCopyDraft());
+    }
+
+    updatePreview(context);
+    return true;
+  }
+
+  function open(params = {}) {
+    close();
+    return renderNewPreview(params);
   }
 
   function setNextStepValue(val) {
@@ -460,14 +602,22 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
   }
 
   function setStage(stage, details = {}) {
-    const { prepareBtn, confirmBtn, recoverBtn, focusBtn } = els;
+    const { prepareBtn, confirmBtn, recoverBtn, focusBtn, newPreviewBtn } = els;
 
     if (prepareBtn) prepareBtn.style.display = 'none';
     if (confirmBtn) confirmBtn.style.display = 'none';
     if (recoverBtn) recoverBtn.style.display = 'none';
     if (focusBtn) focusBtn.style.display = 'none';
+    if (newPreviewBtn) newPreviewBtn.style.display = 'none';
 
     const hasSessionId = Boolean(details.hasSessionId || details.sessionId);
+    const showNewPreview = Boolean(details.showNewPreview);
+
+    if (showNewPreview && newPreviewBtn) {
+      newPreviewBtn.style.display = 'inline-block';
+      newPreviewBtn.disabled = false;
+      newPreviewBtn.textContent = '新建预览';
+    }
 
     if (stage === 'init') {
       if (prepareBtn) {
@@ -515,7 +665,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
         recoverBtn.disabled = false;
       }
     } else if (stage === 'failed' || stage === 'history-prepared') {
-      // 不展示任何可继续的 POST 按钮
+      // 仅展示说明与新建预览按钮
     }
   }
 
@@ -543,11 +693,17 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
 
   return {
     open,
+    openLoading,
+    renderHistory,
+    renderNewPreview,
     updatePreview,
+    markPreviewStale,
     setNextStepValue,
     setError,
     setStage,
     close,
     dispose,
+    getDialog: () => dialog,
+    isMounted: () => Boolean(dialog && dialog.parentNode),
   };
 }
