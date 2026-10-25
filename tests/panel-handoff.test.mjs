@@ -173,13 +173,60 @@ test('GREEN panel-documents: isPending tracks a real in-flight parse task by car
 
 // C1：捕获真实 panel.js 组合根注入对象；不替换 handoff 实现。
 test('[C1] real panel composition root reads the late session controller through a getter', async () => {
-  const { panel, handoffCompositions } = await loadPanel();
+  const { panel, ui, handoffCompositions } = await loadPanel({
+    onRequest: async route => {
+      if (route === '/api/handoff/capabilities') {
+        return Response.json({
+          ok: true,
+          supported: true,
+          available: true,
+          home: true,
+          read: true,
+          manage: true,
+          stageFile: true,
+          agentsRead: true,
+          missing: [],
+          reason: null,
+        });
+      }
+      if (route === '/api/handoff/actions') {
+        return Response.json({ ok: true, actions: [] });
+      }
+      return Response.json({});
+    },
+  });
   try {
     const composition = handoffCompositions.at(-1);
     assert.ok(composition, 'panel.js 必须实际创建 handoff controller');
     assert.equal(typeof composition.getSessionController, 'function', '组合根必须注入惰性 sessionController getter');
-    assert.ok(composition.getSessionController(), 'getter 返回的控制器不得是 null');
-    assert.equal(composition.getSessionController().state.ready, true, '真实控制器应已完成初始化');
+    const controller = composition.getSessionController();
+    assert.ok(controller, 'getter 返回的控制器不得是 null');
+    assert.equal(controller.state.ready, true, '真实控制器应已完成初始化');
+
+    // 在非空业务 canvas 实际点真实 handoff 按钮，证明 getter 被 controller 消费
+    const targetCard = panel.getCards()[0];
+    assert.ok(targetCard, '必须存在目标卡片');
+    targetCard.messages = [
+      { role: 'user', text: '业务问题' },
+      { role: 'assistant', text: '业务回答' },
+    ];
+    controller.scheduleSave();
+    await controller.flush(true);
+
+    const cardEl = ui.environment.document.querySelector(`#dom-${targetCard.id}`)
+      || ui.environment.document.querySelector('.chat-card');
+    assert.ok(cardEl, '必须找到渲染后的卡片 DOM');
+    const handoffBtn = cardEl.querySelector('[data-action="handoff"]');
+    assert.ok(handoffBtn, '必须找到真实 handoff 按钮');
+    handoffBtn.dispatchEvent({ type: 'click', bubbles: true, stopPropagation() {} });
+
+    await waitFor(() => ui.environment.document.querySelector('dialog.handoff-dialog') || ui.environment.document.querySelector('.handoff-dialog'), {
+      message: '点击真实 handoff 按钮必须打开对话框，证明 sessionController getter 被 controller 消费',
+    });
+    const dialog = ui.environment.document.querySelector('dialog.handoff-dialog')
+      || ui.environment.document.querySelector('.handoff-dialog');
+    assert.ok(dialog, '点击真实 handoff 按钮必须打开对话框，证明 sessionController getter 被 controller 消费');
+    assert.equal(dialog.open, true, '对话框应处于 open 状态');
   } finally {
     await panel.dispose();
   }

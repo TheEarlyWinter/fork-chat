@@ -47,8 +47,15 @@ import { memoryHost } from './fork-memory.mjs';
 
 function matchesSelector(node, selector) {
   if (!node || typeof selector !== 'string') return false;
+  if (selector.includes('.')) {
+    const parts = selector.split('.');
+    const tag = parts[0];
+    const cls = parts.slice(1);
+    if (tag && (node.tagName || '').toLowerCase() !== tag.toLowerCase()) return false;
+    return cls.every(c => node.classList?.contains(c));
+  }
   if (selector.startsWith('#')) return node.id === selector.slice(1);
-  if (selector.startsWith('.')) return node.classList.contains(selector.slice(1));
+  if (selector.startsWith('.')) return node.classList?.contains(selector.slice(1));
   if (selector.startsWith('[')) {
     const m = selector.match(/\[([a-zA-Z0-9_-]+)(?:="([^"]*)")?\]/);
     if (!m) return false;
@@ -74,6 +81,15 @@ class MockElement {
     this.open = false;
     this.disabled = false;
     const classes = new Set();
+    Object.defineProperty(this, 'className', {
+      get() { return Array.from(classes).join(' '); },
+      set(val) {
+        classes.clear();
+        for (const token of String(val || '').trim().split(/\s+/)) {
+          if (token) classes.add(token);
+        }
+      },
+    });
     this.classList = {
       add(...tokens) { tokens.forEach(token => classes.add(token)); },
       remove(...tokens) { tokens.forEach(token => classes.delete(token)); },
@@ -162,6 +178,10 @@ class MockElement {
     if (idx !== -1) list.splice(idx, 1);
   }
   dispatchEvent(event) {
+    if (!event.target) event.target = this;
+    if (!event.currentTarget) event.currentTarget = this;
+    if (typeof event.stopPropagation !== 'function') event.stopPropagation = () => {};
+    if (typeof event.preventDefault !== 'function') event.preventDefault = () => {};
     const list = this.events[event.type] || [];
     for (const h of list) h(event);
   }

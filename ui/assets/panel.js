@@ -503,9 +503,10 @@ panelCleanups.add(() => refController.dispose());
 const handoffController = createPanelHandoff({
   hana,
   requestHost,
-  sessionController,
+  getSessionController: () => sessionController,
+  sessionController: null,
   getCards: () => cards,
-  isCardBusy: card => chainIsBusy(card),
+  isCardBusy: id => activeRequests.has(id) || Boolean(documentPipeline?.isPending?.(id)),
   flashMessage: message => flashMessage(message),
   safeDetail: value => safeDetail(value),
   getIsDisposed: () => isDisposed,

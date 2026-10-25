@@ -1969,3 +1969,256 @@ body.is-card-resizing.resizing-se {
   0%, 100% { background: #faf5df; }
   50% { background: #f3e9c8; }
 }
+
+/* ------------------------------------------------------------------ */
+/* 分支交接模态对话框（Handoff Dialog）样式                           */
+/* ------------------------------------------------------------------ */
+
+dialog.handoff-dialog {
+  display: flex;
+  flex-direction: column;
+  width: 90vw;
+  max-width: 680px;
+  max-height: 85vh;
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--border, #d9d3c7);
+  border-radius: 8px;
+  background: var(--bg-card, #ffffff);
+  color: var(--text-main, #2c2925);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+  font-size: 13px;
+  line-height: 1.5;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+dialog.handoff-dialog::backdrop {
+  background: rgba(20, 18, 16, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+.handoff-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border, #e5e0d8);
+  background: var(--bg-header, #faf8f5);
+}
+
+.handoff-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main, #2c2925);
+}
+
+.handoff-close-btn {
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-muted, #7c756b);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.handoff-close-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-main, #2c2925);
+}
+
+.handoff-dialog-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.handoff-notices {
+  background: #fdfaf3;
+  border: 1px solid #ebdcb9;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #635324;
+}
+
+.handoff-notice-item {
+  margin: 2px 0;
+  line-height: 1.45;
+}
+
+.handoff-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.handoff-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.handoff-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main, #38342f);
+}
+
+.handoff-select {
+  padding: 6px 10px;
+  border: 1px solid var(--border, #cfc8bc);
+  border-radius: 4px;
+  background: var(--bg-card, #fff);
+  font-size: 13px;
+  color: var(--text-main, #2c2925);
+}
+
+.handoff-next-step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.handoff-link-btn {
+  background: transparent;
+  border: none;
+  color: #2b6cb0;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.handoff-link-btn:hover {
+  text-decoration: underline;
+}
+
+.handoff-textarea {
+  min-height: 60px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #cfc8bc);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.handoff-meta-summary {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted, #706a61);
+  padding: 6px 10px;
+  background: #f5f2eb;
+  border-radius: 4px;
+}
+
+.handoff-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.handoff-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #2c2925);
+}
+
+.handoff-nodes-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.handoff-node-card {
+  border: 1px solid var(--border, #e0dad0);
+  border-radius: 5px;
+  background: #fcfbf9;
+  overflow: hidden;
+}
+
+.handoff-node-summary {
+  padding: 7px 10px;
+  font-weight: 500;
+  font-size: 12px;
+  cursor: pointer;
+  background: #f4f0e8;
+  color: var(--text-main, #332f2a);
+}
+
+.handoff-node-content {
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-main, #2c2925);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.handoff-node-doc,
+.handoff-node-message,
+.handoff-node-attachment,
+.handoff-node-artifact {
+  border-top: 1px dashed #e8e2d8;
+  padding-top: 6px;
+}
+
+.handoff-node-content > div:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.handoff-references-section,
+.handoff-exclusions-section,
+.handoff-unsent-section,
+.handoff-artifacts-section,
+.handoff-next-step-preview {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted, #665f54);
+  background: #f7f5ef;
+  border: 1px solid #e5dfd5;
+  border-radius: 4px;
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.handoff-error {
+  background: #fdf2f2;
+  border: 1px solid #f5c6c6;
+  border-radius: 4px;
+  color: #9b2c2c;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.handoff-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border, #e5e0d8);
+  background: var(--bg-header, #faf8f5);
+}
+
+@media (max-width: 600px) {
+  dialog.handoff-dialog {
+    width: 96vw;
+    max-height: 92vh;
+  }
+  .handoff-dialog-footer {
+    flex-wrap: wrap;
+  }
+}
