@@ -310,6 +310,7 @@ function buildMessage(raw, cardId, index, artifactState) {
 function buildReferences(includedCards, cardMap) {
   const entries = new Map();
   const order = [];
+  const sources = new Map();
   let deduped = false;
   let deletedSources = 0;
   let excludedSources = 0;
@@ -326,11 +327,16 @@ function buildReferences(includedCards, cardMap) {
         throw handoffError(CODES.HANDOFF_INVALID_REFERENCE, `卡片 ${card.id} 的引用指向自身，不允许`);
       }
       const sourceCard = cardMap.get(raw.sourceCardId);
+      const exists = Boolean(sourceCard);
+      const contextMode = exists ? getContextMode(sourceCard) : null;
       let status = 'snapshot';
-      if (!sourceCard) status = 'source-deleted';
-      else if (getContextMode(sourceCard) === 'exclude') status = 'source-excluded';
+      if (!exists) status = 'source-deleted';
+      else if (contextMode === 'exclude') status = 'source-excluded';
       const text = status === 'source-excluded' ? '' : raw.text;
       const sourceTitle = typeof raw.sourceTitle === 'string' ? raw.sourceTitle : '';
+      sources.set(raw.sourceCardId, exists
+        ? { cardId: raw.sourceCardId, exists: true, contextMode }
+        : { cardId: raw.sourceCardId, exists: false, contextMode: null });
       const existing = entries.get(raw.id);
       if (existing) {
         if (existing.sourceCardId !== raw.sourceCardId || existing.text !== text || existing.status !== status) {
@@ -358,7 +364,7 @@ function buildReferences(includedCards, cardMap) {
       order.push(entry);
     }
   }
-  return { order, deduped, deletedSources, excludedSources };
+  return { order, sources: [...sources.values()], deduped, deletedSources, excludedSources };
 }
 
 function buildNotices({ targetExcluded, exclusions, failedCount, localNoticeCount, references, artifacts, hasOriginalBodies, nextStep }) {
@@ -417,7 +423,6 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
   if (!cardMap.has(targetCardId)) throw handoffError(CODES.HANDOFF_TARGET_MISSING, `目标节点 ${targetCardId} 不在快照里`);
 
   const dependencyOrder = collectDependencyOrder(cardMap, targetCardId);
-  const reached = new Set(dependencyOrder);
   const excludedIds = new Set();
   for (const id of dependencyOrder) {
     if (id !== targetCardId && getContextMode(cardMap.get(id)) === 'exclude') excludedIds.add(id);
@@ -475,7 +480,11 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
 
   const exclusions = dependencyOrder
     .filter(id => excludedIds.has(id))
-    .map(id => ({ cardId: id, title: typeof cardMap.get(id).title === 'string' ? cardMap.get(id).title : '' }));
+    .map(id => ({
+      cardId: id,
+      title: typeof cardMap.get(id).title === 'string' ? cardMap.get(id).title : '',
+      parentIds: parentIdsOf(cardMap.get(id)),
+    }));
 
   const notices = buildNotices({
     targetExcluded: getContextMode(cardMap.get(targetCardId)) === 'exclude',
@@ -495,6 +504,7 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
     nextStep,
     nodes,
     references: references.order,
+    referenceSources: references.sources,
     artifactIds: artifactState.order,
     exclusions,
     notices,

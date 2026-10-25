@@ -484,12 +484,18 @@ test('validateHandoffContext rebuilds the whitelist and recomputes derived field
   reordered.nodes.reverse();
   fails(() => validateHandoffContext(reordered), 'HANDOFF_ORDER');
 
-  // 被排除来源的引用不能夹带正文
+  // 引用状态由来源元数据重算：声称来源已被排除时不能夹带正文
   const leaking = JSON.parse(JSON.stringify(context));
+  leaking.referenceSources = [{ cardId: 'gone', exists: true, contextMode: 'exclude' }];
   leaking.references[0].status = 'source-excluded';
   leaking.references[0].included = false;
   leaking.references[0].text = 'SHOULD-NOT-LEAK';
   fails(() => validateHandoffContext(leaking), 'HANDOFF_INVALID_CONTEXT');
+  // 客户端自报的 status/included 不再被采信：来源仍是已删除，就按已删除重算
+  const relabelled = JSON.parse(JSON.stringify(context));
+  relabelled.references[0].status = 'snapshot';
+  relabelled.references[0].included = true;
+  assert.equal(validateHandoffContext(relabelled).references[0].status, 'source-deleted');
 
   // schemaVersion 与结构白名单
   fails(() => validateHandoffContext({ ...context, schemaVersion: 2 }), 'HANDOFF_INVALID_CONTEXT');

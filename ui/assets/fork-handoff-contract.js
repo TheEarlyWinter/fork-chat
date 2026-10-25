@@ -42,6 +42,7 @@ export const HANDOFF_ERROR_CODES = Object.freeze(Object.fromEntries([
   'HANDOFF_MISSING_PARENT',
   'HANDOFF_CYCLE',
   'HANDOFF_ORDER',
+  'HANDOFF_UNREACHABLE_NODE',
   'HANDOFF_TOO_MANY_NODES',
   'HANDOFF_NO_CONTENT',
   'HANDOFF_INVALID_SOURCE',
@@ -88,7 +89,6 @@ const TOKEN_REGEX = /^[A-Za-z0-9_.:@~+-]{1,200}$/;
 const NOTICE_CODE_REGEX = /^[A-Z][A-Z0-9_]{2,60}$/;
 const MIME_REGEX = /^[A-Za-z0-9!#$&^_.+-]{1,60}\/[A-Za-z0-9!#$&^_.+-]{1,60}$/;
 const MESSAGE_STATUSES = Object.freeze(['ok', 'failed', 'cancelled', 'partial']);
-const REFERENCE_STATUSES = Object.freeze(['snapshot', 'source-deleted', 'source-excluded']);
 const STATUS_LABELS = Object.freeze({
   ok: '',
   failed: '（未完成：失败，不能当作已完成结论）',
@@ -253,21 +253,46 @@ function normalizeNode(raw, index) {
 function normalizeExclusion(raw, index) {
   if (!isPlainObject(raw)) throw invalid(`第 ${index + 1} 个排除项不是对象`);
   if (typeof raw.cardId !== 'string' || !ID_REGEX.test(raw.cardId)) throw invalid(`第 ${index + 1} 个排除项标识不合法`);
+  if (!Array.isArray(raw.parentIds)) throw invalid(`第 ${index + 1} 个排除项的父节点列表必须是数组`);
+  const parentIds = [];
+  for (const parentId of raw.parentIds) {
+    if (typeof parentId !== 'string' || !ID_REGEX.test(parentId)) throw invalid(`第 ${index + 1} 个排除项的父节点标识不合法`);
+    if (parentId === raw.cardId) {
+      throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_CYCLE, `排除项 ${raw.cardId} 把自己当成父节点`);
+    }
+    if (!parentIds.includes(parentId)) parentIds.push(parentId);
+  }
   return {
     cardId: raw.cardId,
     title: sanitizeLabel(raw.title, 200, '排除项标题'),
+    parentIds,
   };
 }
 
-function normalizeReference(raw, index, nodeIds) {
+function normalizeReferenceSource(raw, index) {
+  if (!isPlainObject(raw)) throw invalid(`第 ${index + 1} 条引用来源不是对象`);
+  if (typeof raw.cardId !== 'string' || !ID_REGEX.test(raw.cardId)) throw invalid(`第 ${index + 1} 条引用来源标识不合法`);
+  if (typeof raw.exists !== 'boolean') throw invalid(`第 ${index + 1} 条引用来源缺少存在标记`);
+  if (!raw.exists) {
+    if (raw.contextMode !== null) throw invalid(`第 ${index + 1} 条引用来源已不存在，不能声明上下文标记`);
+    return { cardId: raw.cardId, exists: false, contextMode: null };
+  }
+  if (raw.contextMode !== 'include' && raw.contextMode !== 'exclude') {
+    throw invalid(`第 ${index + 1} 条引用来源的上下文标记不合法`);
+  }
+  return { cardId: raw.cardId, exists: true, contextMode: raw.contextMode };
+}
+
+function normalizeReference(raw, index, nodeIds, sourceMap) {
   if (!isPlainObject(raw)) throw invalid(`第 ${index + 1} 条引用不是对象`);
   if (typeof raw.refId !== 'string' || !ID_REGEX.test(raw.refId)) throw invalid(`第 ${index + 1} 条引用标识不合法`);
   if (typeof raw.sourceCardId !== 'string' || !ID_REGEX.test(raw.sourceCardId)) throw invalid(`第 ${index + 1} 条引用的来源标识不合法`);
-  const status = raw.status;
-  if (!REFERENCE_STATUSES.includes(status)) throw invalid(`第 ${index + 1} 条引用的来源状态不合法`);
-  if (typeof raw.included !== 'boolean') throw invalid(`第 ${index + 1} 条引用的导入标记不合法`);
-  const shouldInclude = status !== 'source-excluded';
-  if (raw.included !== shouldInclude) throw invalid(`第 ${index + 1} 条引用的导入标记与来源状态不一致`);
+  const source = sourceMap.get(raw.sourceCardId);
+  if (!source) throw invalid(`第 ${index + 1} 条引用的来源缺少元数据`);
+  // 状态与导入标记由来源元数据重算，不采信客户端提交的派生值
+  const excludedSource = source.exists && source.contextMode === 'exclude';
+  const status = !source.exists ? 'source-deleted' : excludedSource ? 'source-excluded' : 'snapshot';
+  const shouldInclude = !excludedSource;
   const text = requireString(raw.text, `第 ${index + 1} 条引用正文`);
   if (!shouldInclude && text !== '') throw invalid(`第 ${index + 1} 条引用属于被排除来源，不能携带正文`);
   if (shouldInclude && text.trim() === '') throw invalid(`第 ${index + 1} 条引用正文为空`);
@@ -281,7 +306,7 @@ function normalizeReference(raw, index, nodeIds) {
     refId: raw.refId,
     sourceCardId: raw.sourceCardId,
     sourceTitle: sanitizeLabel(raw.sourceTitle, 200, '引用来源标题'),
-    text,
+    text: shouldInclude ? text : '',
     status,
     included: shouldInclude,
     positions,
@@ -380,33 +405,93 @@ export function validateHandoffContext(value) {
     if (excludedIds.has(item.cardId)) throw invalid(`排除项 ${item.cardId} 重复`);
     excludedIds.add(item.cardId);
   }
+  if (excludedIds.has(source.targetCardId)) throw invalid('目标节点不能同时是排除项');
+
+  // 依赖图 = nodes + exclusions；两者合计计入节点上限，不能用大量排除项绕过
+  const totalCards = nodes.length + exclusions.length;
+  if (totalCards > HANDOFF_LIMITS.maxNodes) {
+    throw handoffError(
+      HANDOFF_ERROR_CODES.HANDOFF_TOO_MANY_NODES,
+      `节点与排除项合计 ${totalCards} 超过上限 ${HANDOFF_LIMITS.maxNodes}`,
+      { count: totalCards, limit: HANDOFF_LIMITS.maxNodes },
+    );
+  }
+  const graph = new Map();
+  for (const node of nodes) graph.set(node.cardId, { parentIds: node.parentIds, contextMode: node.contextMode });
+  for (const item of exclusions) graph.set(item.cardId, { parentIds: item.parentIds, contextMode: 'exclude' });
+
+  // 从目标反向遍历：缺父、环、不可达节点/排除项都拒绝
+  const visitState = new Map([[source.targetCardId, 1]]);
+  const stack = [{ id: source.targetCardId, cursor: 0 }];
+  while (stack.length) {
+    const frame = stack[stack.length - 1];
+    const parents = graph.get(frame.id).parentIds;
+    if (frame.cursor < parents.length) {
+      const parentId = parents[frame.cursor++];
+      if (!graph.has(parentId)) {
+        throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_MISSING_PARENT, `卡片 ${frame.id} 的父节点 ${parentId} 不在上下文里`);
+      }
+      const parentState = visitState.get(parentId) ?? 0;
+      if (parentState === 1) {
+        throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_CYCLE, `父依赖成环：${parentId} → ${frame.id}`);
+      }
+      if (parentState === 2) continue;
+      visitState.set(parentId, 1);
+      stack.push({ id: parentId, cursor: 0 });
+      continue;
+    }
+    visitState.set(frame.id, 2);
+    stack.pop();
+  }
+  for (const cardId of graph.keys()) {
+    if (visitState.get(cardId) !== 2) {
+      throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_UNREACHABLE_NODE, `卡片 ${cardId} 不在目标节点的依赖路径上`);
+    }
+  }
+
+  // 包含节点必须保持拓扑顺序；排除节点只贡献依赖元数据
   const nodeIndex = new Map(nodes.map((node, index) => [node.cardId, index]));
   for (const [index, node] of nodes.entries()) {
     for (const parentId of node.parentIds) {
-      if (nodeIds.has(parentId)) {
-        if (nodeIndex.get(parentId) >= index) {
-          throw handoffError(
-            HANDOFF_ERROR_CODES.HANDOFF_ORDER,
-            `节点 ${node.cardId} 的父节点 ${parentId} 没有排在它前面（可能成环或不是拓扑序）`,
-          );
-        }
-        continue;
-      }
-      if (!excludedIds.has(parentId)) {
-        throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_MISSING_PARENT, `节点 ${node.cardId} 的父节点 ${parentId} 不在上下文里`);
+      if (nodeIds.has(parentId) && nodeIndex.get(parentId) >= index) {
+        throw handoffError(
+          HANDOFF_ERROR_CODES.HANDOFF_ORDER,
+          `节点 ${node.cardId} 的父节点 ${parentId} 没有排在它前面（可能成环或不是拓扑序）`,
+        );
       }
     }
   }
+
+  if (!Array.isArray(value.referenceSources)) throw invalid('引用来源元数据必须是数组');
+  const referenceSources = [];
+  const sourceMap = new Map();
+  for (const raw of value.referenceSources) {
+    const item = normalizeReferenceSource(raw, referenceSources.length);
+    if (sourceMap.has(item.cardId)) throw invalid(`引用来源 ${item.cardId} 的元数据重复`);
+    const inGraph = graph.get(item.cardId);
+    if (inGraph) {
+      if (!item.exists || item.contextMode !== inGraph.contextMode) {
+        throw invalid(`引用来源 ${item.cardId} 的元数据与依赖图不一致`);
+      }
+    }
+    sourceMap.set(item.cardId, item);
+    referenceSources.push(item);
+  }
+
   if (!Array.isArray(value.references)) throw invalid('引用列表必须是数组');
   const references = [];
   const seenRefs = new Set();
   for (const raw of value.references) {
-    const reference = normalizeReference(raw, references.length, nodeIds);
+    const reference = normalizeReference(raw, references.length, nodeIds, sourceMap);
     if (seenRefs.has(reference.refId)) {
       throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_REFERENCE_CONFLICT, `引用标识重复：${reference.refId}`);
     }
     seenRefs.add(reference.refId);
     references.push(reference);
+  }
+  const referencedSources = new Set(references.map(reference => reference.sourceCardId));
+  for (const item of referenceSources) {
+    if (!referencedSources.has(item.cardId)) throw invalid(`引用来源 ${item.cardId} 未被任何引用使用`);
   }
   if (!Array.isArray(value.notices)) throw invalid('完整性说明必须是数组');
   const notices = value.notices.map(normalizeNotice);
@@ -434,6 +519,7 @@ export function validateHandoffContext(value) {
     nextStep,
     nodes,
     references,
+    referenceSources,
     artifactIds: derivedArtifacts,
     exclusions,
     notices,
