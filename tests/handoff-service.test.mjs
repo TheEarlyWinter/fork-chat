@@ -1166,3 +1166,116 @@ test('C-I6: a custom receipt without a usable entryId is unknown, not a silent s
   assert.equal(response.body.action.files.length, 2);
 });
 
+// ---------------------------------------------------------------------------
+// round5 M2：先做 owner-scoped 查库（404 / 非 prepared 直接返回），只有 prepared 才登记名额
+// ---------------------------------------------------------------------------
+
+test('M2: the confirmation gate runs after the owner lookup, so missing/foreign/ready/unknown stay queries', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const c1 = 'c'.repeat(32);
+  const f1 = 'f'.repeat(32);
+  const r1 = '1'.repeat(32);
+  const u1 = '2'.repeat(32);
+  const entries = {
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+    [c1]: artifactFixture(c1, 'c-body'),
+    [f1]: artifactFixture(f1, 'f-body'),
+    [r1]: artifactFixture(r1, 'r-body'),
+    [u1]: artifactFixture(u1, 'u-body'),
+  };
+  let armed = false;
+  let failStage = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const reads = [];
+  const artifacts = {
+    calls: reads,
+    async read({ artifactId }) {
+      reads.push(artifactId);
+      const entry = entries[artifactId];
+      if (!entry) throw Object.assign(new Error('missing'), { code: 'ARTIFACT_NOT_FOUND' });
+      if (!armed) return entry;
+      if (artifactId === a1 || artifactId === b1) {
+        await gate;
+        return entry;
+      }
+      return entry;
+    },
+  };
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let staged = 0;
+  const host = fakeHost({
+    async stage(input) {
+      host.calls.push(['stage', input]);
+      if (failStage) throw Object.assign(new Error('stage timeout'), { code: 'ETIMEDOUT' });
+      staged += 1;
+      return { fileId: `file-${staged}`, name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+
+  const first = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+  const second = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [b1] })));
+  const third = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [c1] })));
+  const readyAction = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [r1] })));
+  assert.equal((await confirmViaRoute(harness, readyAction.actionId)).body.action.state, 'ready');
+  const unknownAction = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [u1] })));
+  failStage = true;
+  assert.equal((await confirmViaRoute(harness, unknownAction.actionId)).body.action.state, 'unknown');
+  failStage = false;
+  const createsBefore = host.calls.filter(call => call[0] === 'create').length;
+
+  armed = true;
+  const pending = [confirmViaRoute(harness, first.actionId), confirmViaRoute(harness, second.actionId)];
+  try {
+    await waitFor(() => reads.filter(id => id === a1).length === 2, '第一个确认进入产物复核');
+    await waitFor(() => reads.filter(id => id === b1).length === 2, '第二个确认进入产物复核');
+
+    // 不存在 / 其它 owner：是 404 而不是 busy
+    const missing = await confirmViaRoute(harness, `ha_${'e'.repeat(32)}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.code, 'HANDOFF_ACTION_NOT_FOUND');
+
+    const foreign = actionOf(await harness.call('POST', '/api/handoff/prepare', {
+      body: handoffContext({ artifactIds: [f1] }),
+      principal: 'user-2',
+    }));
+    const foreignConfirm = await confirmViaRoute(harness, foreign.actionId);
+    assert.equal(foreignConfirm.status, 404, '其它 owner 的动作一律 404');
+    assert.equal(foreignConfirm.body.code, 'HANDOFF_ACTION_NOT_FOUND');
+
+    // prepared 的第三个动作才是 busy，且不因 busy 去读产物
+    const busy = await confirmViaRoute(harness, third.actionId);
+    assert.equal(busy.status, 409);
+    assert.equal(busy.body.code, 'HANDOFF_BUSY');
+    assert.equal(reads.filter(id => id === c1).length, 1, 'busy 时不读产物');
+    assert.equal((await store.get({ owner: OWNER, actionId: third.actionId })).action.state, 'prepared');
+
+    // 终态动作：直接查库返回 200，不新 create、不抢名额
+    const readyAgain = await confirmViaRoute(harness, readyAction.actionId);
+    assert.equal(readyAgain.status, 200);
+    assert.equal(readyAgain.body.ok, true);
+    assert.equal(readyAgain.body.action.state, 'ready');
+    assert.equal(readyAgain.body.action.actionId, readyAction.actionId);
+
+    const unknownAgain = await confirmViaRoute(harness, unknownAction.actionId);
+    assert.equal(unknownAgain.status, 200);
+    assert.equal(unknownAgain.body.ok, true);
+    assert.equal(unknownAgain.body.action.state, 'unknown');
+
+    assert.equal(
+      host.calls.filter(call => call[0] === 'create').length,
+      createsBefore,
+      '只查询不能再创建会话',
+    );
+  } finally {
+    release();
+    await Promise.allSettled(pending);
+  }
+  const results = await Promise.all(pending);
+  assert.ok(results.every(result => result.body.ok), '释放栅栏后两个编排都能完成');
+});
+

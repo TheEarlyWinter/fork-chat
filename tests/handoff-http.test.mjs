@@ -169,3 +169,47 @@ test('M1: the bounded streaming path still enforces the real byte limit and UTF-
   assert.deepEqual(parsed, { a: 1 });
   assert.ok(PREPARE_MAX_BODY_BYTES > 64);
 });
+
+// ---------------------------------------------------------------------------
+// round5 C-I7：Object.prototype 上的继承键（constructor/__proto__/...）不是已知 code
+// ---------------------------------------------------------------------------
+
+test('round5 C-I7: prototype keys are unknown codes, so status stays 500 and a real Response builds', async () => {
+  for (const key of ['constructor', '__proto__', 'toString', 'valueOf']) {
+    const error = new Error('SECRET_SENTINEL /private/path');
+    error.code = key;
+
+    const response = fail(jsonContext(), error);
+    assert.equal(typeof response.status, 'number', `${key}: status 不能是继承来的函数`);
+    assert.equal(response.status, 500, key);
+    assert.equal(response.body.code, 'HANDOFF_INTERNAL', key);
+    assert.equal(response.body.error, '请求未执行', key);
+    assert.equal(JSON.stringify(response.body).includes('SECRET_SENTINEL'), false, key);
+
+    // 真 Response 构造必须成功：函数型 status 会直接 RangeError
+    const real = new Response(JSON.stringify(response.body), { status: response.status });
+    assert.equal(real.status, 500, key);
+    assert.equal(JSON.stringify(await real.json()).includes('constructor'), false, key);
+  }
+});
+
+test('round5 C-I7: own-property lookups keep the known table and local 413/403/404 mappings', async () => {
+  const upstream = new Error('SECRET_SENTINEL');
+  upstream.code = 'HANDOFF_HOST_ERROR';
+  const mapped = fail(jsonContext(), upstream);
+  assert.equal(mapped.status, 502);
+  assert.equal(mapped.body.code, 'HANDOFF_HOST_ERROR');
+  assert.equal(mapped.body.error, '宿主调用失败');
+
+  const cases = [
+    ['HANDOFF_INVALID_REQUEST', '请求体超过上限', 413],
+    ['HANDOFF_PERMISSION_MISSING', '缺少分支交接所需授权', 403],
+    ['HANDOFF_ACTION_NOT_FOUND', '交接动作不存在或不属于当前调用方', 404],
+  ];
+  for (const [code, message, status] of cases) {
+    const response = fail(jsonContext(), httpError(code, message, status));
+    assert.equal(response.status, status, code);
+    assert.equal(response.body.code, code, code);
+    assert.equal(response.body.error, message, code);
+  }
+});
