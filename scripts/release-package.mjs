@@ -23,7 +23,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
 export function isExcludedFile(p) {
   const base = path.posix.basename(p);
   return /^(docs|tests|scripts|\.github|\.hana|\.cache|node_modules|dist|build|out)(\/|$)/.test(p)
-    || ['REPAIR-NOTES.md', '.gitignore', '.DS_Store', 'Thumbs.db'].includes(base)
+    || ['REPAIR-NOTES.md', '.gitignore', '.gitattributes', '.DS_Store', 'Thumbs.db'].includes(base)
     || /(^|\/)\.env(?:\.|$)/.test(p)
     || /\.(pem|key|pfx|p12|pkcs12|cert|crt|log|tmp|swp)$/i.test(base)
     || /^(id_rsa|id_ed25519)$/.test(base);
