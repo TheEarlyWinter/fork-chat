@@ -228,12 +228,16 @@ function normalizeNode(raw, index) {
   if (typeof raw.cardId !== 'string' || !ID_REGEX.test(raw.cardId)) throw invalid(`第 ${index + 1} 个节点标识不合法`);
   if (!Array.isArray(raw.parentIds)) throw invalid(`节点 ${raw.cardId} 的父节点列表必须是数组`);
   const parentIds = [];
+  const seenParents = new Set();
   for (const parentId of raw.parentIds) {
     if (typeof parentId !== 'string' || !ID_REGEX.test(parentId)) throw invalid(`节点 ${raw.cardId} 的父节点标识不合法`);
     if (parentId === raw.cardId) {
       throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_CYCLE, `节点 ${raw.cardId} 把自己当成父节点`);
     }
-    if (!parentIds.includes(parentId)) parentIds.push(parentId);
+    if (!seenParents.has(parentId)) {
+      seenParents.add(parentId);
+      parentIds.push(parentId);
+    }
   }
   const contextMode = raw.contextMode === undefined ? 'include' : raw.contextMode;
   if (contextMode !== 'include' && contextMode !== 'exclude') throw invalid(`节点 ${raw.cardId} 的上下文标记不合法`);
@@ -255,12 +259,16 @@ function normalizeExclusion(raw, index) {
   if (typeof raw.cardId !== 'string' || !ID_REGEX.test(raw.cardId)) throw invalid(`第 ${index + 1} 个排除项标识不合法`);
   if (!Array.isArray(raw.parentIds)) throw invalid(`第 ${index + 1} 个排除项的父节点列表必须是数组`);
   const parentIds = [];
+  const seenParents = new Set();
   for (const parentId of raw.parentIds) {
     if (typeof parentId !== 'string' || !ID_REGEX.test(parentId)) throw invalid(`第 ${index + 1} 个排除项的父节点标识不合法`);
     if (parentId === raw.cardId) {
       throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_CYCLE, `排除项 ${raw.cardId} 把自己当成父节点`);
     }
-    if (!parentIds.includes(parentId)) parentIds.push(parentId);
+    if (!seenParents.has(parentId)) {
+      seenParents.add(parentId);
+      parentIds.push(parentId);
+    }
   }
   return {
     cardId: raw.cardId,
@@ -482,8 +490,9 @@ export function validateHandoffContext(value) {
   for (const node of nodes) graph.set(node.cardId, { parentIds: node.parentIds, contextMode: node.contextMode });
   for (const item of exclusions) graph.set(item.cardId, { parentIds: item.parentIds, contextMode: 'exclude' });
 
-  // 从目标反向遍历：缺父、环、不可达节点/排除项都拒绝
+  // 从目标反向遍历：缺父、环、不可达节点/排除项都拒绝；同时记下 parent-first 完成顺序
   const visitState = new Map([[source.targetCardId, 1]]);
+  const postorder = [];
   const stack = [{ id: source.targetCardId, cursor: 0 }];
   while (stack.length) {
     const frame = stack[stack.length - 1];
@@ -503,6 +512,7 @@ export function validateHandoffContext(value) {
       continue;
     }
     visitState.set(frame.id, 2);
+    postorder.push(frame.id);
     stack.pop();
   }
   for (const cardId of graph.keys()) {
@@ -511,23 +521,38 @@ export function validateHandoffContext(value) {
     }
   }
 
-  // 包含节点必须保持拓扑顺序；祖先可能隔着被排除的节点，要沿合并图逐层上溯
+  // 包含节点必须保持拓扑顺序。沿上面的 parent-first 完成顺序递推：
+  // M(v) = 所有严格祖先里被包含节点的最大下标，无则 -1；每父只传播一次，单点单边 O(1)。
+  // 排除节点没有自己的 index，但仍传播 M，所以经 exclude 连接的祖先不会被漏掉；
+  // reference 不是父边，不进这个递推；无依赖兄弟因此仍可自由重排。
   const nodeIndex = new Map(nodes.map((node, index) => [node.cardId, index]));
-  for (const [index, node] of nodes.entries()) {
-    const seen = new Set();
-    const pending = [...node.parentIds];
-    while (pending.length) {
-      const ancestorId = pending.pop();
-      if (seen.has(ancestorId)) continue;
-      seen.add(ancestorId);
-      if (nodeIds.has(ancestorId) && nodeIndex.get(ancestorId) >= index) {
-        throw handoffError(
-          HANDOFF_ERROR_CODES.HANDOFF_ORDER,
-          `节点 ${node.cardId} 的祖先 ${ancestorId} 没有排在它前面（可能成环或不是拓扑序）`,
-        );
+  const ancestorIndex = new Map();
+  const ancestorId = new Map();
+  for (const cardId of postorder) {
+    let best = -1;
+    let bestId = null;
+    for (const parentId of graph.get(cardId).parentIds) {
+      const parentBest = ancestorIndex.get(parentId) ?? -1;
+      if (parentBest > best) {
+        best = parentBest;
+        bestId = ancestorId.get(parentId) ?? null;
       }
-      for (const parentId of graph.get(ancestorId).parentIds) pending.push(parentId);
+      const own = nodeIndex.get(parentId);
+      if (own !== undefined && own > best) {
+        best = own;
+        bestId = parentId;
+      }
     }
+    ancestorIndex.set(cardId, best);
+    ancestorId.set(cardId, bestId);
+  }
+  for (const [index, node] of nodes.entries()) {
+    if ((ancestorIndex.get(node.cardId) ?? -1) < index) continue;
+    const offending = ancestorId.get(node.cardId);
+    throw handoffError(
+      HANDOFF_ERROR_CODES.HANDOFF_ORDER,
+      `节点 ${node.cardId} 的祖先 ${offending ?? node.cardId} 没有排在它前面（可能成环或不是拓扑序）`,
+    );
   }
 
   if (!Array.isArray(value.referenceSources)) throw invalid('引用来源元数据必须是数组');

@@ -104,14 +104,15 @@ function indexCards(snapshot) {
 /**
  * 从目标节点沿父边回溯，返回"父节点在前"的确定顺序。
  * 用显式栈的 DFS；遇到环、缺父或超限立即拒绝。
+ * 每个 frame 只取一次父列表，不随边的数量重复重建集合。
  */
 function collectDependencyOrder(cardMap, targetCardId) {
   const state = new Map([[targetCardId, 1]]);
   const finished = [];
-  const stack = [{ id: targetCardId, cursor: 0 }];
+  const stack = [{ id: targetCardId, cursor: 0, parents: parentIdsOf(cardMap.get(targetCardId)) }];
   while (stack.length) {
     const frame = stack[stack.length - 1];
-    const parents = parentIdsOf(cardMap.get(frame.id));
+    const parents = frame.parents;
     if (frame.cursor < parents.length) {
       const parentId = parents[frame.cursor++];
       const parentState = state.get(parentId) ?? 0;
@@ -121,7 +122,7 @@ function collectDependencyOrder(cardMap, targetCardId) {
         throw handoffError(CODES.HANDOFF_MISSING_PARENT, `卡片 ${frame.id} 的父卡片 ${parentId} 不在快照里`);
       }
       state.set(parentId, 1);
-      stack.push({ id: parentId, cursor: 0 });
+      stack.push({ id: parentId, cursor: 0, parents: parentIdsOf(cardMap.get(parentId)) });
       if (state.size > HANDOFF_LIMITS.maxNodes) {
         throw handoffError(
           CODES.HANDOFF_TOO_MANY_NODES,
