@@ -329,6 +329,55 @@ test('confirm rejects any body field besides actionId', async () => {
   assert.equal((await store.get({ owner: OWNER, actionId: prepared.actionId })).action.state, 'prepared');
 });
 
+/**
+ * 只让 dispatch.decision 的独占写句柄在真实关闭之后报错：close 本身已经发生，
+ * 但这次写入不能被当作可靠结束。failWrite 同时让 writeFile 在写完后报错，
+ * 覆盖“写与 close 同时失败”。
+ */
+function fsWithDecisionCloseFailure({ failWrite = false } = {}) {
+  return {
+    ...realFs,
+    async open(target, flags, mode) {
+      const handle = await realFs.open(target, flags, mode);
+      // 只接管独占写句柄；读取 dispatch.decision 的路径仍走真实 handle
+      if (flags !== 'wx' || !String(target).endsWith('dispatch.decision')) return handle;
+      return {
+        writeFile: async bytes => {
+          await handle.writeFile(bytes);
+          if (failWrite) throw Object.assign(new Error('SECRET_WRITE'), { code: 'EIO' });
+        },
+        sync: () => handle.sync(),
+        close: async () => {
+          await handle.close();
+          throw Object.assign(new Error('SECRET_CLOSE'), { code: 'EIO' });
+        },
+      };
+    },
+  };
+}
+
+test('a dispatch.decision write or close failure stops the claim before any host create', async () => {
+  for (const failWrite of [false, true]) {
+    const label = failWrite ? 'write+close' : 'close-only';
+    const dataDir = await makeDir();
+    const store = createHandoffStore({ dataDir, fs: fsWithDecisionCloseFailure({ failWrite }), clock: () => 1 });
+    const host = fakeHost();
+    const harness = makeHarness({ dataDir, store, host });
+
+    const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+    const response = await confirmViaRoute(harness, prepared.actionId);
+    assert.equal(response.status, 500, `${label}: a failed decision write must not look like a finished claim`);
+    assert.equal(response.body.ok, false, label);
+    assert.equal(response.body.code, 'HANDOFF_STORE_IO', `${label}: ${JSON.stringify(response.body)}`);
+    assert.equal(host.calls.some(call => call[0] === 'create'), false, `${label}: no host session may be created`);
+    assert.equal(host.calls.length, 0, `${label}: the claim must stop before any host side effect`);
+    assert.equal(JSON.stringify(response.body).includes('SECRET'), false, `${label}: fs errors must not leak`);
+    const stored = await store.get({ owner: OWNER, actionId: prepared.actionId });
+    // 令牌已真实落盘但没有本地派发权：只做保守投影，绝不能是 ready
+    assert.equal(stored.action.state, 'unknown', `${label}: the action must stay conservative, never ready`);
+  }
+});
+
 test('confirm never creates a host session when the store claim is lost', async () => {
   const dataDir = await makeDir();
   const realStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
