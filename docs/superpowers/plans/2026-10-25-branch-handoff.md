@@ -72,20 +72,20 @@ UI 只提交该 DTO，不提交任意磁盘路径、owner、权限模式、工�
 - Create: `lib/handoff-host.js`
 - Create: `lib/handoff-store.js`
 - Create: `lib/handoff-service.js`
-- Modify: `manifest.json`（只增加 home 声明，兼容最低版本以官方校验支持格式为准）
-- Sync: `sdk/`、`ui/assets/sdk.js` 中本功能确需的官方 SDK 生成产物；记录版本来源，不手改生成文件。只用已安装官方 1.1.111-beta tgz，不下载或运行新宿主。
+- Modify: `manifest.json`（增加 home 声明；minAppVersion 为 1.1.111-beta；本地预览版本 2.3.0-beta.1，不发布）
+- Sync: 仅同步官方 home 相关生成产物：`sdk/app-entity-capabilities.{js,d.ts,js.map,d.ts.map}`、`sdk/app-contract/bus-requests.{d.ts,d.ts.map,js.map}`、`sdk/app-contract/sessions.{d.ts,d.ts.map}`、`sdk/app-contract/index.{js,d.ts,js.map,d.ts.map}`。记录压缩包摘要、版本及成员摘要于 `sdk/handoff-sdk-provenance.json`。不手改生成文件。只用已安装官方 1.1.111-beta tgz，不下载或运行新宿主。经主线程逐文件摘要比较，当前 ui/assets/sdk.js 对应的官方 ui.js 无差异，不同步无关 UI、主题或组件。
 - Create: `tests/handoff-host.test.mjs`、`tests/handoff-store.test.mjs`、`tests/handoff-service.test.mjs`
 
 **Interfaces:**
 - Consumes: Task 1 的 HandoffContext 与 contract 导出。
-- Produces: `createHandoffHost({sdk})`，提供异步 `capabilities()`、`create({agentId})`、`isIdle(sessionId)`、`stage({sessionId,path,name,mime})`、`writeContext({sessionId,content,details})`。保持 SDK 方法 receiver，优先使用命名接口。仅接受主页/public 的创建回执；writeContext 必须是 notifyOnly 且有 entryId。
+- Produces: `createHandoffHost({sdk})`，提供异步 `capabilities()`、`create({agentId})`、`isIdle(sessionId)`、`stage({sessionId,path,name,mime})`、`writeContext({sessionId,content,details})`。保持 SDK 方法 receiver，优先使用命名接口。仅接受主页/public 的创建回执；创建回执若不合要求但有可信 sessionId，错误须携带该已知 ID，service 保存半成品记录。writeContext 必须是 notifyOnly 且有 entryId。stage 优先从正式回执 `resource.fileId` 取标识，不从文件名或路径猜 ID。
 - Produces: `createHandoffStore({dataDir,fs,clock})`，方法 `prepare({owner,context})`、`get({owner,actionId})`、`list({owner})`、`claim({owner,actionId})`、`checkpoint({owner,actionId,state,receipt})`。可按需求补内部辅助方法，外部不接收任意路径。
 - Produces: `createHandoffService({sdk,dataDir,artifacts,host,store})`，artifacts 复用既有 `artifactService.read({owner,artifactId})`，host/store 可注入测试；返回 `register(app)`。
 - Routes: GET `/api/handoff/capabilities`；POST `/api/handoff/prepare`（body 为 HandoffContext）；POST `/api/handoff/confirm`（仅 actionId）；GET `/api/handoff/actions/:actionId`；GET `/api/handoff/actions`。
 - Returns: `{ok:true,action}` 或 `{ok:false,code,error}`；capabilities `{ok:true,...caps,limits}`。action 至少有 actionId/state/source/agentId/payloadHash/createdAt/bytes/sessionId/files/errorCode，只有同 owner 能读。
 - State: prepared→creating→importing→ready；以及 failed/partial/unknown。持久化独占派发标记跨进程阻止相同 action 重放。不得用一个可覆盖的共享 JSON 文件当跨进程锁。
 - Prepare 只落 App 私有盘，验证 Agent/权限及产物完整性，不创建宿主会话。Confirm 复核后 create→逐个 stage 产物→stage 完整 Markdown→write 一条 custom→ready；正文格式化和文件索引超过上限则 partial 而非裁切。
-- Store 默认 TTL 30 分钟、每 owner 最多 32 动作、prepare 正文合计最多 16 MiB。准备超限先回收仅 prepared 且已过期动作；unknown 的派发标记不可自动回收。只删除明确路径的单个过期文件，不递归/批量删目录。
+- Store 默认 TTL 30 分钟、每 owner 最多 32 动作、prepare 正文合计最多 16 MiB。准备超限先回收已过期 prepared，以及已明确完成的 ready/failed 动作的本地准备正文和元数据；保留派发防重标记，不删除宿主会话/文件或源产物。creating/importing/partial/unknown 不自动回收；重启时尚未终结的已派发动作收为 unknown。每个文件通过明确的 actionId 路径逐个 unlink，不递归删除目录。新 prepare 的 ID 由服务端随机生成，遇到已有派发标记必须换 ID，不允许通过清理重新开放旧 ID 派发。
 - 官方 SDK：`/home/theearlywinter/.hanako/skills/hana-app-creator/assets/sdk/hana-app-sdk.tgz`。只读宿主证据位于已安装 1.1.111-beta artifact；不要修改托管 SDK 或已安装 App，仅同步开发工作区生成依赖。
 
 - [ ] **Step 1: 写 host RED**：命名 SDK 缺失、能力拒绝、home/memory false、错误可见性、busy、triggerTurn false、notifyOnly 回执、stage 不调用 send。
@@ -103,6 +103,7 @@ UI 只提交该 DTO，不提交任意磁盘路径、owner、权限模式、工�
 - Modify: `ui/assets/panel-cards.js`（按钮）
 - Modify: `ui/assets/panel-card-events.js`（路由事件）
 - Modify: `ui/assets/panel.js`、`index.js`（只做依赖注入、初始化、清理和注册）
+- Modify: `ui/assets/fork-session-controller.js`（增加只读 getSavedSnapshot()，保留 flush 原返回语义）、`ui/assets/panel-documents.js`（增加按卡 isPending(cardId) 查询，不暴露任务表）
 - Modify: `ui/assets/panel.css`、`ui/panel.html`（仅需要的原生对话框结构/样式，优先控制器动态创建）
 - Create: `tests/panel-handoff.test.mjs`、`tests/handoff-integration.test.mjs`
 - Modify: `README.md`、`CHANGELOG.md`，以及已有受入口按钮影响的相关测试
@@ -111,11 +112,11 @@ UI 只提交该 DTO，不提交任意磁盘路径、owner、权限模式、工�
 - Consumes: Task 1 builder/formatter；Task 2 routes/action。
 - Produces: `createPanelHandoff(deps)` → `{open(targetCardId),dispose()}`。deps 通过现有主协调器注入 requestHost/hana、snapshot 捕获、sessionController.flush/state、Agent 列表及 toast/生命周期信号，不从 window 偷取全局状态。
 - 按钮文案“在 Hana 中继续”，旧“回传原会话”保留。按钮动作固定 `handoff`，通过既有 card events 委派。
-- 流程：flush→冻结成功保存的 snapshot/revision→选择有效 Agent→预览→prepare→只确认 actionId→查询同动作结果→ready 后允许 focus。双击单飞，画布切换/销毁不串线、不重建。
+- 流程：检查目标依赖活跃任务→flush→getSavedSnapshot()取得独立深拷贝{id,revision,snapshot}→再次核对代际、当前持久activeId及活跃任务→选择有效 Agent→预览→prepare→只确认 actionId→查询同动作结果→ready 后允许 focus。source.canvasId用持久record.id，不用临时panel ID。getter在未ready/busy/closed/saving/dirty/error/无active时拒绝，不可再次capture实时状态充当已保存版本。双击单飞，画布切换/销毁不串线、不重建。详见task-3-controller-notes.md。
 - 对话框说明：默认关闭记忆、不主动启动模型、快照不再同步、原件未保留等 notices。下一步要求写入交接正文，不承诺宿主输入框预填。
 - 用户可预览节点折叠正文和附件，明确错误/排除项、正文体积及来源版本；有完整性错误时禁止确认，不用 innerHTML 注入对话文本。
 - partial/unknown 展示可理解的提示；已知 sessionId 可打开核查。重新加载只 GET 动作列表，不自动 confirm。
-- 适配旧宿主/无权限时旧功能仍可用，入口提示原因，绝不私有会话降级。
+- 在受支持宿主上，缺 home 授权或命名 API 不可用时旧功能仍可用，入口提示原因，绝不私有会话降级。本开发版本最低宿主为 1.1.111-beta，不承诺在更老宿主加载扩权后的新版 manifest。
 
 - [ ] **Step 1: 写 UI RED**：flush 失败无 prepare、冻结版本不随画布变化、有效/失效 Agent 选择、草稿 nextStep 仅明确复制、禁用重复确认、确认不发送修改后正文、ready 后 focus、focus 失败不重建、销毁/切换后不更新错误画布、重开只查询。
 - [ ] **Step 2: 写 integration RED**：接入真实 builder+真实 service/store 和假宿主，通过一次完整控制器流程验证 custom 全文与文件、固定参数、无 send/model 调用；非法 owner/权限与 partial/unknown 回归。
