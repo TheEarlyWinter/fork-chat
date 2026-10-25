@@ -8,6 +8,7 @@
 import {
   ID_REGEX,
   ATTACHMENT_MAX_CHARS,
+  LEGACY_ATTACHMENT_MAX_CHARS,
   DOC_CONTENT_MAX_CHARS,
   parentIdsOf,
 } from './fork-snapshot.js';
@@ -23,6 +24,12 @@ import {
 
 const ARTIFACT_ID_REGEX = /^[a-f0-9]{32}$/;
 const GENERATING_STATUSES = new Set(['waiting', 'generating', 'delivering']);
+const MESSAGE_STATUS_MAP = new Map([
+  ['completed', 'ok'],
+  ['failed', 'failed'],
+  ['partial', 'partial'],
+  ['cancelled', 'cancelled'],
+]);
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -74,6 +81,9 @@ function indexCards(snapshot) {
       throw invalidSnapshot(`卡片 ${card.id} 的上下文标记不合法`);
     }
     const parents = parentIdsOf(card);
+    if (card.contextRefs !== undefined && card.contextRefs !== null && !Array.isArray(card.contextRefs)) {
+      throw invalidSnapshot(`卡片 ${card.id} 的 references 必须是数组`);
+    }
     for (const parentId of parents) {
       if (typeof parentId !== 'string' || !ID_REGEX.test(parentId)) {
         throw invalidSnapshot(`卡片 ${card.id} 的父节点标识不合法`);
@@ -125,13 +135,18 @@ function collectDependencyOrder(cardMap, targetCardId) {
 }
 
 function buildDoc(card) {
-  const content = typeof card.docContent === 'string' ? card.docContent : '';
-  if (!content) {
-    if (card.docContentTruncated) {
-      throw handoffError(CODES.HANDOFF_DOC_TRUNCATED, `卡片 ${card.id} 的资料正文已被裁切，无法完整交接`);
-    }
-    return null;
+  if (card.docContent !== undefined && typeof card.docContent !== 'string') {
+    throw invalidSnapshot(`卡片 ${card.id} 的 docContent 必须是字符串`);
   }
+  const claimsDoc = card.isDoc === true || isPlainObject(card.docMeta);
+  if (!claimsDoc) {
+    // 普通聊天卡没有 docContent 是合法的；空字符串也只是没有资料
+    if (card.docContent === undefined || card.docContent === '') return null;
+  }
+  if (typeof card.docContent !== 'string' || card.docContent.trim() === '') {
+    throw handoffError(CODES.HANDOFF_DOC_MISSING_CONTENT, `卡片 ${card.id} 声明为资料卡但没有保存正文`);
+  }
+  const content = card.docContent;
   if (card.docContentTruncated) {
     throw handoffError(CODES.HANDOFF_DOC_TRUNCATED, `卡片 ${card.id} 的资料正文已被裁切，无法完整交接`, {
       kept: card.docContentTruncated.kept,
@@ -183,7 +198,13 @@ function buildAttachments(message, cardId, messageIndex) {
   }
   return list.map((raw, index) => {
     if (!isPlainObject(raw)) throw invalidSnapshot(`卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件不是对象`);
-    const content = typeof raw.content === 'string' ? raw.content : '';
+    if (typeof raw.content !== 'string' || raw.content.trim() === '') {
+      throw handoffError(
+        CODES.HANDOFF_ATTACHMENT_MISSING_CONTENT,
+        `卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件 ${index + 1} 没有保存正文`,
+      );
+    }
+    const content = raw.content;
     const reported = Number.isSafeInteger(raw.charCount) ? raw.charCount : null;
     if (reported !== null && reported > content.length) {
       throw handoffError(
@@ -196,6 +217,12 @@ function buildAttachments(message, cardId, messageIndex) {
       throw handoffError(
         CODES.HANDOFF_ATTACHMENT_INTEGRITY_UNKNOWN,
         `卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件 ${index + 1} 达到历史截断阈值，完整性无法确认`,
+      );
+    }
+    if (content.length === LEGACY_ATTACHMENT_MAX_CHARS) {
+      throw handoffError(
+        CODES.HANDOFF_ATTACHMENT_INTEGRITY_UNKNOWN,
+        `卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件 ${index + 1} 恰好等于旧版裁切阈值 ${LEGACY_ATTACHMENT_MAX_CHARS}，完整性无法确认`,
       );
     }
     return {
@@ -258,10 +285,18 @@ function buildMessage(raw, cardId, index, artifactState) {
       `卡片 ${cardId} 第 ${index + 1} 条消息仍在生成或解析，先停止或等待完成再交接`,
     );
   }
-  let status = 'ok';
+  const explicit = raw.status;
+  if (explicit !== undefined && explicit !== null && explicit !== '') {
+    if (typeof explicit !== 'string' || !MESSAGE_STATUS_MAP.has(explicit)) {
+      throw handoffError(
+        CODES.HANDOFF_UNKNOWN_MESSAGE_STATUS,
+        `卡片 ${cardId} 第 ${index + 1} 条消息的状态 ${String(explicit)} 无法识别`,
+      );
+    }
+  }
+  let status = MESSAGE_STATUS_MAP.get(explicit) ?? 'ok';
   if (raw.partial === true) status = 'partial';
-  else if (raw.failed === true) status = raw.status === 'cancelled' ? 'cancelled' : 'failed';
-  else if (raw.status === 'cancelled') status = 'cancelled';
+  else if (raw.failed === true) status = explicit === 'cancelled' ? 'cancelled' : 'failed';
   return {
     role: raw.role,
     text: raw.text,
@@ -399,8 +434,9 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
   for (const card of includedCards) {
     const doc = buildDoc(card);
     if (doc) hasOriginalBodies = true;
+    if (!Array.isArray(card.messages)) throw invalidSnapshot(`卡片 ${card.id} 的 messages 必须是数组`);
     const messages = [];
-    for (const [index, raw] of (Array.isArray(card.messages) ? card.messages : []).entries()) {
+    for (const [index, raw] of card.messages.entries()) {
       const message = buildMessage(raw, card.id, index, artifactState);
       if (!message) {
         localNoticeCount++;

@@ -48,6 +48,9 @@ export const HANDOFF_ERROR_CODES = Object.freeze(Object.fromEntries([
   'HANDOFF_INVALID_AGENT',
   'HANDOFF_INVALID_NEXT_STEP',
   'HANDOFF_GENERATING',
+  'HANDOFF_UNKNOWN_MESSAGE_STATUS',
+  'HANDOFF_DOC_MISSING_CONTENT',
+  'HANDOFF_ATTACHMENT_MISSING_CONTENT',
   'HANDOFF_DOC_TRUNCATED',
   'HANDOFF_DOC_INTEGRITY_UNKNOWN',
   'HANDOFF_ATTACHMENT_TRUNCATED',
@@ -156,6 +159,7 @@ function countLines(text) {
 function normalizeDoc(raw) {
   if (!isPlainObject(raw)) throw invalid('资料必须是非空对象');
   const content = requireString(raw.content, '资料正文');
+  if (content.trim() === '') throw invalid('资料正文不能为空');
   return {
     name: sanitizeLabel(raw.name, 200, '资料名称'),
     extension: sanitizeLabel(raw.extension, 50, '资料类型'),
@@ -167,7 +171,8 @@ function normalizeDoc(raw) {
 
 function normalizeAttachment(raw, index) {
   if (!isPlainObject(raw)) throw invalid(`第 ${index + 1} 个附件不是对象`);
-  const content = requireString(raw.content ?? '', `第 ${index + 1} 个附件正文`);
+  const content = requireString(raw.content, `第 ${index + 1} 个附件正文`);
+  if (content.trim() === '') throw invalid(`第 ${index + 1} 个附件正文不能为空`);
   return {
     name: sanitizeLabel(raw.name, 200, '附件名称'),
     extension: sanitizeLabel(raw.extension, 50, '附件类型'),

@@ -15,6 +15,11 @@ export const DOC_CONTENT_MAX_CHARS = 2000000;
 /** 单个附件正文上限 */
 export const ATTACHMENT_MAX_CHARS = 1000000;
 /**
+ * 历史版本曾把已发送附件的正文裁到 30 万字符。恰好等于这个长度的正文
+ * 既可能是被旧上限切过的，也可能本来就这么长；缺可靠原始长度时只能保守处理。
+ */
+export const LEGACY_ATTACHMENT_MAX_CHARS = 300000;
+/**
  * 盖戳的合法取值。真实循环是 无 → starred → accepted → rejected → 无，
  * 这里少写一档就等于每次重开都把那一档重置掉。
  */
@@ -268,7 +273,9 @@ export function normalizeForkSnapshot(input) {
         // 与旧标记取并集，不因重算而丢掉历史信息
         const truncatedIdx = new Set(savedTruncatedIdx);
         msg.attachments.forEach((att, i) => {
-          if (att.content.length >= ATTACHMENT_MAX_CHARS) truncatedIdx.add(i);
+          if (att.content.length >= ATTACHMENT_MAX_CHARS || att.content.length === LEGACY_ATTACHMENT_MAX_CHARS) {
+            truncatedIdx.add(i);
+          }
         });
         if (truncatedIdx.size) msg.attachmentsTruncated = [...truncatedIdx].sort((a, b) => a - b);
       } else if (savedTruncatedIdx.length) {
