@@ -114,6 +114,27 @@ async function prepareMany(store, count, owner = OWNER) {
   return actions;
 }
 
+const ARCHIVE_FILE = { fileId: 'file-archive', name: '交接.md', mime: 'text/markdown', kind: 'archive' };
+
+function artifactFile(artifactId, fileId = 'file-1') {
+  return { fileId, name: '文档.md', mime: 'text/markdown', kind: 'artifact', artifactId };
+}
+
+/** 走真实状态机完成一个 ready 动作：importing 需要 session，ready 需要 entry + 归档 */
+async function completeReady(store, action, { sessionId = 'sess-1', entryId = 'entry-1', artifactIds = [] } = {}) {
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId } });
+  await store.checkpoint({
+    owner: OWNER,
+    actionId: action.actionId,
+    state: 'ready',
+    receipt: {
+      entryId,
+      files: [...artifactIds.map((artifactId, index) => artifactFile(artifactId, `file-${index + 1}`)), ARCHIVE_FILE],
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 1. 基本读写、owner 隔离、路径注入、私有形状
 // ---------------------------------------------------------------------------
@@ -266,8 +287,8 @@ test('claim asks only for prepared actions and never grants settled states', asy
   const store = makeStore(dataDir);
   const action = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: action.actionId });
-  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing' });
-  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready' });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] } });
 
   assert.equal((await makeStore(dataDir).claim({ owner: OWNER, actionId: action.actionId })).claimed, false);
 });
@@ -289,7 +310,7 @@ test('a foreign instance projects unknown without writing, then sees ready after
   assert.equal((await realFs.stat(recordPath)).mtimeMs, beforeStat.mtimeMs);
 
   await owner.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
-  await owner.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready' });
+  await owner.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] } });
   const after = await foreign.get({ owner: OWNER, actionId: action.actionId });
   assert.equal(after.action.state, 'ready');
   assert.equal(after.action.sessionId, 'sess-1');
@@ -334,7 +355,7 @@ test('checkpoint failures revoke local dispatch rights and keep only append-only
       owner: OWNER,
       actionId: action.actionId,
       state: 'importing',
-      receipt: { sessionId: 'sess-1', files: [{ fileId: 'file-1', name: 'a.md', mime: 'text/markdown', kind: 'artifact', artifactId: 'a'.repeat(32) }] },
+      receipt: { sessionId: 'sess-1', files: [ARCHIVE_FILE] },
     }),
     error => error.code === CODES.STORE_IO,
   );
@@ -367,7 +388,7 @@ test('checkpoint is single-writer, append-only and cannot overwrite terminal sta
     state: 'importing',
     receipt: {
       sessionId: 'sess-1',
-      files: [{ fileId: 'file-1', name: 'a.md', mime: 'text/markdown', kind: 'artifact' }],
+      files: [ARCHIVE_FILE],
     },
   });
   const imported = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { entryId: 'entry-1' } });
@@ -490,7 +511,7 @@ test('creating, importing, unknown and partial actions survive TTL', async () =>
 
   const importing = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: importing.actionId });
-  await store.checkpoint({ owner: OWNER, actionId: importing.actionId, state: 'importing' });
+  await store.checkpoint({ owner: OWNER, actionId: importing.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
 
   const unknown = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: unknown.actionId });
@@ -498,7 +519,7 @@ test('creating, importing, unknown and partial actions survive TTL', async () =>
 
   const partial = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: partial.actionId });
-  await store.checkpoint({ owner: OWNER, actionId: partial.actionId, state: 'partial' });
+  await store.checkpoint({ owner: OWNER, actionId: partial.actionId, state: 'partial', receipt: { sessionId: 'sess-1' } });
 
   now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
   await store.prepare({ owner: OWNER, context: handoffContext() });
@@ -518,7 +539,7 @@ test('ready and failed payloads are reclaimed but the action stays readable and 
   const ready = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: ready.actionId });
   await store.checkpoint({ owner: OWNER, actionId: ready.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
-  await store.checkpoint({ owner: OWNER, actionId: ready.actionId, state: 'ready', receipt: { entryId: 'entry-1' } });
+  await store.checkpoint({ owner: OWNER, actionId: ready.actionId, state: 'ready', receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] } });
 
   const failed = await store.prepare({ owner: OWNER, context: handoffContext() });
   await store.claim({ owner: OWNER, actionId: failed.actionId });
@@ -549,8 +570,7 @@ test('many ready actions do not permanently consume the 32-slot quota', async ()
   const store = makeStore(dataDir, { clock: () => now });
   const actions = await prepareMany(store, 32);
   for (const action of actions) {
-    await store.claim({ owner: OWNER, actionId: action.actionId });
-    await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready' });
+    await completeReady(store, action);
   }
 
   // ready 已完成，本地准备数据可以安全回收，不能让成功动作永久占满 32 个 slot
@@ -623,11 +643,17 @@ test('claim beating retire keeps the action; retire beating claim never resurrec
 
     const claimer = makeStore(dataDir, { clock: () => now });
     const sweeper = makeStore(dataDir, { clock: () => now });
-    const [claimResult] = await Promise.all([
+    const [claimSettled] = await Promise.allSettled([
       claimer.claim({ owner: OWNER, actionId: action.actionId }),
       sweeper.prepare({ owner: OWNER, context: handoffContext() }).catch(() => null),
     ]);
 
+    if (claimSettled.status === 'rejected') {
+      assert.equal(claimSettled.reason.code, CODES.ACTION_EXPIRED);
+      assert.equal(await claimer.get({ owner: OWNER, actionId: action.actionId }), null);
+      continue;
+    }
+    const claimResult = claimSettled.value;
     if (claimResult.claimed) {
       const got = await claimer.get({ owner: OWNER, actionId: action.actionId });
       assert.ok(got, 'claim 胜出时动作必须仍存在');
@@ -674,4 +700,356 @@ test('a corrupted payload is refused by get and claim', async () => {
 
   await assert.rejects(store.get({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.PAYLOAD_CORRUPT);
   await assert.rejects(store.claim({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.PAYLOAD_CORRUPT);
+});
+
+// ---------------------------------------------------------------------------
+// 7. C1：ready 的真实前置条件与记录守卫
+// ---------------------------------------------------------------------------
+
+test('ready can only be reached from importing and needs session, entry and one archive', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready' }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing' }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { files: [ARCHIVE_FILE] } }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1' } }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  const ready = await store.checkpoint({
+    owner: OWNER,
+    actionId: action.actionId,
+    state: 'ready',
+    receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] },
+  });
+  assert.equal(ready.state, 'ready');
+});
+
+test('ready requires every frozen artifact exactly once and rejects foreign artifacts', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const artifactId = 'a'.repeat(32);
+  const action = await store.prepare({
+    owner: OWNER,
+    context: handoffContext({ artifactIds: [artifactId] }),
+    artifactMetadata: [artifactMetadata(artifactId)],
+  });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] } }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  await assert.rejects(
+    store.checkpoint({
+      owner: OWNER,
+      actionId: action.actionId,
+      state: 'ready',
+      receipt: { entryId: 'entry-1', files: [artifactFile('b'.repeat(32), 'file-x'), ARCHIVE_FILE] },
+    }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+
+  const ready = await store.checkpoint({
+    owner: OWNER,
+    actionId: action.actionId,
+    state: 'ready',
+    receipt: { entryId: 'entry-1', files: [artifactFile(artifactId), ARCHIVE_FILE] },
+  });
+  assert.equal(ready.state, 'ready');
+  assert.deepEqual(ready.files.map(file => file.kind), ['artifact', 'archive']);
+});
+
+test('a record cannot claim ready on disk without session, entry, artifacts and archive', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+
+  const recordPath = path.join(ownerRoot(dataDir), 'actions', action.actionId, 'record.json');
+  const record = JSON.parse(await realFs.readFile(recordPath, 'utf8'));
+  await realFs.writeFile(recordPath, JSON.stringify({ ...record, state: 'ready' }), { mode: 0o600 });
+
+  await assert.rejects(store.get({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.STORE_CORRUPT);
+});
+
+test('failed is refused once host side effects are known; partial needs a known side effect', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'partial' }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'failed', receipt: { errorCode: 'HANDOFF_STAGE_FAILED' } }),
+    error => error.code === CODES.INVALID_STATE,
+  );
+  const partial = await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'partial', receipt: { errorCode: 'HANDOFF_STAGE_FAILED' } });
+  assert.equal(partial.state, 'partial');
+  assert.equal(partial.sessionId, 'sess-1');
+});
+
+// ---------------------------------------------------------------------------
+// 8. I1：过期 claim
+// ---------------------------------------------------------------------------
+
+test('claim refuses an expired prepared action and retires it without a new prepare', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+
+  await assert.rejects(
+    store.claim({ owner: OWNER, actionId: action.actionId }),
+    error => error.code === CODES.ACTION_EXPIRED,
+  );
+  assert.equal(await store.get({ owner: OWNER, actionId: action.actionId }), null);
+  assert.deepEqual(await store.list({ owner: OWNER }), []);
+});
+
+test('claim already in progress is not retired by TTL', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+
+  assert.equal((await store.claim({ owner: OWNER, actionId: action.actionId })).claimed, false);
+  await store.prepare({ owner: OWNER, context: handoffContext() });
+  const got = await store.get({ owner: OWNER, actionId: action.actionId });
+  assert.equal(got.action.state, 'creating');
+});
+
+// ---------------------------------------------------------------------------
+// 9. I2：nonce 按 owner 隔离，最终读取失败不留权
+// ---------------------------------------------------------------------------
+
+test('the same action id under two owners keeps separate checkpoint authority', async () => {
+  const dataDir = await makeDir();
+  const fixedId = 'ha_' + 'a'.repeat(32);
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => NOW, randomId: () => fixedId });
+  const actionA = await store.prepare({ owner: 'owner-a', context: handoffContext() });
+  const actionB = await store.prepare({ owner: 'owner-b', context: handoffContext() });
+  assert.equal(actionA.actionId, actionB.actionId);
+
+  assert.equal((await store.claim({ owner: 'owner-a', actionId: fixedId })).claimed, true);
+  assert.equal((await store.claim({ owner: 'owner-b', actionId: fixedId })).claimed, true);
+  await store.checkpoint({ owner: 'owner-a', actionId: fixedId, state: 'importing', receipt: { sessionId: 'sess-a' } });
+  await store.checkpoint({ owner: 'owner-b', actionId: fixedId, state: 'importing', receipt: { sessionId: 'sess-b' } });
+});
+
+test('a failed final payload read after claiming does not leave local dispatch authority', async () => {
+  const dataDir = await makeDir();
+  const prepared = await makeStore(dataDir).prepare({ owner: OWNER, context: handoffContext() });
+  let payloadOpens = 0;
+  const fs = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (...args) => {
+          if (String(args[0]).endsWith('payload.json')) {
+            payloadOpens += 1;
+            if (payloadOpens === 2) {
+              const error = new Error('final read failed');
+              error.code = 'EIO';
+              throw error;
+            }
+          }
+          return target.open(...args);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = createHandoffStore({ dataDir, fs, clock: () => NOW });
+
+  await assert.rejects(store.claim({ owner: OWNER, actionId: prepared.actionId }), error => error.code === CODES.STORE_IO);
+  await assert.rejects(
+    store.checkpoint({ owner: OWNER, actionId: prepared.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } }),
+    error => error.code === CODES.CHECKPOINT_DENIED,
+  );
+  assert.equal((await makeStore(dataDir).claim({ owner: OWNER, actionId: prepared.actionId })).claimed, false);
+});
+
+// ---------------------------------------------------------------------------
+// 10. I3：17 文件边界
+// ---------------------------------------------------------------------------
+
+test('16 artifacts plus one archive can be delivered in one batch or incrementally', async () => {
+  const dataDir = await makeDir();
+  const ids = Array.from({ length: 16 }, (_, index) => String(index).padStart(2, '0').repeat(16));
+  const store = makeStore(dataDir);
+  const context = handoffContext({ artifactIds: ids });
+  const metadata = ids.map(id => artifactMetadata(id));
+
+  const batch = await store.prepare({ owner: OWNER, context, artifactMetadata: metadata });
+  await store.claim({ owner: OWNER, actionId: batch.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: batch.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+  const ready = await store.checkpoint({
+    owner: OWNER,
+    actionId: batch.actionId,
+    state: 'ready',
+    receipt: { entryId: 'entry-1', files: [...ids.map((id, index) => artifactFile(id, `file-${index}`)), ARCHIVE_FILE] },
+  });
+  assert.equal(ready.files.length, 17);
+  assert.equal(ready.artifactCount, 16);
+
+  const incremental = await store.prepare({ owner: OWNER, context, artifactMetadata: metadata });
+  await store.claim({ owner: OWNER, actionId: incremental.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: incremental.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+  await store.checkpoint({
+    owner: OWNER,
+    actionId: incremental.actionId,
+    state: 'importing',
+    receipt: { files: ids.map((id, index) => artifactFile(id, `file-${index}`)) },
+  });
+  const incrementalReady = await store.checkpoint({
+    owner: OWNER,
+    actionId: incremental.actionId,
+    state: 'ready',
+    receipt: { entryId: 'entry-1', files: [ARCHIVE_FILE] },
+  });
+  assert.equal(incrementalReady.files.length, 17);
+});
+
+test('duplicate artifacts, several archives and files beyond 17 are refused', async () => {
+  const dataDir = await makeDir();
+  const id = 'a'.repeat(32);
+  const store = makeStore(dataDir);
+  const action = await store.prepare({
+    owner: OWNER,
+    context: handoffContext({ artifactIds: [id] }),
+    artifactMetadata: [artifactMetadata(id)],
+  });
+  await store.claim({ owner: OWNER, actionId: action.actionId });
+  await store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'importing', receipt: { sessionId: 'sess-1' } });
+
+  const tooMany = Array.from({ length: 17 }, (_, index) => ({ fileId: `extra-${index}`, name: 'x.md', mime: 'text/markdown', kind: 'archive' }));
+  const cases = [
+    [artifactFile(id, 'file-1'), artifactFile(id, 'file-2'), ARCHIVE_FILE],
+    [artifactFile(id, 'file-1'), ARCHIVE_FILE, { ...ARCHIVE_FILE, fileId: 'file-archive-2' }],
+    [artifactFile(id, 'file-1'), ARCHIVE_FILE, ...tooMany],
+  ];
+  for (const files of cases) {
+    await assert.rejects(
+      store.checkpoint({ owner: OWNER, actionId: action.actionId, state: 'ready', receipt: { entryId: 'entry-1', files } }),
+      error => error.code === CODES.INVALID_STATE,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 11. I5 / I6 / Minor：删除同步、最终符号链接、slot 结构
+// ---------------------------------------------------------------------------
+
+function faultyDirSync(match) {
+  return new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (...args) => {
+          const handle = await target.open(...args);
+          const filePath = String(args[0]);
+          return {
+            writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
+            readFile: (...readArgs) => handle.readFile(...readArgs),
+            close: () => handle.close(),
+            stat: (...statArgs) => handle.stat(...statArgs),
+            sync: async () => {
+              if (filePath.includes(match)) {
+                const error = new Error('injected dir fsync failure');
+                error.code = 'EIO';
+                throw error;
+              }
+              return handle.sync();
+            },
+          };
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+test('a failed slot-directory sync during TTL retire is reported, not swallowed', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  await store.prepare({ owner: OWNER, context: handoffContext() });
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+
+  const faulty = createHandoffStore({ dataDir, fs: faultyDirSync('/slots/'), clock: () => now });
+  await assert.rejects(faulty.prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_IO);
+});
+
+test('a failed action-directory sync after reclaiming a ready payload is reported', async () => {
+  const dataDir = await makeDir();
+  let now = NOW;
+  const store = makeStore(dataDir, { clock: () => now });
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  await completeReady(store, action);
+  now += HANDOFF_STORE_LIMITS.ttlMs + MINUTE;
+
+  const faulty = createHandoffStore({ dataDir, fs: faultyDirSync('/actions/'), clock: () => now });
+  await assert.rejects(faulty.prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_IO);
+});
+
+test('a symlinked payload is refused instead of followed', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const action = await store.prepare({ owner: OWNER, context: handoffContext() });
+  const payloadPath = path.join(ownerRoot(dataDir), 'actions', action.actionId, 'payload.json');
+  const outside = path.join(dataDir, 'outside.json');
+  await realFs.writeFile(outside, '{"context":{}}', { mode: 0o600 });
+  await realFs.unlink(payloadPath);
+  await realFs.symlink(outside, payloadPath);
+
+  await assert.rejects(store.get({ owner: OWNER, actionId: action.actionId }), error => error.code === CODES.STORE_CORRUPT);
+});
+
+test('slot names outside 0..31 and nested entries fail closed', async () => {
+  const badIndexDir = await makeDir();
+  const slots99 = path.join(ownerRoot(badIndexDir), 'slots', '99');
+  await realFs.mkdir(slots99, { recursive: true, mode: 0o700 });
+  await realFs.writeFile(
+    path.join(slots99, 'ha_' + 'a'.repeat(32) + '.json'),
+    JSON.stringify({ actionId: 'ha_' + 'a'.repeat(32), payloadBytes: 1, createdAt: new Date(NOW).toISOString() }),
+    { mode: 0o600 },
+  );
+  await assert.rejects(makeStore(badIndexDir).prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_CORRUPT);
+
+  const nestedDir = await makeDir();
+  const slot0 = path.join(ownerRoot(nestedDir), 'slots', '0');
+  const nestedId = 'ha_' + 'b'.repeat(32);
+  await realFs.mkdir(slot0, { recursive: true, mode: 0o700 });
+  await realFs.writeFile(
+    path.join(slot0, nestedId + '.json'),
+    JSON.stringify({ actionId: nestedId, payloadBytes: 1, createdAt: new Date(NOW).toISOString() }),
+    { mode: 0o600 },
+  );
+  await realFs.mkdir(path.join(slot0, 'nested'), { mode: 0o700 });
+  await assert.rejects(makeStore(nestedDir).prepare({ owner: OWNER, context: handoffContext() }), error => error.code === CODES.STORE_CORRUPT);
 });
