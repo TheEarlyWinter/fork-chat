@@ -540,6 +540,52 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     return true;
   }
 
+  function renderEmptyHistory({
+    onNewPreview = () => {},
+    onClose = () => {},
+  } = {}) {
+    if (!ensureMounted(onClose)) return false;
+    clearListeners();
+
+    const handleClose = () => {
+      close();
+      onClose();
+    };
+
+    if (els.closeBtn) addListener(els.closeBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.cancelBtn) addListener(els.cancelBtn, 'click', (e) => { e?.stopPropagation?.(); handleClose(); });
+    if (els.newPreviewBtn) addListener(els.newPreviewBtn, 'click', () => onNewPreview());
+
+    addListener(dialog, 'keydown', (e) => {
+      if (e.key === 'Escape') {
+        e?.preventDefault?.();
+        handleClose();
+      }
+    });
+
+    if (els.formSection) els.formSection.style.display = 'none';
+    if (els.historyRow) els.historyRow.style.display = 'none';
+    if (els.nodesContainer) els.nodesContainer.innerHTML = '';
+    if (els.metaSummary) els.metaSummary.textContent = '暂无历史交接记录';
+    if (els.noticesEl) renderNotices([
+      '当前画布与目标卡片没有可恢复的历史交接动作。',
+      '点击【新建预览】后，才会读取最新保存版本并准备新的交接。',
+    ]);
+    if (els.transcriptPre) els.transcriptPre.textContent = '暂无历史正文；点击【新建预览】生成当前版本预览。';
+    setError('');
+
+    if (els.prepareBtn) els.prepareBtn.style.display = 'none';
+    if (els.confirmBtn) els.confirmBtn.style.display = 'none';
+    if (els.recoverBtn) els.recoverBtn.style.display = 'none';
+    if (els.focusBtn) els.focusBtn.style.display = 'none';
+    if (els.newPreviewBtn) {
+      els.newPreviewBtn.style.display = 'inline-block';
+      els.newPreviewBtn.disabled = false;
+      els.newPreviewBtn.textContent = '新建预览';
+    }
+    return true;
+  }
+
   function renderError({
     message = '',
     onRetry = () => {},
@@ -776,6 +822,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     open,
     openLoading,
     renderHistory,
+    renderEmptyHistory,
     renderError,
     renderNewPreview,
     updatePreview,

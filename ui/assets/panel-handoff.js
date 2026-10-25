@@ -36,7 +36,8 @@ export function createPanelHandoff(deps = {}) {
   let isDisposed = false;
   let activeOp = null;
   let opSeq = 0;
-  let pendingOpen = null; // { targetCardId, activeId, generation, controller, promise }
+  let slotSeq = 0;
+  let pendingOpen = null; // { targetCardId, activeId, generation, controller, promise, owner, closed }
 
   const view = createHandoffView({ documentRef });
 
@@ -60,6 +61,88 @@ export function createPanelHandoff(deps = {}) {
       return false;
     }
     return true;
+  }
+
+  function createOp({
+    controller,
+    state,
+    targetCardId,
+    caps = null,
+    capsOk = false,
+    agents = [],
+    historyActions = [],
+    selectedActionId = '',
+    currentAction = null,
+    isHistoryMode = false,
+    openRun = null,
+  }) {
+    return {
+      token: ++opSeq,
+      controller,
+      generation: state.generation,
+      activeId: state.activeId,
+      targetCardId,
+      closed: false,
+      openRun,
+      caps,
+      capsOk,
+      agents,
+      historyActions,
+      selectedActionId,
+      currentAction,
+      inputEpoch: 0,
+      isHistoryMode,
+      slots: {
+        query: null,
+        focus: null,
+        prepare: null,
+        confirm: null,
+        retry: null,
+      },
+    };
+  }
+
+  function claimSlot(op, name) {
+    if (!isCurrent(op) || !op.slots || op.slots[name]) return null;
+    const slot = { token: ++slotSeq };
+    op.slots[name] = slot;
+    return slot;
+  }
+
+  function isSlotCurrent(op, name, slot) {
+    return Boolean(slot && op?.slots?.[name] === slot && isCurrent(op));
+  }
+
+  function releaseSlot(op, name, slot) {
+    if (op?.slots?.[name] === slot) op.slots[name] = null;
+  }
+
+  function invalidateOpenRun(run) {
+    if (!run) return;
+    run.closed = true;
+    if (pendingOpen === run) pendingOpen = null;
+  }
+
+  function closeOp(op, { keepOpenRun = false } = {}) {
+    if (!op) return;
+    op.closed = true;
+    if (activeOp === op) activeOp = null;
+    if (!keepOpenRun) invalidateOpenRun(op.openRun);
+  }
+
+  function transferOpenRun(fromOp, toOp) {
+    const run = fromOp?.openRun || null;
+    if (fromOp) fromOp.openRun = null;
+    if (toOp) {
+      toOp.openRun = run;
+      if (run) run.owner = toOp;
+    }
+    return run;
+  }
+
+  function closeScope(op) {
+    closeOp(op);
+    view.close();
   }
 
   // 显式栈有界遍历目标及祖先节点（避免深链递归栈溢出）
@@ -146,7 +229,7 @@ export function createPanelHandoff(deps = {}) {
   }
 
   async function handlePrepare(op) {
-    if (!isCurrent(op) || op.isPreparing) return;
+    if (!isCurrent(op)) return;
     if (!op.capsOk) {
       view.setError('宿主环境不支持分支交接或缺少主页会话权限');
       return;
@@ -166,54 +249,56 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    op.isPreparing = true;
-    view.setError('');
-    view.setStage('preparing');
-
+    const slot = claimSlot(op, 'prepare');
+    if (!slot) return;
     const prepareEpoch = op.inputEpoch;
 
-    let dto;
     try {
-      dto = buildContext(op.selectedAgentId, op.nextStepText, op.savedSnapshot, op.targetCardId);
-      // 先更新预览与权威转录正文，确保与 POST 的 DTO 逐字一致
-      view.updatePreview(dto);
-      view.markPreviewStale(null);
-    } catch (err) {
-      if (!isCurrent(op)) return;
-      view.setError(safeDetail(err?.message || err));
-      view.setStage('init');
-      op.isPreparing = false;
-      return;
-    }
+      view.setError('');
+      view.setStage('preparing');
 
-    try {
-      const resp = await requestHost(hana, '/api/handoff/prepare', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(dto),
-      });
-      const data = await resp.json();
-      if (!isCurrent(op) || op.inputEpoch !== prepareEpoch) {
+      let dto;
+      try {
+        dto = buildContext(op.selectedAgentId, op.nextStepText, op.savedSnapshot, op.targetCardId);
+        // 先更新预览与权威转录正文，确保与 POST 的 DTO 逐字一致
+        view.updatePreview(dto);
+        view.markPreviewStale(null);
+      } catch (err) {
+        if (!isSlotCurrent(op, 'prepare', slot)) return;
+        view.setError(safeDetail(err?.message || err));
+        view.setStage('init');
         return;
       }
-      if (!data || !data.ok || !data.action?.actionId) {
-        throw new Error(data?.error || '准备交接动作失败');
+
+      try {
+        const resp = await requestHost(hana, '/api/handoff/prepare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(dto),
+        });
+        const data = await resp.json();
+        if (!isSlotCurrent(op, 'prepare', slot) || op.inputEpoch !== prepareEpoch) {
+          return;
+        }
+        if (!data || !data.ok || !data.action?.actionId) {
+          throw new Error(data?.error || '准备交接动作失败');
+        }
+        op.currentAction = data.action;
+        view.setStage('prepared');
+      } catch (err) {
+        if (!isSlotCurrent(op, 'prepare', slot) || op.inputEpoch !== prepareEpoch) {
+          return;
+        }
+        view.setError('准备失败：' + safeDetail(err?.message || err));
+        view.setStage('init');
       }
-      op.currentAction = data.action;
-      view.setStage('prepared');
-    } catch (err) {
-      if (!isCurrent(op) || op.inputEpoch !== prepareEpoch) {
-        return;
-      }
-      view.setError('准备失败：' + safeDetail(err?.message || err));
-      view.setStage('init');
     } finally {
-      op.isPreparing = false;
+      releaseSlot(op, 'prepare', slot);
     }
   }
 
   async function handleConfirm(op) {
-    if (!isCurrent(op) || op.isConfirming || !op.currentAction?.actionId) return;
+    if (!isCurrent(op) || !op.currentAction?.actionId) return;
 
     try {
       if (checkAnyBusy(op.targetCardId, getCards())) {
@@ -225,19 +310,20 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    op.isConfirming = true;
-    view.setError('');
-    view.setStage('confirming');
-
+    const slot = claimSlot(op, 'confirm');
+    if (!slot) return;
     const targetActionId = op.currentAction.actionId;
+
     try {
+      view.setError('');
+      view.setStage('confirming');
       const resp = await requestHost(hana, '/api/handoff/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actionId: targetActionId }),
       });
       const data = await resp.json();
-      if (!isCurrent(op)) return;
+      if (!isSlotCurrent(op, 'confirm', slot)) return;
       if (!data || !data.ok || !data.action) {
         throw new Error(data?.error || '交接处理异常');
       }
@@ -248,24 +334,25 @@ export function createPanelHandoff(deps = {}) {
       op.currentAction = data.action;
       applyActionResult(op, data.action);
     } catch (err) {
-      if (!isCurrent(op)) return;
+      if (!isSlotCurrent(op, 'confirm', slot)) return;
       view.setError('确认未完成，需按原动作查询；不会自动重发。');
       view.setStage('error-recoverable');
     } finally {
-      op.isConfirming = false;
+      releaseSlot(op, 'confirm', slot);
     }
   }
 
   async function handleRecover(op) {
-    if (!isCurrent(op) || op.isQuerying || !op.currentAction?.actionId) return;
-    op.isQuerying = true;
+    if (!isCurrent(op) || !op.currentAction?.actionId) return;
+    const slot = claimSlot(op, 'query');
+    if (!slot) return;
     view.setError('');
 
     const targetActionId = op.currentAction.actionId;
     try {
       const resp = await requestHost(hana, `/api/handoff/actions/${encodeURIComponent(targetActionId)}`);
       const data = await resp.json();
-      if (!isCurrent(op)) return;
+      if (!isSlotCurrent(op, 'query', slot)) return;
       // 历史模式下，若当前选中的动作已切换，丢弃旧动作迟到响应
       if (op.isHistoryMode && op.selectedActionId && op.selectedActionId !== targetActionId) {
         return;
@@ -283,86 +370,95 @@ export function createPanelHandoff(deps = {}) {
 
       applyActionResult(op, data.action);
     } catch (err) {
-      if (!isCurrent(op)) return;
+      if (!isSlotCurrent(op, 'query', slot)) return;
       if (op.isHistoryMode && op.selectedActionId && op.selectedActionId !== targetActionId) {
         return;
       }
       view.setError('查询恢复失败：' + safeDetail(err?.message || err));
     } finally {
-      op.isQuerying = false;
+      releaseSlot(op, 'query', slot);
     }
   }
 
   async function handleFocus(op) {
     const sessionId = op.currentAction?.sessionId;
-    if (!isCurrent(op) || op.isFocusing || !sessionId) return;
-    op.isFocusing = true;
+    if (!isCurrent(op) || !sessionId) return;
+    const slot = claimSlot(op, 'focus');
+    if (!slot) return;
     try {
       await hana.sessions.focus({ sessionId });
     } catch (err) {
-      if (!isCurrent(op)) return;
+      if (!isSlotCurrent(op, 'focus', slot)) return;
       view.setError('聚焦会话失败：' + safeDetail(err?.message || err) + '，您可以再次点击重试。');
     } finally {
-      op.isFocusing = false;
+      releaseSlot(op, 'focus', slot);
     }
   }
 
-  function selectHistoryAction(op, actionId, matchingActions = op.historyActions) {
-    if (!isCurrent(op)) return;
+  function selectHistoryAction(parentOp, actionId, matchingActions = parentOp.historyActions) {
+    if (!isCurrent(parentOp)) return;
     const currentMatching = matchingActions.filter(
-      a => a?.source?.canvasId === op.activeId && a?.source?.targetCardId === op.targetCardId
+      a => a?.source?.canvasId === parentOp.activeId && a?.source?.targetCardId === parentOp.targetCardId
     );
     const targetAction = currentMatching.find(a => a.actionId === actionId) || currentMatching[0];
     if (!targetAction) return;
 
-    op.selectedActionId = targetAction.actionId;
-    op.currentAction = targetAction;
+    const controller = getActiveSessionController();
+    const state = controller?.state;
+    if (!controller || !state) return;
 
-    const hasSessionId = Boolean(targetAction.sessionId);
+    const historyOp = createOp({
+      controller,
+      state,
+      targetCardId: parentOp.targetCardId,
+      caps: parentOp.caps,
+      capsOk: parentOp.capsOk,
+      agents: parentOp.agents,
+      historyActions: currentMatching.slice(),
+      selectedActionId: targetAction.actionId,
+      currentAction: targetAction,
+      isHistoryMode: true,
+    });
+    transferOpenRun(parentOp, historyOp);
+    closeOp(parentOp, { keepOpenRun: true });
+    activeOp = historyOp;
 
     view.renderHistory({
-      actions: currentMatching,
+      actions: historyOp.historyActions,
       selectedActionId: targetAction.actionId,
       action: targetAction,
-      hasSessionId,
-      onActionSelect: (newActionId) => {
-        if (!isCurrent(op)) return;
-        selectHistoryAction(op, newActionId, currentMatching);
-      },
-      onRecover: () => handleRecover(op),
-      onFocus: () => handleFocus(op),
+      onActionSelect: (newActionId) => selectHistoryAction(historyOp, newActionId, historyOp.historyActions),
+      onRecover: () => handleRecover(historyOp),
+      onFocus: () => handleFocus(historyOp),
       onNewPreview: async () => {
-        if (!isCurrent(op)) return;
-        if (!op.capsOk) {
-          const reason = (op.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || op.caps?.home === false)
-            ? '缺少主页会话创建权限，无法交接'
-            : '宿主环境暂不支持分支交接';
-          view.setError(reason);
-          return;
-        }
-        await startNewPreview(op, { isInitial: false });
+        if (!isCurrent(historyOp)) return;
+        await startNewPreview(historyOp, { isInitial: false });
       },
-      onClose: () => {
-        op.closed = true;
-        if (activeOp === op) activeOp = null;
-        view.close();
-      },
+      onClose: () => closeScope(historyOp),
     });
 
-    applyActionResult(op, targetAction);
+    applyActionResult(historyOp, targetAction);
   }
 
   async function startNewPreview(parentOp, { isInitial = false } = {}) {
-    // 1. 彻底作废旧 op
-    parentOp.closed = true;
+    if (!isCurrent(parentOp)) return;
 
-    // 2. 获取当前控制器与状态
     const controller = getActiveSessionController();
     const sState = controller?.state;
+    const capabilityError = !parentOp.capsOk
+      ? ((parentOp.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || parentOp.caps?.home === false)
+        ? '缺少主页会话创建权限，无法交接'
+        : '宿主环境暂不支持分支交接')
+      : '';
+    if (capabilityError) {
+      view.setError(capabilityError);
+      return;
+    }
+
     if (!sState || !sState.ready || sState.busy || sState.saving || !sState.activeId) {
       const msg = '当前会话正在保存或正忙，请稍后重试。';
       if (isInitial) {
-        view.close();
+        closeScope(parentOp);
         flashMessage(msg);
       } else {
         view.setError(msg);
@@ -370,45 +466,11 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    // 3. 建立全新 preview op（不继承旧 savedSnapshot！）
-    const previewOp = {
-      token: ++opSeq,
-      controller,
-      generation: sState.generation,
-      activeId: sState.activeId,
-      targetCardId: parentOp.targetCardId,
-      closed: false,
-      inputEpoch: 0,
-      savedSnapshot: null,
-      caps: parentOp.caps,
-      capsOk: parentOp.capsOk,
-      agents: parentOp.agents || [],
-      currentAction: null,
-      selectedAgentId: '',
-      nextStepText: '',
-      isPreparing: false,
-      isConfirming: false,
-      isQuerying: false,
-      isFocusing: false,
-      isHistoryMode: false,
-    };
-    activeOp = previewOp;
-
-    // 4. 新预览准入校验：检查 capabilities
-    if (!previewOp.capsOk) {
-      const reason = (previewOp.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || previewOp.caps?.home === false)
-        ? '缺少主页会话创建权限，无法交接'
-        : '宿主环境暂不支持分支交接';
-      view.setError(reason);
-      return;
-    }
-
-    // 5. 检查祖先忙碌与依赖上限
     try {
-      if (checkAnyBusy(previewOp.targetCardId, getCards())) {
+      if (checkAnyBusy(parentOp.targetCardId, getCards())) {
         const msg = '目标卡片或其祖先节点正在处理中，请等待完成后再继续。';
         if (isInitial) {
-          view.close();
+          closeScope(parentOp);
           flashMessage(msg);
         } else {
           view.setError(msg);
@@ -418,7 +480,7 @@ export function createPanelHandoff(deps = {}) {
     } catch (err) {
       const msg = safeDetail(err?.message || err);
       if (isInitial) {
-        view.close();
+        closeScope(parentOp);
         flashMessage(msg);
       } else {
         view.setError(msg);
@@ -426,7 +488,32 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    // 6. 执行 flush 并核实版本
+    // 只有同步准入检查通过后才退休 parent；preview scope 接管同一 open run。
+    const previewOp = createOp({
+      controller,
+      state: sState,
+      targetCardId: parentOp.targetCardId,
+      caps: parentOp.caps,
+      capsOk: parentOp.capsOk,
+      agents: parentOp.agents || [],
+      isHistoryMode: false,
+    });
+    previewOp.savedSnapshot = null;
+    previewOp.selectedAgentId = '';
+    previewOp.nextStepText = '';
+    transferOpenRun(parentOp, previewOp);
+    closeOp(parentOp, { keepOpenRun: true });
+    activeOp = previewOp;
+
+    // preview 在首次 await 前接管 loading/close ownership，关闭会退休 preview 与 open run。
+    const earlyOpened = view.openLoading({ onClose: () => closeScope(previewOp) });
+    if (!earlyOpened) {
+      closeOp(previewOp);
+      if (isInitial) flashMessage('无法打开模态对话框，交接已取消。');
+      return;
+    }
+
+    // 执行 flush 并核实版本
     try {
       await controller.flush(true);
     } catch (err) {
@@ -549,11 +636,7 @@ export function createPanelHandoff(deps = {}) {
       onConfirm: () => handleConfirm(previewOp),
       onRecover: () => handleRecover(previewOp),
       onFocus: () => handleFocus(previewOp),
-      onClose: () => {
-        previewOp.closed = true;
-        if (activeOp === previewOp) activeOp = null;
-        view.close();
-      },
+      onClose: () => closeScope(previewOp),
     });
 
     view.setStage('init');
@@ -573,11 +656,7 @@ export function createPanelHandoff(deps = {}) {
       view.renderError({
         message: '查询历史交接记录失败：' + safeDetail(err?.message || err) + '，请点击重试。',
         onRetry: () => retryLoadHistory(op),
-        onClose: () => {
-          op.closed = true;
-          if (activeOp === op) activeOp = null;
-          view.close();
-        },
+        onClose: () => closeScope(op),
       });
       return false;
     }
@@ -587,19 +666,20 @@ export function createPanelHandoff(deps = {}) {
   }
 
   async function retryLoadHistory(op) {
-    if (!isCurrent(op) || op.isRetrying) return;
-    op.isRetrying = true;
+    if (!isCurrent(op)) return;
+    const slot = claimSlot(op, 'retry');
+    if (!slot) return;
     try {
       const ok = await loadHistoryActions(op);
-      if (ok && isCurrent(op)) {
-        await processHistoryOrNewPreview(op);
+      if (ok && isSlotCurrent(op, 'retry', slot)) {
+        await processHistoryOrNewPreview(op, { allowAutomaticPreview: false });
       }
     } finally {
-      op.isRetrying = false;
+      releaseSlot(op, 'retry', slot);
     }
   }
 
-  async function processHistoryOrNewPreview(op) {
+  async function processHistoryOrNewPreview(op, { allowAutomaticPreview = true } = {}) {
     if (!isCurrent(op)) return;
 
     // 匹配当前画布与目标卡片的所有历史动作
@@ -609,12 +689,11 @@ export function createPanelHandoff(deps = {}) {
 
     if (matchingActions.length > 0) {
       // 存在历史动作：进入历史模式（不检查 busy，不 flush，不校验快照）
-      op.isHistoryMode = true;
       selectHistoryAction(op, matchingActions[0].actionId, matchingActions);
       return;
     }
 
-    // 无历史动作：进入新预览意图
+    // 无历史动作：能力失败仍保持当前 scope；只读 retry 不自动进入新预览。
     if (!op.capsOk) {
       const reason = (op.caps?.reason === 'HANDOFF_PERMISSION_MISSING' || op.caps?.home === false)
         ? '缺少主页会话创建权限，无法交接'
@@ -623,64 +702,47 @@ export function createPanelHandoff(deps = {}) {
       return;
     }
 
-    // 检查祖先忙碌与依赖上限（无历史时忙碌直接关闭并 flash，符合 C2/I1）
-    try {
-      if (checkAnyBusy(op.targetCardId, getCards())) {
-        view.close();
-        flashMessage('目标卡片或其祖先节点正在处理中，请等待完成后再继续。');
-        op.closed = true;
-        if (activeOp === op) activeOp = null;
-        return;
-      }
-    } catch (err) {
-      view.close();
-      flashMessage(safeDetail(err?.message || err));
-      op.closed = true;
-      if (activeOp === op) activeOp = null;
+    if (!allowAutomaticPreview) {
+      view.renderEmptyHistory({
+        onNewPreview: () => startNewPreview(op, { isInitial: false }),
+        onClose: () => closeScope(op),
+      });
       return;
     }
 
-    // 启动全新新预览 scope
+    // 首次成功 open 无历史时才自动启动新预览；busy/拓扑检查失败直接关闭。
+    try {
+      if (checkAnyBusy(op.targetCardId, getCards())) {
+        closeScope(op);
+        flashMessage('目标卡片或其祖先节点正在处理中，请等待完成后再继续。');
+        return;
+      }
+    } catch (err) {
+      closeScope(op);
+      flashMessage(safeDetail(err?.message || err));
+      return;
+    }
+
     await startNewPreview(op, { isInitial: true });
   }
 
-  async function executeOpen(targetCardId, controller, sState) {
-    if (activeOp) {
-      activeOp.closed = true;
-    }
+  async function executeOpen(targetCardId, controller, sState, openRun) {
+    if (activeOp) closeOp(activeOp);
 
-    const op = {
-      token: ++opSeq,
+    const op = createOp({
       controller,
-      generation: sState.generation,
-      activeId: sState.activeId,
+      state: sState,
       targetCardId,
-      closed: false,
-      caps: null,
-      capsOk: false,
-      agents: [],
-      historyActions: [],
-      selectedActionId: '',
-      currentAction: null,
-      isQuerying: false,
-      isFocusing: false,
-      isRetrying: false,
-      isHistoryMode: false,
-    };
+      openRun,
+    });
     activeOp = op;
+    openRun.owner = op;
 
     // 早期挂载模态对话框与 loading 态（在首次异步等待前）
-    const earlyOpened = view.openLoading({
-      onClose: () => {
-        op.closed = true;
-        if (activeOp === op) activeOp = null;
-        view.close();
-      },
-    });
+    const earlyOpened = view.openLoading({ onClose: () => closeScope(op) });
     if (!earlyOpened) {
       flashMessage('无法打开模态对话框，交接已取消。');
-      op.closed = true;
-      if (activeOp === op) activeOp = null;
+      closeOp(op);
       return;
     }
 
@@ -725,7 +787,8 @@ export function createPanelHandoff(deps = {}) {
     const sState = controller?.state;
     if (!sState || !sState.activeId) return;
 
-    // 如果针对同一 targetCardId、activeId、generation 的 open 已在途挂起，复用在途 Promise（单飞去重）
+    // pendingOpen 属于尚未关闭的 open run；自动 metadata→preview 过渡期间仍保持单飞。
+    if (pendingOpen?.closed) pendingOpen = null;
     if (
       pendingOpen &&
       pendingOpen.targetCardId === targetCardId &&
@@ -736,33 +799,32 @@ export function createPanelHandoff(deps = {}) {
       return pendingOpen.promise;
     }
 
-    const openPromise = (async () => {
-      try {
-        await executeOpen(targetCardId, controller, sState);
-      } finally {
-        if (pendingOpen?.promise === openPromise) {
-          pendingOpen = null;
-        }
-      }
-    })();
-
-    pendingOpen = {
+    const openRun = {
       targetCardId,
       activeId: sState.activeId,
       generation: sState.generation,
       controller,
-      promise: openPromise,
+      promise: null,
+      owner: null,
+      closed: false,
     };
+    let openPromise;
+    openPromise = (async () => {
+      try {
+        await executeOpen(targetCardId, controller, sState, openRun);
+      } finally {
+        if (pendingOpen === openRun) pendingOpen = null;
+      }
+    })();
+    openRun.promise = openPromise;
+    pendingOpen = openRun;
     return openPromise;
   }
 
   function dispose() {
     isDisposed = true;
-    pendingOpen = null;
-    if (activeOp) {
-      activeOp.closed = true;
-      activeOp = null;
-    }
+    invalidateOpenRun(pendingOpen);
+    if (activeOp) closeOp(activeOp);
     view.dispose();
   }
 
