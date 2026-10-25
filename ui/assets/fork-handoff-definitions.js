@@ -18,6 +18,7 @@ export const HANDOFF_NOTICE_CODES = Object.freeze(Object.fromEntries([
   'ORIGINALS_NOT_RETAINED',
   'DUPLICATE_ARTIFACTS_DEDUPED',
   'NEXT_STEP_PENDING',
+  'UNSENT_NOT_INCLUDED',
 ].map(code => [code, code])));
 
 const NOTICE_ORDER = Object.freeze([
@@ -32,6 +33,7 @@ const NOTICE_ORDER = Object.freeze([
   'ORIGINALS_NOT_RETAINED',
   'DUPLICATE_ARTIFACTS_DEDUPED',
   'NEXT_STEP_PENDING',
+  'UNSENT_NOT_INCLUDED',
 ]);
 
 /** 统计里确有其事的事实；不读客户端自报的 notices 或统计 */
@@ -74,6 +76,7 @@ export function collectHandoffFacts(context) {
     duplicateArtifacts: [...artifactOccurrences.values()].some(count => count > 1),
     hasOriginalBodies: docCount > 0 || attachmentCount > 0,
     hasNextStep: Boolean(context?.nextStep),
+    unsentCount: Array.isArray(context?.unsent) ? context.unsent.length : 0,
   };
 }
 
@@ -89,6 +92,7 @@ const NOTICE_TEXT = Object.freeze({
   ORIGINALS_NOT_RETAINED: () => '资料与附件的原文件没有随交接保留，这里只有 App 保存的解析正文。',
   DUPLICATE_ARTIFACTS_DEDUPED: () => '同一产物在多个位置出现，按不可变产物标识去重交付。',
   NEXT_STEP_PENDING: () => '下一步要求只是写入交接正文的待执行文字，不会自动发送，也不会启动模型。',
+  UNSENT_NOT_INCLUDED: () => '所选分支还有未发送的草稿或暂存附件，它们没有纳入本次交接。',
 });
 
 /** 从事实重建完整说明列表；顺序固定，客户端无法增删 */
@@ -106,6 +110,7 @@ export function buildHandoffNotices(context) {
     if (code === 'ORIGINALS_NOT_RETAINED' && !facts.hasOriginalBodies) continue;
     if (code === 'DUPLICATE_ARTIFACTS_DEDUPED' && !facts.duplicateArtifacts) continue;
     if (code === 'NEXT_STEP_PENDING' && !facts.hasNextStep) continue;
+    if (code === 'UNSENT_NOT_INCLUDED' && facts.unsentCount === 0) continue;
     notices.push({ code, message: NOTICE_TEXT[code](facts) });
   }
   return notices;

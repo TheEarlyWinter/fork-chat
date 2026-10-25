@@ -42,6 +42,12 @@ export const HANDOFF_LIMITS = Object.freeze({
   maxAttachmentsPerMessage: 10,
   /** omissions.localNoticeCount 的上限，与快照的消息总量一致 */
   maxOmittedLocalNotices: 10000,
+  /** 预览用未发送项：每卡最多 20 个暂存附件名 */
+  maxUnsentAttachments: 20,
+  /** 草稿字符数上限（只作预览计数，不装正文） */
+  maxUnsentDraftChars: 100000,
+  /** 暂存附件丢失计数上限 */
+  maxStagedAttachmentsDropped: 10000,
 });
 
 export const HANDOFF_ERROR_CODES = Object.freeze(Object.fromEntries([
@@ -324,6 +330,51 @@ function normalizeOmissions(value) {
   return { localNoticeCount: count };
 }
 
+/**
+ * 未发送项只作为预览元数据：不装草稿正文、不装暂存附件内容，
+ * 卡片必须在依赖图内，计数有界，空条目直接拒绝。
+ */
+function normalizeUnsent(value, graphIds) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw invalid('unsent 必须是数组');
+  if (value.length > HANDOFF_LIMITS.maxNodes) throw invalid('unsent 条目数量超过上限');
+  const seen = new Set();
+  return value.map((raw, index) => {
+    if (!isPlainObject(raw)) throw invalid(`第 ${index + 1} 个未发送项不是对象`);
+    if (typeof raw.cardId !== 'string' || !ID_REGEX.test(raw.cardId) || !graphIds.has(raw.cardId)) {
+      throw invalid(`第 ${index + 1} 个未发送项的卡片不在依赖范围内`);
+    }
+    if (seen.has(raw.cardId)) throw invalid(`未发送项的卡片 ${raw.cardId} 重复`);
+    seen.add(raw.cardId);
+    if (typeof raw.hasDraft !== 'boolean') throw invalid(`第 ${index + 1} 个未发送项缺少草稿标记`);
+    const draftChars = raw.draftChars;
+    if (!Number.isSafeInteger(draftChars) || draftChars < 0 || draftChars > HANDOFF_LIMITS.maxUnsentDraftChars) {
+      throw invalid(`第 ${index + 1} 个未发送项的草稿字符数不合法`);
+    }
+    if (raw.hasDraft !== (draftChars > 0)) throw invalid(`第 ${index + 1} 个未发送项的草稿标记与字符数不一致`);
+    if (!Array.isArray(raw.attachments)) throw invalid(`第 ${index + 1} 个未发送项的附件必须是数组`);
+    if (raw.attachments.length > HANDOFF_LIMITS.maxUnsentAttachments) {
+      throw invalid(`第 ${index + 1} 个未发送项的附件数量超过 ${HANDOFF_LIMITS.maxUnsentAttachments}`);
+    }
+    const attachments = raw.attachments.map((item, attIndex) => {
+      if (!isPlainObject(item)) throw invalid(`第 ${index + 1} 个未发送项的第 ${attIndex + 1} 个附件不是对象`);
+      const name = sanitizeLabel(item.name, 200, '未发送附件名');
+      if (!name) throw invalid(`第 ${index + 1} 个未发送项的第 ${attIndex + 1} 个附件缺少名称`);
+      if (typeof item.contentTruncated !== 'boolean') throw invalid(`第 ${index + 1} 个未发送项的第 ${attIndex + 1} 个附件缺少裁切标记`);
+      return { name, contentTruncated: item.contentTruncated };
+    });
+    const attachmentsDropped = raw.attachmentsDropped;
+    if (!Number.isSafeInteger(attachmentsDropped) || attachmentsDropped < 0
+      || attachmentsDropped > HANDOFF_LIMITS.maxStagedAttachmentsDropped) {
+      throw invalid(`第 ${index + 1} 个未发送项的丢失附件计数不合法`);
+    }
+    if (!raw.hasDraft && attachments.length === 0 && attachmentsDropped === 0) {
+      throw invalid(`第 ${index + 1} 个未发送项没有实际内容`);
+    }
+    return { cardId: raw.cardId, hasDraft: raw.hasDraft, draftChars, attachments, attachmentsDropped };
+  });
+}
+
 function normalizeNextStep(value) {
   if (value === undefined || value === null) return '';
   if (typeof value !== 'string') throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_INVALID_NEXT_STEP, '下一步要求必须是字符串');
@@ -506,6 +557,7 @@ export function validateHandoffContext(value) {
   if (value.notices !== undefined && !Array.isArray(value.notices)) throw invalid('完整性说明必须是数组');
   (value.notices ?? []).forEach(normalizeNotice);
   const omissions = normalizeOmissions(value.omissions);
+  const unsent = normalizeUnsent(value.unsent, new Set([...nodeIds, ...excludedIds]));
   const providedArtifacts = normalizeArtifactIdList(value.artifactIds, '产物列表');
   const derivedArtifacts = [];
   for (const node of nodes) {
@@ -542,7 +594,8 @@ export function validateHandoffContext(value) {
     artifactIds: derivedArtifacts,
     exclusions,
     omissions,
-    notices: buildHandoffNotices({ source, nodes, references, referenceSources, exclusions, omissions, nextStep }),
+    unsent,
+    notices: buildHandoffNotices({ source, nodes, references, referenceSources, exclusions, omissions, unsent, nextStep }),
     stats: recomputeStats({ nodes, references }),
   };
 

@@ -342,10 +342,22 @@ export function normalizeForkSnapshot(input) {
     if (rawCard.isMerge) normCard.isMerge = true;
     if (rawCard.isBattle) normCard.isBattle = true;
     if (rawCard.isDoc) normCard.isDoc = true;
+    if (rawCard.stagedAttachments !== undefined && rawCard.stagedAttachments !== null
+      && !Array.isArray(rawCard.stagedAttachments)) {
+      throw createError('INVALID_SESSION_SNAPSHOT', `Card stagedAttachments must be an array: ${cardId}`);
+    }
+    // 旧存档可能带着裁切标记回来：先接住，再与本次重算取并集
+    const stagedDroppedSaved = Number.isSafeInteger(rawCard.stagedAttachmentsDropped) && rawCard.stagedAttachmentsDropped > 0
+      ? rawCard.stagedAttachmentsDropped
+      : 0;
+    const stagedTruncatedSaved = Array.isArray(rawCard.stagedAttachmentsTruncated)
+      ? rawCard.stagedAttachmentsTruncated.filter(Number.isSafeInteger)
+      : [];
     if (Array.isArray(rawCard.stagedAttachments)) {
       // 上限还在，但越界不再无声无息：留一个可读的标记，让人知道丢过东西。
-      if (rawCard.stagedAttachments.length > 20) {
-        normCard.stagedAttachmentsDropped = rawCard.stagedAttachments.length - 20;
+      const droppedBySlice = rawCard.stagedAttachments.length > 20 ? rawCard.stagedAttachments.length - 20 : 0;
+      if (droppedBySlice || stagedDroppedSaved) {
+        normCard.stagedAttachmentsDropped = Math.max(droppedBySlice, stagedDroppedSaved);
       }
       normCard.stagedAttachments = rawCard.stagedAttachments.slice(0, 20).map(att => ({
         name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
@@ -357,10 +369,18 @@ export function normalizeForkSnapshot(input) {
         preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
       }));
       // 记录哪些附件正文被截断，而不是让 charCount 继续撒谎
-      const truncatedIdx = normCard.stagedAttachments
-        .map((att, i) => (att.content.length >= ATTACHMENT_MAX_CHARS ? i : -1))
-        .filter(i => i >= 0);
-      if (truncatedIdx.length) normCard.stagedAttachmentsTruncated = truncatedIdx;
+      const truncatedIdx = new Set(stagedTruncatedSaved);
+      normCard.stagedAttachments.forEach((att, i) => {
+        if (att.content.length >= ATTACHMENT_MAX_CHARS || att.content.length === LEGACY_ATTACHMENT_MAX_CHARS) {
+          truncatedIdx.add(i);
+        }
+      });
+      if (truncatedIdx.size) normCard.stagedAttachmentsTruncated = [...truncatedIdx].sort((a, b) => a - b);
+    } else {
+      if (stagedDroppedSaved) normCard.stagedAttachmentsDropped = stagedDroppedSaved;
+      if (stagedTruncatedSaved.length) {
+        normCard.stagedAttachmentsTruncated = [...new Set(stagedTruncatedSaved)].sort((a, b) => a - b);
+      }
     }
     if (typeof rawCard.docContent === 'string') {
       normCard.docContent = rawCard.docContent.slice(0, DOC_CONTENT_MAX_CHARS);

@@ -329,6 +329,44 @@ function buildMessage(raw, cardId, index, artifactState) {
   };
 }
 
+/** 只提取预览元数据：草稿只报字符数，暂存附件只报名称与裁切状态 */
+function buildUnsent(card) {
+  if (card.stagedAttachments !== undefined && card.stagedAttachments !== null
+    && !Array.isArray(card.stagedAttachments)) {
+    throw invalidSnapshot(`卡片 ${card.id} 的 stagedAttachments 必须是数组`);
+  }
+  const draft = typeof card.draft === 'string' ? card.draft : '';
+  const staged = Array.isArray(card.stagedAttachments) ? card.stagedAttachments : [];
+  const droppedSaved = Number.isSafeInteger(card.stagedAttachmentsDropped) && card.stagedAttachmentsDropped > 0
+    ? card.stagedAttachmentsDropped
+    : 0;
+  const droppedBySlice = staged.length > HANDOFF_LIMITS.maxUnsentAttachments
+    ? staged.length - HANDOFF_LIMITS.maxUnsentAttachments
+    : 0;
+  const truncatedIdx = new Set(
+    Array.isArray(card.stagedAttachmentsTruncated)
+      ? card.stagedAttachmentsTruncated.filter(Number.isSafeInteger)
+      : [],
+  );
+  const attachments = staged.slice(0, HANDOFF_LIMITS.maxUnsentAttachments).map((raw, index) => {
+    const content = typeof raw?.content === 'string' ? raw.content : '';
+    const truncated = truncatedIdx.has(index)
+      || content.length >= ATTACHMENT_MAX_CHARS
+      || content.length === LEGACY_ATTACHMENT_MAX_CHARS;
+    return { name: typeof raw?.name === 'string' ? raw.name : '', contentTruncated: truncated };
+  });
+  const hasDraft = draft.trim() !== '';
+  const attachmentsDropped = Math.max(droppedSaved, droppedBySlice);
+  if (!hasDraft && attachments.length === 0 && attachmentsDropped === 0) return null;
+  return {
+    cardId: card.id,
+    hasDraft,
+    draftChars: hasDraft ? draft.length : 0,
+    attachments,
+    attachmentsDropped,
+  };
+}
+
 function buildReferences(includedCards, cardMap) {
   const entries = new Map();
   const order = [];
@@ -464,6 +502,12 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
       parentIds: parentIdsOf(cardMap.get(id)),
     }));
 
+  const unsent = [];
+  for (const id of dependencyOrder) {
+    const item = buildUnsent(cardMap.get(id));
+    if (item) unsent.push(item);
+  }
+
   const context = {
     schemaVersion: HANDOFF_SCHEMA_VERSION,
     source: { canvasId: source.canvasId, revision: source.revision, targetCardId },
@@ -475,6 +519,7 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
     artifactIds: artifactState.order,
     exclusions,
     omissions: { localNoticeCount },
+    unsent,
     notices: [],
     stats: {},
   };
