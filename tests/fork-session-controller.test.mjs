@@ -470,3 +470,94 @@ test('close keeps best-effort save when there is no conflict', async () => {
   await ui.controller.close();
   assert.equal((await ui.store.get(id)).snapshot.cards[0].draft, 'close best effort');
 });
+
+test('sticky modified conflict blocks autosave and close from overwriting the remote revision', async () => {
+  const host = memoryHost(), one = await setup(host, 10), two = await setup(host, 10);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'remote wins'; one.controller.scheduleSave(); await one.controller.flush();
+  two.canvas.cards[0].draft = 'local conflict'; two.controller.scheduleSave();
+  await assert.rejects(two.controller.flush(), error => error.code === 'SESSION_CONFLICT');
+
+  await assert.rejects(two.controller.flush(true), error => error.code === 'SESSION_CONFLICT');
+  two.canvas.cards[0].draft = 'later local input';
+  two.controller.scheduleSave();
+  await sleep(40);
+  assert.equal((await one.store.get(id)).snapshot.cards[0].draft, 'remote wins');
+  await two.controller.close().catch(error => assert.equal(error.code, 'SESSION_CONFLICT'));
+  assert.equal((await one.store.get(id)).snapshot.cards[0].draft, 'remote wins');
+  await one.controller.close();
+});
+
+test('retrySave reads the latest revision and a second CAS race still needs another explicit retry', async () => {
+  const host = memoryHost(), one = await setup(host), two = await setup(host);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'window A'; one.controller.scheduleSave(); await one.controller.flush();
+  two.canvas.cards[0].draft = 'window B'; two.controller.scheduleSave();
+  await assert.rejects(two.controller.flush(), error => error.code === 'SESSION_CONFLICT');
+
+  const gate = deferred();
+  const saveStarted = deferred();
+  const save = two.store.save;
+  two.store.save = async (...args) => {
+    saveStarted.resolve(args);
+    await gate.promise;
+    return save(...args);
+  };
+  const retrying = two.controller.retrySave();
+  await saveStarted.promise;
+  const remote = await one.store.get(id);
+  remote.snapshot.cards[0].draft = 'window C';
+  await one.store.save(id, remote.revision, remote.snapshot);
+  gate.resolve();
+  await assert.rejects(retrying, error => error.code === 'SESSION_CONFLICT');
+  assert.equal((await one.store.get(id)).snapshot.cards[0].draft, 'window C');
+  assert.equal(two.controller.state.conflict, 'modified');
+
+  two.store.save = save;
+  await two.controller.retrySave();
+  assert.equal((await one.store.get(id)).snapshot.cards[0].draft, 'window B');
+  await one.controller.close(); await two.controller.close();
+});
+
+test('getSavedSnapshot rejects a sticky conflict until retry or saveCopy resolves it', async () => {
+  const host = memoryHost(), one = await setup(host), two = await setup(host);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'remote'; one.controller.scheduleSave(); await one.controller.flush();
+  two.canvas.cards[0].draft = 'local'; two.controller.scheduleSave();
+  await assert.rejects(two.controller.flush(), error => error.code === 'SESSION_CONFLICT');
+  assert.throws(() => two.controller.getSavedSnapshot(), error => error.code === 'SESSION_NOT_SAVED');
+  await two.controller.saveCopy();
+  assert.equal(two.controller.state.conflict, null);
+  assert.notEqual(two.controller.state.activeId, id);
+  await one.controller.close(); await two.controller.close();
+});
+
+test('dirty refresh preserves the local session when another window switches activeId', async () => {
+  const host = memoryHost(), one = await setup(host), two = await setup(host);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'local active'; one.controller.scheduleSave();
+  await two.controller.newSession(snapshot('other active'));
+  await one.controller.refresh();
+  assert.equal(one.controller.state.activeId, id);
+  assert.equal(one.canvas.cards[0].draft, 'local active');
+  assert.equal(one.controller.state.dirty, true);
+  assert.equal(one.controller.state.conflict, 'active-changed');
+  await one.controller.close().catch(() => {}); await two.controller.close();
+});
+
+test('dirty deletion with a replacement activeId remains local and can be copied', async () => {
+  const host = memoryHost(), one = await setup(host), two = await setup(host);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'local deleted'; one.controller.scheduleSave();
+  const replacement = await two.store.create(snapshot('replacement active'));
+  await two.store.remove(id, 1, snapshot('fallback'));
+  assert.equal((await two.store.list()).activeId, replacement.id);
+
+  await one.controller.refresh();
+  assert.equal(one.controller.state.activeId, id);
+  assert.equal(one.canvas.cards[0].draft, 'local deleted');
+  assert.equal(one.controller.state.conflict, 'deleted');
+  await one.controller.saveCopy();
+  assert.equal((await one.store.get(one.controller.state.activeId)).snapshot.cards[0].draft, 'local deleted');
+  await one.controller.close(); await two.controller.close();
+});
