@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 
 import { buildHandoffContext } from '../ui/assets/fork-handoff-context.js';
 import { createHandoffStore } from '../lib/handoff-store.js';
+import { createHandoffDelivery } from '../lib/handoff-delivery.js';
 import { createHandoffService } from '../lib/handoff-service.js';
 
 // ---------------------------------------------------------------------------
@@ -143,13 +144,13 @@ function requestContext({ principalId = PRINCIPAL, appId = 'timeline-reverser' }
   };
 }
 
-function makeHarness({ host = fakeHost(), artifacts = fakeArtifacts(), sdk = fakeSdk(), dataDir, store, principalId = PRINCIPAL } = {}) {
+function makeHarness({ host = fakeHost(), artifacts = fakeArtifacts(), sdk = fakeSdk(), dataDir, store, delivery, principalId = PRINCIPAL } = {}) {
   const routes = [];
   const app = {
     get(pattern, handler) { routes.push({ method: 'GET', pattern, handler }); },
     post(pattern, handler) { routes.push({ method: 'POST', pattern, handler }); },
   };
-  const service = createHandoffService({ sdk, dataDir, artifacts, host, store });
+  const service = createHandoffService({ sdk, dataDir, artifacts, host, store, delivery });
   service.register(app);
 
   async function call(method, url, { body, principal = principalId, appId = 'timeline-reverser' } = {}) {
@@ -1277,5 +1278,62 @@ test('M2: the confirmation gate runs after the owner lookup, so missing/foreign/
   }
   const results = await Promise.all(pending);
   assert.ok(results.every(result => result.body.ok), '释放栅栏后两个编排都能完成');
+});
+
+// ---------------------------------------------------------------------------
+// Task3 前置：清理校验只容许 ENOENT 当“已不存在”；其余 lstat 故障必须停下编排
+// ---------------------------------------------------------------------------
+
+test('precondition: an unreadable action directory stops before isIdle/custom and stays partial', async () => {
+  const artifactId = 'a'.repeat(32);
+  for (const code of ['EACCES', 'EIO', 'ENOTDIR']) {
+    const dataDir = await makeDir();
+    const injection = { armed: false, actionDir: null, calls: [] };
+    // 真实 delivery，只注入动作目录的 lstat 故障；Store 仍用真实 fs
+    const injectedFs = {
+      ...realFs,
+      async unlink(target) {
+        const result = await realFs.unlink(target);
+        injection.calls.push(['unlink', target]);
+        // 归档临时文件删掉之后再激活故障，模拟“清理到一半遇到不可读目录”
+        if (path.basename(target) === 'context.md') injection.armed = true;
+        return result;
+      },
+      async lstat(target, options) {
+        if (injection.armed && target === injection.actionDir) {
+          injection.calls.push(['lstat', target]);
+          throw Object.assign(new Error(`SECRET_${code} ${target}`), { code });
+        }
+        return realFs.lstat(target, options);
+      },
+    };
+    const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+    const artifacts = fakeArtifacts({ [artifactId]: artifactFixture(artifactId) });
+    const host = fakeHost();
+    const delivery = createHandoffDelivery({ dataDir, fs: injectedFs });
+    const harness = makeHarness({ dataDir, store, host, artifacts, delivery });
+    const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
+    const ownerHash = createHash('sha256').update(OWNER).digest('hex');
+    injection.actionDir = path.join(dataDir, 'handoff-delivery', ownerHash, prepared.actionId);
+
+    const response = await confirmViaRoute(harness, prepared.actionId);
+    assert.equal(response.status, 200, code);
+    assert.equal(response.body.ok, true, code);
+    assert.equal(response.body.action.state, 'partial', `${code}: 清理失败必须是 partial`);
+    assert.equal(response.body.action.errorCode, 'HANDOFF_DELIVERY_CLEANUP_FAILED', code);
+    assert.equal(response.body.action.sessionId, 'sess-1', `${code}: 已知 session 保留`);
+    assert.equal(response.body.action.files.length, 2, `${code}: 已知回执保留`);
+    assert.equal(response.body.action.entryId, null, code);
+    assert.equal(host.calls.some(call => call[0] === 'writeContext'), false, `${code}: 不能再写 custom`);
+    assert.equal(
+      host.calls.filter(call => call[0] === 'isIdle').length,
+      2,
+      `${code}: 清理失败后不得再读 idle`,
+    );
+    const text = JSON.stringify(response.body);
+    assert.equal(text.includes('SECRET_'), false, `${code}: 不能泄露错误原文`);
+    assert.equal(text.includes(injection.actionDir), false, `${code}: 不能泄露路径`);
+    assert.equal((await realFs.lstat(injection.actionDir)).isDirectory(), true, `${code}: 动作目录不能被删`);
+  }
 });
 

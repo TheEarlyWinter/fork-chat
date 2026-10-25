@@ -450,3 +450,67 @@ test('round5 C-I5: cleanup never creates the helper tree when nothing has been w
     if (!outcome.ok) assert.equal(outcome.error?.code, 'HANDOFF_DELIVERY_FAILED', '缺失时只能是保守拒绝');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task3 前置：只有 ENOENT 才能当“已不存在”；EACCES/EIO/ENOTDIR 必须拒绝清理
+// ---------------------------------------------------------------------------
+
+/** 真实 fs，只对动作目录的 lstat 抛指定错误码，并记录所有写/删/建/改权调用 */
+function fsWithActionLstatFailure(actionDir, code) {
+  const calls = [];
+  return {
+    calls,
+    ...realFs,
+    async lstat(target, options) {
+      if (target === actionDir) {
+        calls.push(['lstat', target]);
+        throw Object.assign(new Error(`SECRET_${code} ${target}`), { code });
+      }
+      return realFs.lstat(target, options);
+    },
+    async unlink(target) {
+      calls.push(['unlink', target]);
+      return realFs.unlink(target);
+    },
+    async rmdir(target) {
+      calls.push(['rmdir', target]);
+      return realFs.rmdir(target);
+    },
+    async mkdir(target, options) {
+      calls.push(['mkdir', target]);
+      return realFs.mkdir(target, options);
+    },
+    async chmod(target, mode) {
+      calls.push(['chmod', target]);
+      return realFs.chmod(target, mode);
+    },
+  };
+}
+
+test('precondition: an unreadable action directory (EACCES/EIO/ENOTDIR) is not treated as missing', async () => {
+  for (const code of ['EACCES', 'EIO', 'ENOTDIR']) {
+    const { dataDir } = await makeRoot();
+    // 先用真实 fs 正常写入，再用只对动作目录注入故障的 fs 清理
+    await writeBoth(createHandoffDelivery({ dataDir }));
+    const actionDir = actionDirOf(dataDir);
+    const injected = fsWithActionLstatFailure(actionDir, code);
+    const delivery = createHandoffDelivery({ dataDir, fs: injected });
+
+    const removed = await captureOutcome(() => delivery.remove({ owner: OWNER, actionId: ACTION_ID, name: 'context.md' }));
+    const removedDir = await captureOutcome(() => delivery.removeDir({ owner: OWNER, actionId: ACTION_ID }));
+
+    for (const [outcome, label] of [[removed, 'remove'], [removedDir, 'removeDir']]) {
+      assert.equal(outcome.ok, false, `${code}: ${label} 必须拒绝，不能当成目录已不存在`);
+      assert.equal(outcome.error?.code, 'HANDOFF_DELIVERY_FAILED', code);
+      assert.equal(outcome.error?.message, '交付动作目录不可用', `${code}: 固定安全文案`);
+      assert.equal(String(outcome.error?.message).includes(actionDir), false, `${code}: 不能泄露路径`);
+    }
+    assert.equal(injected.calls.some(call => call[0] === 'unlink'), false, `${code}: 不能 unlink`);
+    assert.equal(injected.calls.some(call => call[0] === 'rmdir'), false, `${code}: 不能 rmdir`);
+    assert.equal(injected.calls.some(call => call[0] === 'mkdir'), false, `${code}: 不能重建`);
+    assert.equal(injected.calls.some(call => call[0] === 'chmod'), false, `${code}: 不能改权限`);
+    assert.equal(await exists(path.join(actionDir, 'context.md')), true, `${code}: 合成归档必须还在`);
+    assert.equal(await exists(path.join(actionDir, `${ARTIFACT_ID}.bin`)), true, `${code}: 合成产物必须还在`);
+    assert.equal(await modeOf(actionDir), 0o700, code);
+  }
+});
