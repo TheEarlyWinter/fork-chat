@@ -186,10 +186,11 @@ test('a context exactly at the body budget still formats once an archive receipt
   // 索引插入发生在正文中间，join 会多一个分隔 LF；它属于索引预算，不属于正文
   const withArchive = formatHandoffTranscript(context, { archiveFile: ARCHIVE_RECEIPT });
   const fileSection = fileSectionOf(withArchive);
+  // fileSection 切片含索引块后的分隔 LF（不含插入点前多出的那个）
   assert.equal(
     Buffer.byteLength(withArchive, 'utf8'),
-    BODY_BUDGET + 1 + Buffer.byteLength(fileSection, 'utf8'),
-    '总字节 = 正文预算 + 索引 + 一个分隔 LF',
+    BODY_BUDGET + Buffer.byteLength(fileSection, 'utf8'),
+    '总字节 = 正文预算 + 索引块（含其后的分隔 LF）',
   );
   assert.ok(withArchive.includes('## 交付文件索引'), '索引必须真的插进输出');
   assert.ok(Buffer.byteLength(withArchive, 'utf8') <= HANDOFF_LIMITS.maxTranscriptBytes);
