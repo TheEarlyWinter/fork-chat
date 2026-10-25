@@ -712,7 +712,9 @@ export function formatHandoffTranscript(context, { files = [], archiveFile = nul
   const fileSection = renderFileIndex(files, archiveFile);
   const full = renderTranscriptBody(validated, fileSection);
   const totalBytes = contextByteLength(full);
-  const fileBytes = fileSection ? contextByteLength(fileSection) : 0;
+  // 索引作为一个 lines 元素插入时，join 会多出一个分隔 LF；它属于索引预算，不属于正文预算，
+  // 否则 bodyBytes 会比 stats.transcriptBytes 多 1，正好卡在预算上的记录会在 stage 后失败
+  const fileBytes = fileSection ? contextByteLength(fileSection) + 1 : 0;
   const bodyLimit = HANDOFF_LIMITS.maxTranscriptBytes - HANDOFF_LIMITS.fileIndexReserveBytes;
   const bodyBytes = totalBytes - fileBytes;
   if (bodyBytes > bodyLimit) {
