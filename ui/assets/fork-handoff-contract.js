@@ -60,6 +60,7 @@ export const HANDOFF_ERROR_CODES = Object.freeze(Object.fromEntries([
   'HANDOFF_REFERENCE_CONFLICT',
   'HANDOFF_INVALID_REFERENCE',
   'HANDOFF_INVALID_ARTIFACT',
+  'HANDOFF_ARTIFACT_CONFLICT',
   'HANDOFF_TOO_MANY_ARTIFACTS',
   'HANDOFF_ARTIFACT_TOO_LARGE',
   'HANDOFF_ARTIFACTS_TOTAL_TOO_LARGE',
@@ -85,6 +86,8 @@ export const HANDOFF_NOTICE_CODES = Object.freeze(Object.fromEntries([
 ].map(code => [code, code])));
 
 const ARTIFACT_ID_REGEX = /^[a-f0-9]{32}$/;
+/** 产物标识的唯一共享定义：编译器与校验器都不再各自维护一份正则 */
+export { ARTIFACT_ID_REGEX };
 const TOKEN_REGEX = /^[A-Za-z0-9_.:@~+-]{1,200}$/;
 const NOTICE_CODE_REGEX = /^[A-Z][A-Z0-9_]{2,60}$/;
 const MIME_REGEX = /^[A-Za-z0-9!#$&^_.+-]{1,60}\/[A-Za-z0-9!#$&^_.+-]{1,60}$/;

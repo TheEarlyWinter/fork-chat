@@ -13,16 +13,17 @@ import {
   parentIdsOf,
 } from './fork-snapshot.js';
 import { getContextMode } from './fork-context-policy.js';
+import { normalizeArtifactMetadata } from './artifact-contract.js';
 import {
   HANDOFF_SCHEMA_VERSION,
   HANDOFF_LIMITS,
   HANDOFF_ERROR_CODES as CODES,
   HANDOFF_NOTICE_CODES as NOTICES,
+  ARTIFACT_ID_REGEX,
   handoffError,
   validateHandoffContext,
 } from './fork-handoff-contract.js';
 
-const ARTIFACT_ID_REGEX = /^[a-f0-9]{32}$/;
 const GENERATING_STATUSES = new Set(['waiting', 'generating', 'delivering']);
 const MESSAGE_STATUS_MAP = new Map([
   ['completed', 'ok'],
@@ -193,6 +194,9 @@ function buildAttachments(message, cardId, messageIndex) {
     );
   }
   const list = Array.isArray(message.attachments) ? message.attachments : [];
+  if (message.attachments !== undefined && !Array.isArray(message.attachments)) {
+    throw invalidSnapshot(`卡片 ${cardId} 第 ${messageIndex + 1} 条消息的 attachments 必须是数组`);
+  }
   if (list.length > HANDOFF_LIMITS.maxAttachmentsPerMessage) {
     throw invalidSnapshot(`卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件数量超过上限`);
   }
@@ -236,27 +240,39 @@ function buildAttachments(message, cardId, messageIndex) {
 }
 
 function collectArtifacts(message, cardId, state) {
-  const receipts = [
-    ...(Array.isArray(message.artifacts) ? message.artifacts : []),
-    ...(Array.isArray(message.artifactRefs) ? message.artifactRefs : []),
-  ];
+  const receipts = [];
+  for (const [field, label] of [['artifacts', '产物'], ['artifactRefs', '产物引用']]) {
+    const value = message[field];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) throw invalidSnapshot(`卡片 ${cardId} 的 ${label}（${field}）必须是数组`);
+    receipts.push(...value);
+  }
   const ids = [];
   for (const raw of receipts) {
-    if (!isPlainObject(raw)) throw invalidSnapshot(`卡片 ${cardId} 的产物元数据不是对象`);
-    if (typeof raw.artifactId !== 'string' || !ARTIFACT_ID_REGEX.test(raw.artifactId)) {
-      throw handoffError(CODES.HANDOFF_INVALID_ARTIFACT, `卡片 ${cardId} 的产物标识不合法`);
+    if (!isPlainObject(raw)) {
+      throw handoffError(CODES.HANDOFF_INVALID_ARTIFACT, `卡片 ${cardId} 的产物回执不是对象`);
     }
-    if (!Number.isSafeInteger(raw.bytes) || raw.bytes <= 0) {
-      throw handoffError(CODES.HANDOFF_INVALID_ARTIFACT, `卡片 ${cardId} 的产物 ${raw.artifactId} 缺少体积信息`);
-    }
-    if (raw.bytes > HANDOFF_LIMITS.maxArtifactBytes) {
+    if (typeof raw.bytes === 'number' && raw.bytes > HANDOFF_LIMITS.maxArtifactBytes) {
       throw handoffError(
         CODES.HANDOFF_ARTIFACT_TOO_LARGE,
         `产物 ${raw.artifactId} 有 ${raw.bytes} 字节，超过单产物上限 ${HANDOFF_LIMITS.maxArtifactBytes}`,
         { bytes: raw.bytes, limit: HANDOFF_LIMITS.maxArtifactBytes },
       );
     }
-    if (!state.bytes.has(raw.artifactId)) {
+    // 复用 artifact-contract 的公共 receipt 规则；无效回执直接报错，不过滤吞掉
+    const metadata = normalizeArtifactMetadata(raw);
+    if (!metadata) {
+      throw handoffError(
+        CODES.HANDOFF_INVALID_ARTIFACT,
+        `卡片 ${cardId} 的产物回执不完整或不可交付（${String(raw.artifactId ?? '缺少标识')}）`,
+      );
+    }
+    const signature = [
+      metadata.name, metadata.mime, metadata.format, metadata.bytes, metadata.sha256,
+      metadata.createdAt, metadata.revisedFrom ?? '', metadata.version ?? 1, metadata.revisionRootId ?? '',
+    ].join('\u0000');
+    const previous = state.signatures.get(metadata.artifactId);
+    if (previous === undefined) {
       if (state.bytes.size >= HANDOFF_LIMITS.maxArtifacts) {
         throw handoffError(
           CODES.HANDOFF_TOO_MANY_ARTIFACTS,
@@ -264,12 +280,20 @@ function collectArtifacts(message, cardId, state) {
           { limit: HANDOFF_LIMITS.maxArtifacts },
         );
       }
-      state.bytes.set(raw.artifactId, raw.bytes);
-      state.order.push(raw.artifactId);
+      state.bytes.set(metadata.artifactId, metadata.bytes);
+      state.signatures.set(metadata.artifactId, signature);
+      state.order.push(metadata.artifactId);
     } else {
+      if (previous !== signature) {
+        throw handoffError(
+          CODES.HANDOFF_ARTIFACT_CONFLICT,
+          `产物 ${metadata.artifactId} 在不同位置的无变字段不一致`,
+          { artifactId: metadata.artifactId },
+        );
+      }
       state.deduped = true;
     }
-    if (!ids.includes(raw.artifactId)) ids.push(raw.artifactId);
+    if (!ids.includes(metadata.artifactId)) ids.push(metadata.artifactId);
   }
   return ids;
 }
@@ -430,7 +454,7 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
   const includedIds = dependencyOrder.filter(id => !excludedIds.has(id));
   const includedCards = includedIds.map(id => cardMap.get(id));
 
-  const artifactState = { bytes: new Map(), order: [], deduped: false };
+  const artifactState = { bytes: new Map(), signatures: new Map(), order: [], deduped: false };
   const nodes = [];
   let failedCount = 0;
   let localNoticeCount = 0;
