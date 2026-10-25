@@ -6,6 +6,7 @@ import realFs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 import { buildHandoffContext } from '../ui/assets/fork-handoff-context.js';
+import { HANDOFF_LIMITS, validateHandoffContext } from '../ui/assets/fork-handoff-contract.js';
 import { createHandoffStore } from '../lib/handoff-store.js';
 import { createHandoffDelivery } from '../lib/handoff-delivery.js';
 import { createHandoffService } from '../lib/handoff-service.js';
@@ -1335,5 +1336,137 @@ test('precondition: an unreadable action directory stops before isIdle/custom an
     assert.equal(text.includes(injection.actionDir), false, `${code}: 不能泄露路径`);
     assert.equal((await realFs.lstat(injection.actionDir)).isDirectory(), true, `${code}: 动作目录不能被删`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// I1：prepare / confirm 都必须在副作用之前检查正文预算
+// ---------------------------------------------------------------------------
+
+const TRANSCRIPT_BUDGET = HANDOFF_LIMITS.maxTranscriptBytes - HANDOFF_LIMITS.fileIndexReserveBytes;
+
+/** 构造一个带指定长度 ASCII 正文的合法 DTO（编译器会提前拒绝超限，这里直接造协议层输入） */
+function bigHandoffDto(chars) {
+  return {
+    schemaVersion: 1,
+    source: { canvasId: 'canvas-1', revision: 'rev-1', targetCardId: 'card-1' },
+    agentId: 'agent-a',
+    nextStep: '继续处理',
+    nodes: [{
+      cardId: 'card-1',
+      title: '目标',
+      parentIds: [],
+      contextMode: 'include',
+      doc: null,
+      messages: [{
+        role: 'user',
+        text: 'x'.repeat(chars),
+        agentName: '',
+        status: 'ok',
+        attachments: [],
+        artifactIds: [],
+      }],
+      artifactIds: [],
+    }],
+    references: [],
+    referenceSources: [],
+    artifactIds: [],
+    exclusions: [],
+    omissions: { localNoticeCount: 0 },
+    unsent: [],
+    notices: [],
+    stats: { nodeCount: 0, transcriptBytes: 0 },
+  };
+}
+
+/** 规范化后的真实转录字节数（以协议层重算为准，不采信调用方 stats） */
+function transcriptBytesFor(chars) {
+  return validateHandoffContext(bigHandoffDto(chars)).stats.transcriptBytes;
+}
+
+test('I1: prepare rejects an over-budget canonical transcript before store or host side effects', async () => {
+  const dataDir = await makeDir();
+  const forged = bigHandoffDto(2_100_000);   // 伪报 stats=0
+  assert.ok(transcriptBytesFor(2_100_000) > TRANSCRIPT_BUDGET, '夹具必须真的超过正文预算');
+  assert.ok(JSON.stringify(forged).length < HANDOFF_LIMITS.maxPrepareJsonBytes, 'JSON 仍在 prepare 上限内');
+
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let storePrepareCalls = 0;
+  const countedStore = {
+    ...store,
+    async prepare(args) {
+      storePrepareCalls += 1;
+      return store.prepare(args);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store: countedStore, host });
+
+  const response = await harness.call('POST', '/api/handoff/prepare', { body: forged });
+  assert.equal(response.status, 413, JSON.stringify(response.body).slice(0, 200));
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.code, 'HANDOFF_TRANSCRIPT_TOO_LARGE');
+  assert.equal(storePrepareCalls, 0, '不得写入 Store');
+  assert.equal(hostWrites(host).length, 0, '不得读能力或开宿主会话');
+});
+
+test('I1: confirm refuses an over-budget prepared record before claim, create or import', async () => {
+  const dataDir = await makeDir();
+  const seededContext = validateHandoffContext(bigHandoffDto(2_100_000));
+  assert.ok(seededContext.stats.transcriptBytes > TRANSCRIPT_BUDGET);
+
+  // 直接 Store seed 一个超限旧记录（经过规范化校验，stats 真实）
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const seeded = await store.prepare({ owner: OWNER, context: seededContext });
+  assert.equal((await store.get({ owner: OWNER, actionId: seeded.actionId })).action.state, 'prepared');
+
+  let claimCalls = 0;
+  const countedStore = {
+    ...store,
+    async claim(args) {
+      claimCalls += 1;
+      return store.claim(args);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store: countedStore, host });
+
+  const response = await confirmViaRoute(harness, seeded.actionId);
+  assert.equal(response.status, 413, JSON.stringify(response.body).slice(0, 200));
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.code, 'HANDOFF_TRANSCRIPT_TOO_LARGE');
+  assert.equal(claimCalls, 0, '不得 claim');
+  assert.equal(hostWrites(host).length, 0, '不得 create/import/dispatch');
+
+  // 状态仍可查，没留下空会话或半成品
+  const still = await harness.call('GET', `/api/handoff/actions/${seeded.actionId}`);
+  assert.equal(still.status, 200);
+  assert.equal(still.body.action.state, 'prepared');
+  assert.equal(still.body.action.sessionId, null);
+});
+
+test('I1: the exact transcript budget is accepted and one byte more is refused', async () => {
+  const dataDir = await makeDir();
+  const probeBytes = transcriptBytesFor(1000);
+  const exactChars = 1000 + (TRANSCRIPT_BUDGET - probeBytes);
+  assert.equal(transcriptBytesFor(exactChars), TRANSCRIPT_BUDGET, '边界夹具必须恰好等于预算');
+
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+
+  const allowed = await prepareViaRoute(harness, bigHandoffDto(exactChars));
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.body).slice(0, 200));
+  assert.equal(allowed.body.ok, true);
+
+  const over = await prepareViaRoute(harness, bigHandoffDto(exactChars + 1));
+  assert.equal(over.status, 413);
+  assert.equal(over.body.code, 'HANDOFF_TRANSCRIPT_TOO_LARGE');
+
+  // 普通上下文仍能走完 prepare → confirm → ready
+  const normal = await prepareViaRoute(harness, handoffContext());
+  assert.equal(normal.status, 200);
+  const confirmed = await confirmViaRoute(harness, normal.body.action.actionId);
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.body.action.state, 'ready');
 });
 

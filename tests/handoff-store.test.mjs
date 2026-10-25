@@ -10,6 +10,7 @@ import {
   HANDOFF_STORE_LIMITS,
   HANDOFF_STORE_ERROR_CODES as CODES,
 } from '../lib/handoff-store.js';
+import { acquireSlot, releaseSlot, readSlotUsage } from '../lib/handoff-store-io.js';
 
 // ---------------------------------------------------------------------------
 // 夹具
@@ -1454,4 +1455,276 @@ test('an unreadable dispatch decision preserves published data and slot', async 
   } finally {
     await realFs.chmod(dispatchPath, 0o600);
   }
+});
+
+// ---------------------------------------------------------------------------
+// C1：slot 目录被 mkdir 但尚未写预约时，不能被当作空目录回收
+// ---------------------------------------------------------------------------
+
+const SLOT_A = `ha_${'a'.repeat(32)}`;
+const SLOT_B = `ha_${'b'.repeat(32)}`;
+const SLOT_C = `ha_${'c'.repeat(32)}`;
+
+function reservationMeta() {
+  return { payloadBytes: 10, createdAt: new Date(NOW).toISOString() };
+}
+
+async function capture(promiseOrThunk) {
+  try {
+    const value = await (typeof promiseOrThunk === 'function' ? promiseOrThunk() : promiseOrThunk);
+    return { ok: true, value, error: null };
+  } catch (error) {
+    return { ok: false, value: null, error };
+  }
+}
+
+/** 列目录内容；目录已不在时返回 null，便于对比“被删”和“已清空” */
+async function listNames(dir) {
+  try {
+    return (await realFs.readdir(dir)).sort();
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** 只拦截指定路径的一个操作，并提供一个有界等待的 reached Promise */
+function gateOnce(match) {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let reached;
+  const reachedPromise = new Promise(resolve => { reached = resolve; });
+  return {
+    gate,
+    reached: reachedPromise,
+    async enter() {
+      reached();
+      await gate;
+    },
+    matches: match,
+    release,
+  };
+}
+
+test('C1: a mkdir-ed but not yet reserved slot is never stolen', async () => {
+  const dataDir = await makeDir();
+  const slotsDir = path.join(ownerRoot(dataDir), 'slots');
+  const pause = gateOnce({ op: 'mkdir', dir: path.join(slotsDir, '31') });
+  let armed = true;
+  const gatedFs = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'mkdir') {
+        return async (dir, options) => {
+          const result = await target.mkdir(dir, options);
+          if (armed && pause.matches.op === 'mkdir' && dir === pause.matches.dir) {
+            armed = false;
+            await pause.enter();
+          }
+          return result;
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = makeStore(dataDir, { fs: gatedFs });
+  await prepareMany(store, 31);
+
+  const pendingA = store.prepare({ owner: OWNER, context: handoffContext() });
+  await pause.reached;
+  // A 已经 mkdir 出 slot 31，但还没写预约文件
+  assert.deepEqual(await realFs.readdir(path.join(slotsDir, '31')), [], 'A 刚建出空 slot，尚无预约');
+
+  const other = await capture(store.prepare({ owner: OWNER, context: handoffContext() }));
+  assert.equal(other.ok, false, '不能抢占刚 mkdir 的空 slot');
+  assert.equal(other.error.code, CODES.QUOTA_EXCEEDED, '同 owner 只能拿到额度错误');
+
+  pause.release();
+  const actionA = await pendingA;
+  assert.deepEqual(await realFs.readdir(path.join(slotsDir, '31')), [`${actionA.actionId}.json`], '最后一个 slot 只属于 A');
+  const usage = await readSlotUsage(realFs, slotsDir);
+  const lastSlot = usage.items.find(item => item.index === '31');
+  assert.ok(lastSlot);
+  assert.equal(lastSlot.actionId, actionA.actionId);
+  assert.equal(usage.items.length, 32);
+
+  // 后续 get/claim/完成并释放后仍可继续 prepare
+  assert.ok(await store.get({ owner: OWNER, actionId: actionA.actionId }));
+  await completeReady(store, actionA);
+  const next = await store.prepare({ owner: OWNER, context: handoffContext() });
+  assert.ok(next.actionId, '释放后仍可继续 prepare');
+});
+
+test('C1: a late release of a stale marker cannot remove a newer empty slot', async () => {
+  const dataDir = await makeDir();
+  const slotsDir = path.join(dataDir, 'slots');
+  const markerA = path.join(slotsDir, '0', `${SLOT_A}.json`);
+  const acquired = await acquireSlot(realFs, slotsDir, { actionId: SLOT_A, ...reservationMeta() });
+  assert.equal(acquired.index, 0);
+
+  // A 暂停在删除旧 marker 的那一刻
+  const pauseUnlink = gateOnce({ op: 'unlink', path: markerA });
+  let armed = true;
+  const fsA = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'unlink') {
+        return async filePath => {
+          if (armed && filePath === pauseUnlink.matches.path) {
+            armed = false;
+            await pauseUnlink.enter();
+          }
+          return target.unlink(filePath);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const lateRelease = releaseSlot(fsA, slotsDir, SLOT_A);
+  await pauseUnlink.reached;
+
+  let pendingC = null;
+  const slotZero = path.join(slotsDir, '0');
+  try {
+    // B 真正释放旧预约（marker + 目录）
+    await releaseSlot(realFs, slotsDir, SLOT_A);
+    assert.equal(await listNames(slotZero), null, 'B 已释放 slot 0');
+
+    // C mkdir 同 slot 后暂停在写 marker 之前
+    const markerC = path.join(slotZero, `${SLOT_C}.json`);
+    const pauseOpen = gateOnce({ op: 'open', path: markerC });
+    let cArmed = true;
+    const fsC = new Proxy(realFs, {
+      get(target, prop) {
+        if (prop === 'open') {
+          return async (filePath, flags, mode) => {
+            if (cArmed && filePath === pauseOpen.matches.path) {
+              cArmed = false;
+              await pauseOpen.enter();
+            }
+            return target.open(filePath, flags, mode);
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      pendingC = acquireSlot(fsC, slotsDir, { actionId: SLOT_C, ...reservationMeta() });
+      await pauseOpen.reached;
+      assert.deepEqual(await listNames(slotZero), [], 'C 刚建出空 slot');
+
+      // A 迟到 unlink 只能 ENOENT，不能删掉 C 的新目录
+      pauseUnlink.release();
+      const lateResult = await capture(lateRelease);
+      assert.equal(lateResult.ok, true, '迟到的释放本身不算错误');
+      assert.deepEqual(await listNames(slotZero), [], 'C 的空 slot 必须还在');
+
+      pauseOpen.release();
+      const cSlot = await pendingC;
+      assert.equal(cSlot.index, 0);
+      assert.deepEqual(await listNames(slotZero), [`${SLOT_C}.json`], 'C 的预约能正常落下');
+    } finally {
+      pauseOpen.release();
+      await Promise.allSettled([pendingC].filter(Boolean));
+    }
+  } finally {
+    pauseUnlink.release();
+    await Promise.allSettled([lateRelease]);
+  }
+});
+
+test('C1: acquisition cleanup cannot remove a slot directory a newer action just created', async () => {
+  const dataDir = await makeDir();
+  const slotsDir = path.join(dataDir, 'slots');
+
+  // A 写好了 marker，但父目录同步失败；失败点被拦在同步之前
+  const pauseSync = gateOnce({ op: 'open', path: slotsDir });
+  let armed = true;
+  const fsA = new Proxy(realFs, {
+    get(target, prop) {
+      if (prop === 'open') {
+        return async (filePath, flags, mode) => {
+          if (armed && filePath === pauseSync.matches.path) {
+            armed = false;
+            await pauseSync.enter();
+            const error = new Error('injected slot sync failure');
+            error.code = 'EIO';
+            throw error;
+          }
+          return target.open(filePath, flags, mode);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const pendingA = acquireSlot(fsA, slotsDir, { actionId: SLOT_B, ...reservationMeta() });
+  await pauseSync.reached;
+  const slotZero = path.join(slotsDir, '0');
+  assert.deepEqual(await listNames(slotZero), [`${SLOT_B}.json`], 'A 已写出预约');
+
+  let pendingC = null;
+  let pauseOpen = null;
+  try {
+    // B 释放 A，C 重建同名空 slot 并暂停在写 marker 之前
+    await releaseSlot(realFs, slotsDir, SLOT_B);
+    assert.equal(await listNames(slotZero), null, 'B 已释 A 的预约目录');
+    const markerC = path.join(slotZero, `${SLOT_C}.json`);
+    pauseOpen = gateOnce({ op: 'open', path: markerC });
+    let cArmed = true;
+    const fsC = new Proxy(realFs, {
+      get(target, prop) {
+        if (prop === 'open') {
+          return async (filePath, flags, mode) => {
+            if (cArmed && filePath === pauseOpen.matches.path) {
+              cArmed = false;
+              await pauseOpen.enter();
+            }
+            return target.open(filePath, flags, mode);
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    pendingC = acquireSlot(fsC, slotsDir, { actionId: SLOT_C, ...reservationMeta() });
+    await pauseOpen.reached;
+    assert.deepEqual(await listNames(slotZero), [], 'C 刚建出空 slot');
+
+    // A 的错误清理不得删除 C 刚建的新目录
+    pauseSync.release();
+    const aResult = await capture(pendingA);
+    assert.equal(aResult.ok, false);
+    assert.equal(aResult.error.code, CODES.STORE_IO);
+    assert.deepEqual(await listNames(slotZero), [], 'C 的空 slot 必须还在');
+
+    pauseOpen.release();
+    const cSlot = await pendingC;
+    assert.equal(cSlot.index, 0);
+    assert.deepEqual(await listNames(slotZero), [`${SLOT_C}.json`]);
+  } finally {
+    pauseSync.release();
+    pauseOpen?.release();
+    await Promise.allSettled([pendingA, pendingC].filter(Boolean));
+  }
+});
+
+test('C1: legacy empty slot directories stay conservative and are never recycled', async () => {
+  const dataDir = await makeDir();
+  const store = makeStore(dataDir);
+  const slotsDir = path.join(ownerRoot(dataDir), 'slots');
+  await realFs.mkdir(slotsDir, { recursive: true, mode: 0o700 });
+  for (let index = 0; index < 32; index += 1) {
+    await realFs.mkdir(path.join(slotsDir, String(index)), { mode: 0o700 });
+  }
+
+  const result = await capture(store.prepare({ owner: OWNER, context: handoffContext() }));
+  assert.equal(result.ok, false, '空遗留 slot 不能被回收当成可用额度');
+  assert.equal(result.error.code, CODES.QUOTA_EXCEEDED, '只能是保守的额度错误，不能是 CORRUPT/IO');
+
+  for (let index = 0; index < 32; index += 1) {
+    assert.deepEqual(await realFs.readdir(path.join(slotsDir, String(index))), [], `slot ${index} 不能被写或删`);
+  }
+  assert.equal((await realFs.readdir(slotsDir)).length, 32);
 });
