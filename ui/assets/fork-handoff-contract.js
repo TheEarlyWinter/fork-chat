@@ -11,6 +11,7 @@ import { ID_REGEX } from './fork-snapshot.js';
 import {
   HANDOFF_NOTICE_CODES,
   buildHandoffNotices,
+  hasHandoffBusinessContent,
 } from './fork-handoff-definitions.js';
 import { renderTranscriptBody } from './fork-handoff-transcript.js';
 
@@ -299,6 +300,10 @@ function normalizeReference(raw, index, nodeIds, sourceMap) {
     if (typeof owner !== 'string' || !nodeIds.has(owner)) throw invalid(`第 ${index + 1} 条引用的位置不是已纳入节点`);
     if (!positions.includes(owner)) positions.push(owner);
   }
+  // 自引用在 DTO 层也要拒绝：builder 拦住不等于服务端拦住
+  if (positions.includes(raw.sourceCardId)) {
+    throw invalid(`第 ${index + 1} 条引用的来源就是引用位置本身`);
+  }
   return {
     refId: raw.refId,
     sourceCardId: raw.sourceCardId,
@@ -321,7 +326,7 @@ function normalizeNotice(raw, index) {
 
 /** 客户端只能声明“丢弃了多少条本地提示”，不能自带正文或任意计数 */
 function normalizeOmissions(value) {
-  if (value === undefined || value === null) return { localNoticeCount: 0 };
+  if (value === undefined) return { localNoticeCount: 0 };
   if (!isPlainObject(value)) throw invalid('omissions 必须是对象');
   const count = value.localNoticeCount;
   if (!Number.isSafeInteger(count) || count < 0 || count > HANDOFF_LIMITS.maxOmittedLocalNotices) {
@@ -335,7 +340,7 @@ function normalizeOmissions(value) {
  * 卡片必须在依赖图内，计数有界，空条目直接拒绝。
  */
 function normalizeUnsent(value, graphIds) {
-  if (value === undefined || value === null) return [];
+  if (value === undefined) return [];
   if (!Array.isArray(value)) throw invalid('unsent 必须是数组');
   if (value.length > HANDOFF_LIMITS.maxNodes) throw invalid('unsent 条目数量超过上限');
   const seen = new Set();
@@ -559,6 +564,9 @@ export function validateHandoffContext(value) {
   const omissions = normalizeOmissions(value.omissions);
   const unsent = normalizeUnsent(value.unsent, new Set([...nodeIds, ...excludedIds]));
   const providedArtifacts = normalizeArtifactIdList(value.artifactIds, '产物列表');
+  // 顶层 artifactIds = 节点自身位置 + 消息位置的去重合集；
+  // node.artifactIds 只表示节点自己身上的产物，不复制消息 ID，
+  // 这样重复统计（notice）可以按原始位置计算。
   const derivedArtifacts = [];
   for (const node of nodes) {
     for (const id of node.artifactIds) if (!derivedArtifacts.includes(id)) derivedArtifacts.push(id);
@@ -576,10 +584,8 @@ export function validateHandoffContext(value) {
   const extraArtifacts = providedArtifacts.filter(id => !derivedArtifacts.includes(id));
   if (extraArtifacts.length) throw invalid('产物列表含节点里不存在的产物标识');
 
-  // 服务端重算有没有真正的业务内容；空壳节点、仅 nextStep 都不算
-  const businessMessages = nodes.reduce((sum, node) => sum + node.messages.length, 0);
-  const businessDocs = nodes.filter(node => node.doc).length;
-  if (businessMessages === 0 && businessDocs === 0 && references.length === 0) {
+  // 服务端重算有没有真正的业务内容；空壳节点、仅 nextStep、仅被排除引用都不算
+  if (!hasHandoffBusinessContent({ nodes, references, artifactIds: derivedArtifacts })) {
     throw handoffError(HANDOFF_ERROR_CODES.HANDOFF_NO_CONTENT, '所选分支没有可导入的已保存内容');
   }
 

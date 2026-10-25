@@ -47,6 +47,13 @@ function countLines(text) {
   return lines;
 }
 
+/** 可选集合字段：undefined 表示没有；null 或其它非数组一律拒绝 */
+function optionalArray(value, label) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw invalidSnapshot(`${label} 必须是数组`);
+  return value;
+}
+
 function assertSource(source, targetCardId) {
   if (!isPlainObject(source)) throw handoffError(CODES.HANDOFF_INVALID_SOURCE, '缺少来源信息');
   if (source.targetCardId !== targetCardId) {
@@ -80,9 +87,7 @@ function indexCards(snapshot) {
       throw invalidSnapshot(`卡片 ${card.id} 的上下文标记不合法`);
     }
     const parents = parentIdsOf(card);
-    if (card.contextRefs !== undefined && card.contextRefs !== null && !Array.isArray(card.contextRefs)) {
-      throw invalidSnapshot(`卡片 ${card.id} 的 references 必须是数组`);
-    }
+    optionalArray(card.contextRefs, `卡片 ${card.id} 的 references`);
     for (const parentId of parents) {
       if (typeof parentId !== 'string' || !ID_REGEX.test(parentId)) {
         throw invalidSnapshot(`卡片 ${card.id} 的父节点标识不合法`);
@@ -191,10 +196,7 @@ function buildAttachments(message, cardId, messageIndex) {
       { truncated: [...message.attachmentsTruncated] },
     );
   }
-  const list = Array.isArray(message.attachments) ? message.attachments : [];
-  if (message.attachments !== undefined && !Array.isArray(message.attachments)) {
-    throw invalidSnapshot(`卡片 ${cardId} 第 ${messageIndex + 1} 条消息的 attachments 必须是数组`);
-  }
+  const list = optionalArray(message.attachments, `卡片 ${cardId} 第 ${messageIndex + 1} 条消息的 attachments`);
   if (list.length > HANDOFF_LIMITS.maxAttachmentsPerMessage) {
     throw invalidSnapshot(`卡片 ${cardId} 第 ${messageIndex + 1} 条消息的附件数量超过上限`);
   }
@@ -240,10 +242,7 @@ function buildAttachments(message, cardId, messageIndex) {
 function collectArtifacts(message, cardId, state) {
   const receipts = [];
   for (const [field, label] of [['artifacts', '产物'], ['artifactRefs', '产物引用']]) {
-    const value = message[field];
-    if (value === undefined) continue;
-    if (!Array.isArray(value)) throw invalidSnapshot(`卡片 ${cardId} 的 ${label}（${field}）必须是数组`);
-    receipts.push(...value);
+    receipts.push(...optionalArray(message[field], `卡片 ${cardId} 的 ${label}（${field}）`));
   }
   const ids = [];
   for (const raw of receipts) {
@@ -331,12 +330,8 @@ function buildMessage(raw, cardId, index, artifactState) {
 
 /** 只提取预览元数据：草稿只报字符数，暂存附件只报名称与裁切状态 */
 function buildUnsent(card) {
-  if (card.stagedAttachments !== undefined && card.stagedAttachments !== null
-    && !Array.isArray(card.stagedAttachments)) {
-    throw invalidSnapshot(`卡片 ${card.id} 的 stagedAttachments 必须是数组`);
-  }
   const draft = typeof card.draft === 'string' ? card.draft : '';
-  const staged = Array.isArray(card.stagedAttachments) ? card.stagedAttachments : [];
+  const staged = optionalArray(card.stagedAttachments, `卡片 ${card.id} 的 stagedAttachments`);
   const droppedSaved = Number.isSafeInteger(card.stagedAttachmentsDropped) && card.stagedAttachmentsDropped > 0
     ? card.stagedAttachmentsDropped
     : 0;
@@ -474,7 +469,9 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
       contextMode: getContextMode(card),
       doc,
       messages,
-      artifactIds: [...new Set(messages.flatMap(message => message.artifactIds))],
+      // 节点级产物位置：只表示节点本身的产物，不复制消息里的 ID
+      // （总去重由顶层 artifactIds 负责，重复 notice 按原始位置统计）
+      artifactIds: [],
     });
   }
 
@@ -488,11 +485,6 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
   }
 
   const references = buildReferences(includedCards, cardMap);
-  const messageCount = nodes.reduce((sum, node) => sum + node.messages.length, 0);
-  const docCount = nodes.filter(node => node.doc).length;
-  if (messageCount === 0 && docCount === 0 && references.order.length === 0) {
-    throw handoffError(CODES.HANDOFF_NO_CONTENT, '所选分支没有可导入的已保存内容');
-  }
 
   const exclusions = dependencyOrder
     .filter(id => excludedIds.has(id))

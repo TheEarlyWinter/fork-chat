@@ -80,6 +80,26 @@ export function collectHandoffFacts(context) {
   };
 }
 
+/**
+ * 是否有真正可导入的业务内容：非空保存正文、非空消息、已发送附件、
+ * 已纳入且非空的引用、有效产物。空白消息、仅被排除引用、unsent/nextStep 都不算。
+ * builder 与校验器共用这一个谓词，避免两套判定继续漂移。
+ */
+export function hasHandoffBusinessContent({ nodes, references, artifactIds } = {}) {
+  if (Array.isArray(artifactIds) && artifactIds.length > 0) return true;
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node?.doc && typeof node.doc.content === 'string' && node.doc.content.trim() !== '') return true;
+    for (const message of Array.isArray(node?.messages) ? node.messages : []) {
+      if (typeof message?.text === 'string' && message.text.trim() !== '') return true;
+      if (Array.isArray(message?.attachments) && message.attachments.length > 0) return true;
+    }
+  }
+  for (const reference of Array.isArray(references) ? references : []) {
+    if (reference?.included === true && typeof reference.text === 'string' && reference.text.trim() !== '') return true;
+  }
+  return false;
+}
+
 const NOTICE_TEXT = Object.freeze({
   SNAPSHOT_ONLY: () => '导入内容只是 App 当前保存的快照，不是原始文件、原始会话或实时画布的逐字副本。',
   TARGET_EXCLUDED: () => '目标节点自身被标记为不向后代贡献正文；本次仍将其纳入，且不修改它的排除设置。',
