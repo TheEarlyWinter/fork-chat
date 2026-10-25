@@ -219,6 +219,14 @@ export function createPanelSessionUi(deps) {
     if (result.ok) {
       dismissDeleteConfirmation(false);
       replySessionCommand(intent.message, result);
+    } else if (/^(SESSION_CONFLICT|SESSION_NOT_FOUND):/.test(String(result.error || ''))) {
+      // The modal confirmed an older revision. Retire that record instead of
+      // letting a second trusted click reuse stale deletion authority.
+      intent.record = null;
+      deleteDialogError.textContent = '保存版本已变化，请关闭后重新发起删除。';
+      deleteDialogProgress.textContent = '保存版本已变化，请关闭后重新发起删除。';
+      btnDeleteConfirm.disabled = true;
+      btnDeleteCancel.disabled = false;
     } else {
       deleteDialogError.textContent = result.error || '删除失败，原会话尚未移除。';
       deleteDialogProgress.textContent = '可以取消，或检查存储状态后重试。';

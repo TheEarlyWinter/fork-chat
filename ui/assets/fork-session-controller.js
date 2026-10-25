@@ -488,7 +488,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     try {
       await tail.catch(() => {});
       if (closed) return { ok: false, error: '画布已关闭。' };
-      const revision = isCurrent ? Math.max(active.revision, expectedRevision) : expectedRevision;
+      const revision = expectedRevision;
       const owner = claimSaving();
       try {
         const result = await store.remove(id, revision, fallbackSnapshot);

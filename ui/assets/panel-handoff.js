@@ -672,7 +672,10 @@ export function createPanelHandoff(deps = {}) {
       }
       historyActions = data.actions;
     } catch (err) {
-      if (!isCurrent(op)) return false;
+      if (!isCurrent(op)) {
+        closeStalePreview(op);
+        return false;
+      }
       view.renderError({
         message: '查询历史交接记录失败：' + safeDetail(err?.message || err) + '，请点击重试。',
         onRetry: () => retryLoadHistory(op),
@@ -680,7 +683,10 @@ export function createPanelHandoff(deps = {}) {
       });
       return false;
     }
-    if (!isCurrent(op)) return false;
+    if (!isCurrent(op)) {
+      closeStalePreview(op);
+      return false;
+    }
     op.historyActions = historyActions;
     return true;
   }
@@ -772,11 +778,17 @@ export function createPanelHandoff(deps = {}) {
       const resp = await requestHost(hana, '/api/handoff/capabilities');
       caps = await resp.json();
     } catch (err) {
-      if (!isCurrent(op)) return;
+      if (!isCurrent(op)) {
+        closeStalePreview(op);
+        return;
+      }
       view.setError('查询交接支持能力失败：' + safeDetail(err?.message || err));
       return;
     }
-    if (!isCurrent(op)) return;
+    if (!isCurrent(op)) {
+      closeStalePreview(op);
+      return;
+    }
     op.caps = caps;
     op.capsOk = Boolean(
       caps &&
@@ -788,7 +800,11 @@ export function createPanelHandoff(deps = {}) {
 
     // 2. 查询历史动作 actions
     const ok = await loadHistoryActions(op);
-    if (!ok || !isCurrent(op)) return;
+    if (!ok) return;
+    if (!isCurrent(op)) {
+      closeStalePreview(op);
+      return;
+    }
 
     // 3. 处理历史记录或进入新预览
     await processHistoryOrNewPreview(op);
