@@ -242,7 +242,18 @@ export function normalizeForkSnapshot(input) {
       // A revision can update an older file card while this message keeps only a context reference.
       if (Array.isArray(rawMsg.artifactRefs)) msg.artifactRefs = normalizeArtifactList(rawMsg.artifactRefs);
 
+      // 旧存档可能已经带着裁切标记回来：先原样接住，再与本次重算结果合并
+      if (Number.isSafeInteger(rawMsg.attachmentsDropped) && rawMsg.attachmentsDropped > 0) {
+        msg.attachmentsDropped = rawMsg.attachmentsDropped;
+      }
+      const savedTruncatedIdx = Array.isArray(rawMsg.attachmentsTruncated)
+        ? rawMsg.attachmentsTruncated.filter(Number.isSafeInteger)
+        : [];
       if (Array.isArray(rawMsg.attachments)) {
+        // 裁切不能无声无息：数量与正文的丢减都要留下可恢复标记，
+        // 否则重开之后 charCount 继续撒谎，交接会把残缺当完整。
+        const droppedBySlice = rawMsg.attachments.length > 10 ? rawMsg.attachments.length - 10 : 0;
+        if (droppedBySlice) msg.attachmentsDropped = Math.max(droppedBySlice, msg.attachmentsDropped ?? 0);
         msg.attachments = rawMsg.attachments.slice(0, 10).map(att => ({
           name: typeof att?.name === 'string' ? att.name.slice(0, 200) : '',
           size: typeof att?.size === 'number' ? att.size : 0,
@@ -254,6 +265,14 @@ export function normalizeForkSnapshot(input) {
           content: typeof att?.content === 'string' ? att.content.slice(0, ATTACHMENT_MAX_CHARS) : '',
           preview: typeof att?.preview === 'string' ? att.preview.slice(0, 3000) : '',
         }));
+        // 与旧标记取并集，不因重算而丢掉历史信息
+        const truncatedIdx = new Set(savedTruncatedIdx);
+        msg.attachments.forEach((att, i) => {
+          if (att.content.length >= ATTACHMENT_MAX_CHARS) truncatedIdx.add(i);
+        });
+        if (truncatedIdx.size) msg.attachmentsTruncated = [...truncatedIdx].sort((a, b) => a - b);
+      } else if (savedTruncatedIdx.length) {
+        msg.attachmentsTruncated = [...new Set(savedTruncatedIdx)].sort((a, b) => a - b);
       }
 
       // 关键：streaming=true 或 status waiting/generating 统一转换为已中断终态
