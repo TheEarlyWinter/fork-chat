@@ -26,7 +26,8 @@ function parseReport(result) {
   return JSON.parse(last);
 }
 
-function runChild({ dataDir, config = {}, permission = true, straceInject = false, traceFile, fileSizeLimit = 0 }) {
+function runChild({ dataDir, config = {}, permission = true, trace = 'none', traceFile, fileSizeLimit = 0 }) {
+  if (trace !== 'none' && !traceFile) throw new Error(`trace mode ${trace} requires traceFile`);
   const nodeArgs = [
     ...(permission ? ['--permission', `--allow-fs-read=${repoRoot}`, `--allow-fs-read=${dataDir}`, `--allow-fs-write=${dataDir}`] : []),
     childPath,
@@ -36,24 +37,23 @@ function runChild({ dataDir, config = {}, permission = true, straceInject = fals
   let result;
   if (fileSizeLimit) {
     result = spawnSync('/bin/bash', ['-c', `ulimit -f ${fileSizeLimit}; exec "$@"`, 'bash', process.execPath, ...nodeArgs], spawnOptions);
-  } else if (straceInject) {
+  } else if (trace !== 'none') {
+    // traceFile 只有在 strace 真启动时才存在；observe 只追踪，inject 另把首个 fsync 变成 EIO。
     result = spawnSync('strace', [
-      '-f', '-qq', '-y', '-e', 'trace=fsync,fdatasync',
-      '-e', 'inject=fsync:error=EIO:when=1',
+      '-f', '-qq', '-y', '-e', 'trace=openat,fsync,fdatasync',
+      ...(trace === 'inject' ? ['-e', 'inject=fsync:error=EIO:when=1'] : []),
       '-o', traceFile, process.execPath, ...nodeArgs,
     ], spawnOptions);
   } else {
     result = spawnSync(process.execPath, nodeArgs, spawnOptions);
   }
+  if (result.error) throw new Error(`child launcher failed: ${result.error.message}`);
   return { ...result, report: parseReport(result) };
 }
 
 async function traceLines(traceFile) {
-  try {
-    return (await fs.readFile(traceFile, 'utf8')).split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
+  // 不吞 ENOENT：strace 没真正启动时测试必须失败，而不是拿空数组当“无 fsync”证据。
+  return (await fs.readFile(traceFile, 'utf8')).split('\n').filter(Boolean);
 }
 
 function hasExecutable(name) {
@@ -145,11 +145,12 @@ test('artifact publish: ordinary mode still fsyncs, and a real fsync error fails
   const result = runChild({
     dataDir,
     permission: false,
-    straceInject: true,
+    trace: 'inject',
     traceFile,
     config: { owner: 'plain-owner', content: '# 普通模式\n\n真实 fsync 失败\n' },
   });
 
+  assert.equal(result.status, 0, `the traced child must exit normally so the report is trustworthy: ${result.stderr}`);
   const fsyncs = (await traceLines(traceFile)).filter(line => /fsync|fdatasync/.test(line));
   assert.ok(fsyncs.length > 0, 'ordinary mode must still call a real fd sync, not skip durability');
   assert.equal(result.report.ok, false, `a failed sync must not be reported as a published artifact: ${JSON.stringify(result)}`);
@@ -186,7 +187,7 @@ test('artifact publish under a real Node --permission child: create, read, resta
 });
 
 test('artifact publish under a real Node --permission child does not rely on the disabled fd sync', {
-  skip: (!hasExecutable('strace') && 'strace is required to observe fd sync calls') || (process.platform !== 'linux' && 'Linux fd tracing only'),
+  skip: (!hasExecutable('strace') && 'strace is required to observe file opens and fd sync calls') || (process.platform !== 'linux' && 'Linux fd tracing only'),
 }, async t => {
   const base = await shortTempDir(t);
   const dataDir = path.join(base, 'data');
@@ -195,12 +196,36 @@ test('artifact publish under a real Node --permission child does not rely on the
   const result = runChild({
     dataDir,
     permission: true,
+    trace: 'observe',
     traceFile,
     config: { owner: 'pm-owner', content: '# 权限模型\n\n无 fd sync\n' },
   });
+  assert.equal(result.report.permissionModel, true, 'the observed child must actually run with the Node Permission Model enabled');
+  assert.equal(result.status, 0, `the traced child must exit normally: ${result.stderr}`);
   assert.equal(result.report.ok, true, `permission-model publish must succeed: ${JSON.stringify(result.report.error)}`);
+
+  // 必须先证明仪器真的在工作：trace 文件存在且记录了真实 openat。
+  const lines = await traceLines(traceFile);
+  assert.ok(lines.length > 0, 'strace must have recorded real syscalls');
+  assert.ok(lines.some(line => line.includes('openat(')), 'strace must show openat calls, not an empty capture');
+
+  // 三个产物文件都必须以 O_WRONLY|O_CREAT|O_EXCL|O_SYNC|O_NOFOLLOW 真实打开（Linux strace 输出）。
+  function openLinesFor(name) {
+    return lines.filter(line => line.includes('openat(')
+      && line.includes(dataDir)
+      && line.includes(`${name}"`)
+      && line.includes('O_WRONLY'));
+  }
+  for (const name of ['document.bin', 'preview.html', 'manifest.pending']) {
+    const opens = openLinesFor(name);
+    assert.equal(opens.length, 1, `${name} must be opened exactly once for writing through the traced publish`);
+    for (const flag of ['O_WRONLY', 'O_CREAT', 'O_EXCL', 'O_SYNC', 'O_NOFOLLOW']) {
+      assert.ok(opens[0].includes(flag), `${name} must be opened with ${flag}: ${opens[0].trim()}`);
+    }
+  }
+
   // 只关注本数据目录的文件：Node 运行时自身的 fsync 不在断言范围。
-  const touched = (await traceLines(traceFile)).filter(line => line.includes(`${dataDir}`) && /fsync|fdatasync/.test(line));
+  const touched = lines.filter(line => line.includes(dataDir) && /fsync|fdatasync/.test(line));
   assert.deepEqual(touched, [], 'permission-model publish must not call the disabled FileHandle.sync on artifact files');
 });
 
@@ -215,6 +240,7 @@ test('artifact publish under Node --permission: a real write failure publishes n
     config: { owner: 'pm-owner', content: `# 超限\n\n${'x'.repeat(64 * 1024)}\n` },
   });
   const report = result.report;
+  assert.equal(result.status, 0, `the failing child must still exit normally so the report is trustworthy: ${result.stderr}`);
   assert.equal(report.ok, false, `an oversized write must fail instead of reporting ready: ${JSON.stringify(report.steps)}`);
   assert.equal(report.error?.code, 'EFBIG', `the real write error must propagate: ${JSON.stringify(report.error)}`);
   assert.equal(report.steps.manifestCountAfterFailure, 0, 'a failed publish must not leave a ready manifest');

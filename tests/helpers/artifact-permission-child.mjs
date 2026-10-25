@@ -18,12 +18,8 @@ const report = {
 async function findFiles(root, name) {
   const found = [];
   async function visit(current) {
-    let entries;
-    try {
-      entries = await fs.readdir(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
+    // 不吞 readdir 错误：扫描失败必须让测试失败，而不是被当成“没有 manifest”。
+    const entries = await fs.readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       const stat = await fs.lstat(full);
