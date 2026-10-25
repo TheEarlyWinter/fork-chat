@@ -18,8 +18,6 @@ import {
   HANDOFF_SCHEMA_VERSION,
   HANDOFF_LIMITS,
   HANDOFF_ERROR_CODES as CODES,
-  HANDOFF_NOTICE_CODES as NOTICES,
-  ARTIFACT_ID_REGEX,
   handoffError,
   validateHandoffContext,
 } from './fork-handoff-contract.js';
@@ -391,51 +389,12 @@ function buildReferences(includedCards, cardMap) {
   return { order, sources: [...sources.values()], deduped, deletedSources, excludedSources };
 }
 
-function buildNotices({ targetExcluded, exclusions, failedCount, localNoticeCount, references, artifacts, hasOriginalBodies, nextStep }) {
-  const notices = [];
-  const push = (code, message) => notices.push({ code, message });
-  push(NOTICES.SNAPSHOT_ONLY, '导入内容只是 App 当前保存的快照，不是原始文件、原始会话或实时画布的逐字副本。');
-  if (targetExcluded) {
-    push(NOTICES.TARGET_EXCLUDED, '目标节点自身被标记为不向后代贡献正文；本次仍将其纳入，且不修改它的排除设置。');
-  }
-  if (exclusions.length) {
-    push(
-      NOTICES.EXCLUDED_ANCESTORS,
-      `${exclusions.length} 个祖先节点按现有上下文策略被排除，未导入其正文；本次不代表整条原始对话链无遗漏。`,
-    );
-  }
-  if (failedCount) {
-    push(NOTICES.FAILED_MESSAGES, `${failedCount} 条消息未正常完成（失败/中断/部分回答），已逐条标注，不能当作已完成结论。`);
-  }
-  if (localNoticeCount) {
-    push(NOTICES.LOCAL_NOTICES_OMITTED, `${localNoticeCount} 条本地提示不是业务内容，未导入。`);
-  }
-  if (references.deletedSources) {
-    push(NOTICES.REFERENCE_SOURCE_DELETED, `${references.deletedSources} 条引用的来源已不可定位，只保留保存时的引用快照。`);
-  }
-  if (references.excludedSources) {
-    push(NOTICES.REFERENCE_SOURCE_EXCLUDED, `${references.excludedSources} 条引用因来源被排除而未导入正文。`);
-  }
-  if (references.deduped) {
-    push(NOTICES.DUPLICATE_REFERENCES_DEDUPED, '相同内容的重复引用已合并，引用位置全部保留。');
-  }
-  if (hasOriginalBodies) {
-    push(NOTICES.ORIGINALS_NOT_RETAINED, '资料与附件的原文件没有随交接保留，这里只有 App 保存的解析正文。');
-  }
-  if (artifacts.deduped) {
-    push(NOTICES.DUPLICATE_ARTIFACTS_DEDUPED, '同一产物在多个位置出现，按不可变产物标识去重交付。');
-  }
-  if (nextStep) {
-    push(NOTICES.NEXT_STEP_PENDING, '下一步要求只是写入交接正文的待执行文字，不会自动发送，也不会启动模型。');
-  }
-  return notices;
-}
-
 /**
  * 组装并校验一次交接上下文。
  *
  * 返回的 HandoffContext 已由协议层白名单重建、统计按实际内容重算，并通过体积检查。
- * 统计、指纹和正文都不采信调用方提供的派生值。
+ * 统计、指纹、正文和完整性说明都不采信调用方提供的派生值；说明在协议层
+ * 根据已验证结构重建，本地提示的丢弃数量只以omissions元数据上报。
  */
 export function buildHandoffContext({ snapshot, source, targetCardId, agentId, nextStep = '' } = {}) {
   if (typeof targetCardId !== 'string' || !ID_REGEX.test(targetCardId)) {
@@ -456,13 +415,10 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
 
   const artifactState = { bytes: new Map(), signatures: new Map(), order: [], deduped: false };
   const nodes = [];
-  let failedCount = 0;
   let localNoticeCount = 0;
-  let hasOriginalBodies = false;
 
   for (const card of includedCards) {
     const doc = buildDoc(card);
-    if (doc) hasOriginalBodies = true;
     if (!Array.isArray(card.messages)) throw invalidSnapshot(`卡片 ${card.id} 的 messages 必须是数组`);
     const messages = [];
     for (const [index, raw] of card.messages.entries()) {
@@ -471,8 +427,6 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
         localNoticeCount++;
         continue;
       }
-      if (message.status !== 'ok') failedCount++;
-      if (message.attachments.length) hasOriginalBodies = true;
       messages.push(message);
     }
     nodes.push({
@@ -510,17 +464,6 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
       parentIds: parentIdsOf(cardMap.get(id)),
     }));
 
-  const notices = buildNotices({
-    targetExcluded: getContextMode(cardMap.get(targetCardId)) === 'exclude',
-    exclusions,
-    failedCount,
-    localNoticeCount,
-    references,
-    artifacts: artifactState,
-    hasOriginalBodies,
-    nextStep,
-  });
-
   const context = {
     schemaVersion: HANDOFF_SCHEMA_VERSION,
     source: { canvasId: source.canvasId, revision: source.revision, targetCardId },
@@ -531,7 +474,8 @@ export function buildHandoffContext({ snapshot, source, targetCardId, agentId, n
     referenceSources: references.sources,
     artifactIds: artifactState.order,
     exclusions,
-    notices,
+    omissions: { localNoticeCount },
+    notices: [],
     stats: {},
   };
   const validated = validateHandoffContext(context);
