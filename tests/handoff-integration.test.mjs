@@ -185,12 +185,12 @@ test('integration: end-to-end controller confirmation with real builder + real s
             },
           };
         },
-        async sendCustom({ sessionId, type, content, details, display, triggerTurn, notifyOnly }) {
-          sdkCalls.sendCustom.push({ sessionId, type, content, details, display, triggerTurn, notifyOnly });
+        async sendCustom({ sessionId, customType, content, details, display, triggerTurn, scope }) {
+          sdkCalls.sendCustom.push({ sessionId, customType, content, details, display, triggerTurn, scope });
           return {
             ok: true,
             mode: 'notifyOnly',
-            customType: 'hana:branch-handoff',
+            customType: customType || 'hana:branch-handoff',
             entryId: 'entry-custom-1',
             sessionId,
           };
@@ -388,6 +388,15 @@ test('integration: end-to-end controller confirmation with real builder + real s
     const dialog = doc.body.querySelector('.handoff-dialog');
     assert.ok(dialog, 'handoff dialog 必须挂载');
 
+    // 验证 UI 预览必须真实呈现祖先卡片内容与附件，不得出现 (无正文) 或 [object Object]
+    const nodeContents = dialog.querySelectorAll('.handoff-node-content');
+    assert.ok(nodeContents.length >= 2, '必须渲染至少2个节点的正文容器');
+    const allNodeText = Array.from(nodeContents).map(el => el.textContent).join('\n');
+    assert.ok(allNodeText.includes('这是第二张卡片的助手回复，包含核心推导结论。'), '助手正文必须在 UI 预览中清晰可见');
+    assert.equal(allNodeText.includes('(无正文)'), false, 'UI 预览正文不得错误降级为 (无正文)');
+    const noticesText = dialog.querySelector('.handoff-notices')?.textContent || '';
+    assert.equal(noticesText.includes('[object Object]'), false, 'UI 预览 notices 不得出现 [object Object]');
+
     // 复制目标草稿到 nextStep
     const copyDraftBtn = dialog.querySelector('.btn-copy-draft');
     if (copyDraftBtn) copyDraftBtn.dispatchEvent({ type: 'click' });
@@ -415,23 +424,46 @@ test('integration: end-to-end controller confirmation with real builder + real s
 
     // 验证 SDK 会话创建调用参数
     assert.equal(sdkCalls.create.length, 1, '必须且只创建一次宿主主页会话');
-    assert.equal(sdkCalls.create[0].namespace, 'home', '创建会话必须指定 namespace: home');
-    assert.equal(sdkCalls.create[0].memoryEnabled, false, '创建会话必须默认 memoryEnabled: false');
-    assert.equal(sdkCalls.create[0].agentId, 'agent-sol');
+    assert.deepEqual(sdkCalls.create[0], {
+      namespace: 'home',
+      memoryEnabled: false,
+      agentId: 'agent-sol',
+    }, '创建主页会话参数必须完全符合规格');
 
     // 验证 stageFile
-    assert.ok(sdkCalls.stageFile.length >= 2, '必须 stage 产物文件和 handoff.md');
-    assert.ok(sdkCalls.stageFile.some(f => f.name === 'report.pdf'), '必须包含产物 report.pdf');
-    assert.ok(sdkCalls.stageFile.some(f => f.name === 'handoff.md'), '必须包含上下文存档 handoff.md');
+    assert.equal(sdkCalls.stageFile.length, 2, '必须且只 stage 2 份文件 (产物 + handoff.md)');
+    const pdfStage = sdkCalls.stageFile.find(f => f.name === 'report.pdf');
+    assert.ok(pdfStage, '必须包含产物 report.pdf');
+    assert.equal(pdfStage.mime, 'application/pdf');
+    assert.equal(pdfStage.sessionId, 'sess-native-42');
+    const pdfStagedContent = await fs.readFile(pdfStage.filePath);
+    assert.deepEqual(pdfStagedContent, pdfBytes, '交付的产物二进制内容必须完全一致');
+
+    const mdStage = sdkCalls.stageFile.find(f => f.name === 'handoff.md');
+    assert.ok(mdStage, '必须包含上下文存档 handoff.md');
+    assert.equal(mdStage.mime, 'text/markdown; charset=utf-8');
+    assert.equal(mdStage.sessionId, 'sess-native-42');
+    const mdStagedContent = await fs.readFile(mdStage.filePath, 'utf8');
+    assert.ok(mdStagedContent.length > 0, 'handoff.md 必须有正文');
 
     // 验证 sendCustom
     assert.equal(sdkCalls.sendCustom.length, 1, '必须且仅发送一条 sendCustom');
     const customCall = sdkCalls.sendCustom[0];
     assert.equal(customCall.sessionId, 'sess-native-42');
+    assert.equal(customCall.customType, 'hana:branch-handoff', 'customType 必须为 hana:branch-handoff');
+    assert.equal(customCall.scope, 'all', 'scope 必须为 all');
     assert.equal(customCall.display, true, 'display 必须为 true');
     assert.equal(customCall.triggerTurn, false, 'triggerTurn 必须为 false');
-    assert.ok(customCall.content.includes('需求背景'), '必须包含节点标题');
-    assert.ok(customCall.content.includes('请继续深入推导系统架构'), '必须包含复制的下一步草稿');
+    assert.equal(customCall.content, mdStagedContent, 'sendCustom 正文必须与 handoff.md 完全一致');
+
+    // 验证 details 闭环
+    assert.ok(customCall.details, '必须携带 details 结构体');
+    assert.equal(typeof customCall.details.actionId, 'string');
+    assert.equal(customCall.details.source?.canvasId, 'canvas-durable-root');
+    assert.equal(customCall.details.source?.targetCardId, 'c-target');
+    assert.ok(Array.isArray(customCall.details.files));
+    assert.equal(customCall.details.files.length, 2);
+    assert.ok(customCall.details.files.every(f => f.fileId && f.name && f.mime));
 
     // 严禁调用推理或 send
     assert.equal(sdkCalls.send.length, 0, '严禁调用 session.send()');
