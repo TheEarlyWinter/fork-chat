@@ -6,7 +6,7 @@ import { createDocumentPipeline } from '../ui/assets/panel-documents.js';
 import { createPanelHandoff } from '../ui/assets/panel-handoff.js';
 import { createHandoffView } from '../ui/assets/panel-handoff-view.js';
 import { buildHandoffContext } from '../ui/assets/fork-handoff-context.js';
-import { HANDOFF_LIMITS } from '../ui/assets/fork-handoff-contract.js';
+import { HANDOFF_LIMITS, formatHandoffTranscript } from '../ui/assets/fork-handoff-contract.js';
 import { parentIdsOf } from '../ui/assets/fork-snapshot.js';
 import { loadPanel } from './helpers/panel-harness.mjs';
 import {
@@ -1159,3 +1159,501 @@ test('[I5] partial/unknown focus is inspection-only and focus failure retries wi
     assert.equal(confirmCalls, 1, 'focus 重试不得重新 confirm/create');
   } finally { handoff.dispose(); }
 });
+
+// ============================================================================
+// Task 3 Fix Round 2 RED 测试矩阵 (C2/C3/I2/I4/I5/I10/I11/I12)
+// ============================================================================
+
+// [Round2-G1] 切画布/代际/控制器替换后，confirm/prepare/query/focus 入口均不得发请求 (C3)
+test('[Round2-G1] canvas switch, generation advance, or controller replacement blocks confirm POST and stale op entries (C3)', async t => {
+  await t.test('confirm POST is blocked (0 POST) when activeId changes after prepare', async () => {
+    let confirmPostCalls = 0;
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/confirm') {
+          confirmPostCalls++;
+          return response({ ok: true, action: makeAction({ state: 'ready' }) });
+        }
+        return undefined;
+      },
+    });
+    const { handoff, dialog } = await openController(deps);
+    try {
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+      assert.equal(dialog.querySelector('.btn-handoff-confirm').style.display, 'inline-block');
+
+      // 切换画布
+      deps.state.activeId = 'canvas-switched';
+      dialog.querySelector('.btn-handoff-confirm').dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.equal(confirmPostCalls, 0, '切画布后点击 confirm 绝不能发出 POST 请求');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('confirm POST is blocked (0 POST) when generation changes after prepare', async () => {
+    let confirmPostCalls = 0;
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/confirm') {
+          confirmPostCalls++;
+          return response({ ok: true, action: makeAction({ state: 'ready' }) });
+        }
+        return undefined;
+      },
+    });
+    const { handoff, dialog } = await openController(deps);
+    try {
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+
+      // 代际自增
+      deps.state.generation = deps.state.generation + 1;
+      dialog.querySelector('.btn-handoff-confirm').dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.equal(confirmPostCalls, 0, '代际变更后点击 confirm 绝不能发出 POST 请求');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('confirm POST is blocked when controller reference changes even with same id and gen', async () => {
+    let confirmPostCalls = 0;
+    let currentController;
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/confirm') {
+          confirmPostCalls++;
+          return response({ ok: true, action: makeAction({ state: 'ready' }) });
+        }
+        return undefined;
+      },
+    });
+    currentController = deps.sessionController;
+    deps.getSessionController = () => currentController;
+
+    const { handoff, dialog } = await openController(deps);
+    try {
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+
+      // 控制器实例被新实例替换（虽然 activeId/generation 相同）
+      const newController = {
+        state: { ...deps.state },
+        get generation() { return deps.state.generation; },
+        getSavedSnapshot: deps.sessionController.getSavedSnapshot,
+        flush: async () => {},
+      };
+      currentController = newController;
+
+      dialog.querySelector('.btn-handoff-confirm').dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.equal(confirmPostCalls, 0, '控制器对象被替换后点击 confirm 绝不能发出 POST 请求');
+    } finally {
+      handoff.dispose();
+    }
+  });
+});
+
+// [Round2-G2] flush/Agent/caps 等待期间或 prepare 前依赖卡片变忙时阻断 prepare (C2)
+test('[Round2-G2] dependency becoming busy during awaits or before prepare blocks prepare POST (C2)', async t => {
+  await t.test('ancestor becomes busy before prepare click blocks prepare POST (0 POST)', async () => {
+    const busyIds = new Set();
+    let prepareCalls = 0;
+    const deps = makeControllerDeps({
+      cards: [
+        { id: 'root', parentId: null, title: '根', messages: [{ role: 'user', text: '根' }] },
+        { id: 'target', parentId: 'root', title: '目标', messages: [{ role: 'assistant', text: '目标' }] },
+      ],
+      isCardBusy: id => busyIds.has(id),
+      onRequest: (path) => {
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+    const { handoff, dialog } = await openController(deps, 'target');
+    try {
+      // 弹窗打开后、点击准备前，祖先节点由于后台请求或文档解析变忙
+      busyIds.add('root');
+
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.equal(prepareCalls, 0, '祖先节点忙碌时点击 prepare 绝不能发出 POST 请求');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('unrelated card busy does NOT block prepare', async () => {
+    const busyIds = new Set(['unrelated-card-id']);
+    let prepareCalls = 0;
+    const deps = makeControllerDeps({
+      isCardBusy: id => busyIds.has(id),
+      onRequest: (path) => {
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+    const { handoff, dialog } = await openController(deps, 'target');
+    try {
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+
+      assert.equal(prepareCalls, 1, '无关卡片忙碌不得阻断当前交接 prepare');
+    } finally {
+      handoff.dispose();
+    }
+  });
+});
+
+// [Round2-G3] 挂起操作 close 后新卡片操作不受 pending 锁阻塞，且迟到 finally 不影响新单飞 (C3)
+test('[Round2-G3] closing pending A allows new op B without lock contention, and late A finally does not pollute B (C3)', async () => {
+  const pendingA = deferred();
+  let prepareCallsA = 0;
+  let prepareCallsB = 0;
+
+  const cards = [
+    { id: 'card-A', parentId: null, title: 'A', messages: [{ role: 'user', text: 'A' }] },
+    { id: 'card-B', parentId: null, title: 'B', messages: [{ role: 'user', text: 'B' }] },
+  ];
+
+  const deps = makeControllerDeps({
+    cards,
+    onRequest: (path, init) => {
+      if (path === '/api/handoff/prepare') {
+        const body = JSON.parse(init.body || '{}');
+        if (body.source?.targetCardId === 'card-A') {
+          prepareCallsA++;
+          return pendingA.promise;
+        }
+        if (body.source?.targetCardId === 'card-B') {
+          prepareCallsB++;
+          return response({ ok: true, action: makeAction({ actionId: ACTION_B, targetCardId: 'card-B' }) });
+        }
+      }
+      return undefined;
+    },
+  });
+
+  const handoff = createPanelHandoff(deps);
+  try {
+    // 打开卡片 A 并触发 prepare，使其挂起
+    await handoff.open('card-A');
+    const dialogA = deps.documentRef.body.querySelector('.handoff-dialog');
+    assert.ok(dialogA, 'A 的弹窗必须挂载');
+    dialogA.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+    assert.equal(prepareCallsA, 1, 'A 应该发出了 prepare 请求并挂起');
+
+    // 关闭 A 弹窗
+    dialogA.querySelector('.handoff-close-btn').dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    // 打开卡片 B 并点击 prepare，验证不被 A 的 isPreparing 锁卡死
+    await handoff.open('card-B');
+    const dialogB = deps.documentRef.body.querySelector('.handoff-dialog');
+    assert.ok(dialogB, 'B 的弹窗必须挂载');
+    dialogB.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    assert.equal(prepareCallsB, 1, 'B 的 prepare 不得被已关闭的 A 遗留锁阻塞');
+  } finally {
+    pendingA.resolve(response({ ok: true, action: makeAction({ actionId: ACTION_A }) }));
+    handoff.dispose();
+  }
+});
+
+// [Round2-G4] capabilities 准入失败阻断实际 prepare 点击，且 actions GET 失败 fail-closed 禁止新 prepare (I10/I4)
+test('[Round2-G4] capabilities false blocks prepare POST and actions GET failure fails closed (I10/I4)', async t => {
+  await t.test('capabilities supported:false or home:false blocks prepare POST (0 POST)', async () => {
+    let prepareCalls = 0;
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/capabilities') {
+          return response({
+            ok: true,
+            supported: false,
+            available: false,
+            home: false,
+            reason: 'HANDOFF_UNSUPPORTED',
+          });
+        }
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+
+    const handoff = createPanelHandoff(deps);
+    try {
+      await handoff.open('target');
+      const dialog = deps.documentRef.body.querySelector('.handoff-dialog');
+      if (dialog) {
+        const prepareBtn = dialog.querySelector('.btn-handoff-prepare');
+        if (prepareBtn && prepareBtn.style.display !== 'none') {
+          prepareBtn.dispatchEvent({ type: 'click' });
+          await new Promise(r => setImmediate(r));
+        }
+      }
+      assert.equal(prepareCalls, 0, 'capabilities 不满足时绝不能允许发出 prepare POST');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('actions GET failure does not silently fall through to new prepare (0 POST)', async () => {
+    let prepareCalls = 0;
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/actions') {
+          return response({ ok: false, error: 'DATABASE_TIMEOUT' }, { status: 500 });
+        }
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+
+    const handoff = createPanelHandoff(deps);
+    try {
+      await handoff.open('target');
+      const dialog = deps.documentRef.body.querySelector('.handoff-dialog');
+      if (dialog) {
+        const prepareBtn = dialog.querySelector('.btn-handoff-prepare');
+        if (prepareBtn && prepareBtn.style.display !== 'none') {
+          prepareBtn.dispatchEvent({ type: 'click' });
+          await new Promise(r => setImmediate(r));
+        }
+      }
+      assert.equal(prepareCalls, 0, 'actions 查询失败时绝不能静默当作空历史并允许发起新 prepare POST');
+    } finally {
+      handoff.dispose();
+    }
+  });
+});
+
+// [Round2-G5] 首次异步等待前即挂载模态对话框并展示 loading 态，关闭后迟到返回不复活 (I11)
+test('[Round2-G5] modal mounts early with loading state before async awaits finish, and close aborts resurrect (I11)', async () => {
+  const capsDeferred = deferred();
+  const deps = makeControllerDeps({
+    onRequest: (path) => {
+      if (path === '/api/handoff/capabilities') return capsDeferred.promise;
+      return undefined;
+    },
+  });
+
+  const handoff = createPanelHandoff(deps);
+  const openPromise = handoff.open('target');
+
+  // 在 capabilities 仍在等待中时，模态对话框必须已经挂载并且处于 open 状态
+  const dialog = deps.documentRef.body.querySelector('.handoff-dialog');
+  assert.ok(dialog, '在首次异步等待期间模态对话框必须已经挂载以阻断背景交互');
+  assert.equal(dialog.open, true, '早期挂载的对话框必须处于 open 模态状态');
+
+  // prepare 按钮在加载期间不得可操作
+  const prepareBtn = dialog.querySelector('.btn-handoff-prepare');
+  assert.ok(!prepareBtn || prepareBtn.style.display === 'none' || prepareBtn.disabled, '加载期间 prepare 不得处于可点击操作状态');
+
+  // 在等待期间关闭弹窗
+  dialog.querySelector('.handoff-close-btn').dispatchEvent({ type: 'click' });
+  assert.equal(deps.documentRef.body.querySelector('.handoff-dialog'), null, '关闭后对话框必须从 DOM 移除');
+
+  // 完成挂起的请求
+  capsDeferred.resolve(response({
+    ok: true,
+    supported: true,
+    available: true,
+    home: true,
+    read: true,
+    manage: true,
+    stageFile: true,
+    agentsRead: true,
+    missing: [],
+    reason: null,
+  }));
+  await openPromise;
+
+  assert.equal(deps.documentRef.body.querySelector('.handoff-dialog'), null, '已关闭的早期操作在迟到完成后不得复活弹窗');
+  handoff.dispose();
+});
+
+// [Round2-G6] 历史动作共存需显式新建预览入口，且 query 刷新 sessionId 后点击 focus 必须调用确切新 SID (I4/I5)
+test('[Round2-G6] history coexists with explicit new-preview button, and query updating sessionId focuses new SID (I4/I5)', async t => {
+  await t.test('history prepared/ready shows new-preview button and requires explicit click to prepare', async () => {
+    let prepareCalls = 0;
+    const oldAction = makeAction({ actionId: ACTION_A, state: 'ready' });
+    const deps = makeControllerDeps({
+      onRequest: (path) => {
+        if (path === '/api/handoff/actions') {
+          return response({ ok: true, actions: [oldAction] });
+        }
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction({ actionId: ACTION_B }) });
+        }
+        return undefined;
+      },
+    });
+
+    const { handoff, dialog } = await openController(deps);
+    try {
+      const newPreviewBtn = dialog.querySelector('.btn-handoff-new-preview');
+      assert.ok(newPreviewBtn, '存在历史记录时必须提供显式【新建预览】按钮供新版本交接');
+      assert.equal(prepareCalls, 0, '未点击新建预览前不得发出 prepare POST');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('history creating without sessionId queries ready with sessionId and focuses new SID exactly once', async () => {
+    const focusCalls = [];
+    const creatingAction = makeAction({
+      actionId: ACTION_A,
+      state: 'creating',
+      sessionId: null,
+    });
+
+    const deps = makeControllerDeps({
+      focus: async ({ sessionId }) => {
+        focusCalls.push(sessionId);
+      },
+      onRequest: (path) => {
+        if (path === '/api/handoff/actions') {
+          return response({ ok: true, actions: [creatingAction] });
+        }
+        if (path === `/api/handoff/actions/${ACTION_A}`) {
+          return response({
+            ok: true,
+            action: makeAction({
+              actionId: ACTION_A,
+              state: 'ready',
+              sessionId: 'sess-dynamic-new-777',
+            }),
+          });
+        }
+        return undefined;
+      },
+    });
+
+    const { handoff, dialog } = await openController(deps);
+    try {
+      // 点击恢复查询
+      const recoverBtn = dialog.querySelector('.btn-handoff-recover');
+      assert.ok(recoverBtn, 'creating 状态必须显示查询恢复按钮');
+      recoverBtn.dispatchEvent({ type: 'click' });
+      await waitFor(() => dialog.querySelector('.btn-handoff-focus')?.style.display === 'inline-block');
+
+      const focusBtn = dialog.querySelector('.btn-handoff-focus');
+      assert.ok(focusBtn, '查询转为 ready 且获得 sessionId 后必须展示核查/打开按钮');
+      focusBtn.dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.deepEqual(focusCalls, ['sess-dynamic-new-777'], '点击 focus 必须且仅调用 1 次真实更新后的 sessionId');
+    } finally {
+      handoff.dispose();
+    }
+  });
+});
+
+// [Round2-G7] formatHandoffTranscript 权威正文保底、下一步预览一致性与空选 Agent 安全 (I12/I2)
+test('[Round2-G7] formatHandoffTranscript canonical guarantee, nextStep preview consistency, and empty agent safety (I12/I2)', async t => {
+  await t.test('prepared dialog renders canonical formatHandoffTranscript matching actual POST DTO verbatim', async () => {
+    let capturedDto = null;
+    const deps = makeControllerDeps({
+      onRequest: (path, init) => {
+        if (path === '/api/handoff/prepare') {
+          capturedDto = JSON.parse(init.body);
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+
+    const { handoff, dialog } = await openController(deps);
+    try {
+      const textarea = dialog.querySelector('.handoff-textarea');
+      if (textarea) {
+        textarea.value = '下一步具体业务要求';
+        textarea.dispatchEvent({ type: 'input' });
+      }
+
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await waitForPrepare(dialog);
+
+      assert.ok(capturedDto, '必须发出 prepare 请求并捕获 DTO');
+      const expectedTranscript = formatHandoffTranscript(capturedDto);
+
+      const transcriptEl = dialog.querySelector('.handoff-transcript-preview pre')
+        || dialog.querySelector('.handoff-transcript-preview');
+      assert.ok(transcriptEl, '必须存在完整权威转录正文保底预览元素');
+      assert.equal(transcriptEl.textContent.trim(), expectedTranscript.trim(), '预览的转录正文必须与实际 prepare DTO 生成的正文逐字一致');
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('nextStep text edit updates preview before prepare', async () => {
+    const deps = makeControllerDeps();
+    const { handoff, dialog } = await openController(deps);
+    try {
+      const textarea = dialog.querySelector('.handoff-textarea');
+      assert.ok(textarea, '必须存在下一步草稿输入框');
+      textarea.value = 'NEW_NEXT_STEP_SENTINEL';
+      textarea.dispatchEvent({ type: 'input' });
+
+      const previewContainer = dialog.querySelector('.handoff-preview-section')
+        || dialog.querySelector('.handoff-nodes-container');
+      assert.ok(
+        previewContainer?.textContent?.includes('NEW_NEXT_STEP_SENTINEL'),
+        '修改下一步文本后预览区域必须包含新文本',
+      );
+    } finally {
+      handoff.dispose();
+    }
+  });
+
+  await t.test('empty agent selection prevents prepare and does not synthesize fake preview', async () => {
+    let prepareCalls = 0;
+    const deps = makeControllerDeps({
+      snapshotAgentId: 'non-existent-agent',
+      agents: [{ id: 'a1', name: 'Agent 1' }],
+      onRequest: (path) => {
+        if (path === '/api/handoff/prepare') {
+          prepareCalls++;
+          return response({ ok: true, action: makeAction() });
+        }
+        return undefined;
+      },
+    });
+
+    const { handoff, dialog } = await openController(deps);
+    try {
+      const select = dialog.querySelector('.handoff-select');
+      assert.equal(select.value, '', '快照 Agent 不存在时必须为空选');
+
+      dialog.querySelector('.btn-handoff-prepare').dispatchEvent({ type: 'click' });
+      await new Promise(r => setImmediate(r));
+
+      assert.equal(prepareCalls, 0, '未选择 Agent 时不得发出 prepare POST');
+    } finally {
+      handoff.dispose();
+    }
+  });
+});
+
