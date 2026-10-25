@@ -665,3 +665,446 @@ test('an unauthenticated caller is refused before the store or host is touched',
   assert.deepEqual(await store.list({ owner: OWNER }), []);
   assert.equal(host.calls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// C 轮次 4/5：claim 之后的错误收口、并发闸位置、非法回执、未知结果
+// ---------------------------------------------------------------------------
+
+async function waitFor(predicate, label, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`等待超时：${label}`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+function confirmViaRoute(harness, actionId) {
+  return harness.call('POST', '/api/handoff/confirm', { body: { actionId } });
+}
+
+function hostWrites(host) {
+  return host.calls.filter(call => call[0] !== 'isIdle').map(call => call[0]);
+}
+
+test('C-I1: the first post-claim checkpoint failure returns the safe action, not an HTTP 500', async () => {
+  const dataDir = await makeDir();
+  const realStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const store = {
+    ...realStore,
+    async checkpoint(input) {
+      // 第一次会话 checkpoint（尚无 files 回执）落盘失败
+      if (input.state === 'importing' && !input.receipt?.files) {
+        throw new Error('SECRET_CHECKPOINT /private/path');
+      }
+      return realStore.checkpoint(input);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200, 'claim 之后的 checkpoint 失败仍应是可查询的动作，而不是 500');
+  assert.equal(response.body.ok, true);
+  assert.ok(['creating', 'unknown'].includes(response.body.action.state), response.body.action.state);
+  // 不得继续任何 host 副作用，也不得重复 create
+  assert.equal(host.calls.filter(call => call[0] === 'create').length, 1);
+  assert.equal(host.calls.some(call => call[0] === 'stage'), false);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  assert.equal(JSON.stringify(response.body).includes('SECRET_CHECKPOINT'), false);
+  assert.equal(JSON.stringify(response.body).includes('/private/path'), false);
+});
+
+test('C-I1: an artifact checkpoint failure stops host writes and keeps the unconfirmed temp copy', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const artifacts = fakeArtifacts({
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+  });
+  const realStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const store = {
+    ...realStore,
+    async checkpoint(input) {
+      if (Array.isArray(input.receipt?.files) && input.receipt.files.length > 0) {
+        throw new Error('SECRET_CHECKPOINT');
+      }
+      return realStore.checkpoint(input);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1, b1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 1, 'checkpoint 失败后不能再 stage');
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  const ownerHash = createHash('sha256').update(OWNER).digest('hex');
+  const deliveryDir = path.join(dataDir, 'handoff-delivery', ownerHash, prepared.actionId);
+  const left = await realFs.readdir(deliveryDir);
+  assert.equal(left.length, 1, 'checkpoint 失败时必须保留未确认的临时副本');
+});
+
+test('C-I1: when the saved action cannot be read either, the failure says so instead of claiming nothing ran', async () => {
+  const dataDir = await makeDir();
+  const realStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let claimed = false;
+  const store = {
+    ...realStore,
+    async claim(input) {
+      const result = await realStore.claim(input);
+      claimed = true;
+      return result;
+    },
+    async checkpoint() {
+      throw new Error('SECRET_CHECKPOINT');
+    },
+    async get(input) {
+      if (claimed) throw new Error('SECRET_READ');
+      return realStore.get(input);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 409, String(response.status));
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.code, 'HANDOFF_ACTION_UNKNOWN');
+  assert.equal(response.body.error.includes('actionId'), true);
+  assert.equal(response.body.error.includes('请求未执行'), false, '宿主已经写过，不能说请求未执行');
+  assert.equal(JSON.stringify(response.body).includes('SECRET_'), false);
+});
+
+test('C-I2: an isIdle failure after claim settles to a queryable action instead of an HTTP 500', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost({
+    async isIdle() {
+      host.calls.push(['isIdle']);
+      throw new Error('SECRET_IDLE /private/path');
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200, '查询异常不应变成 500');
+  assert.equal(response.body.ok, true);
+  const state = response.body.action.state;
+  assert.ok(['partial', 'unknown'].includes(state), `持久状态必须是安全终态，实际 ${state}`);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 0);
+  assert.equal(host.calls.some(call => call[0] === 'stage'), false);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  const persisted = await store.get({ owner: OWNER, actionId: prepared.actionId });
+  assert.ok(['partial', 'unknown'].includes(persisted.action.state), `落盘状态 ${persisted.action.state}`);
+  assert.equal(JSON.stringify(response.body).includes('SECRET_IDLE'), false);
+  assert.equal(JSON.stringify(response.body).includes('/private/path'), false);
+});
+
+test('C-I2: an isIdle failure before the custom write keeps both earlier receipts and stops there', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let idleCalls = 0;
+  const host = fakeHost({
+    async isIdle() {
+      idleCalls += 1;
+      host.calls.push(['isIdle']);
+      if (idleCalls === 3) throw new Error('SECRET_IDLE');
+      return true;
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.ok(['partial', 'unknown'].includes(response.body.action.state), response.body.action.state);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 2, '产物与归档回执都要保留');
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  assert.equal(JSON.stringify(response.body).includes('SECRET_IDLE'), false);
+});
+
+test('C-I3: a third action is refused before its artifacts are read again', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const c1 = 'c'.repeat(32);
+  const entries = {
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+    [c1]: artifactFixture(c1, 'c-body'),
+  };
+  const reads = [];
+  let armed = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const artifacts = {
+    calls: reads,
+    async read({ artifactId }) {
+      reads.push(artifactId);
+      const entry = entries[artifactId];
+      if (!entry) throw Object.assign(new Error('missing'), { code: 'ARTIFACT_NOT_FOUND' });
+      if (!armed) return entry;
+      if (artifactId === a1 || artifactId === b1) {
+        await gate;
+        return entry;
+      }
+      throw Object.assign(new Error('第三个请求不应进入产物读取'), { code: 'ARTIFACT_NOT_FOUND' });
+    },
+  };
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const first = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+  const second = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [b1] })));
+  const third = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [c1] })));
+
+  armed = true;
+  const pending = [confirmViaRoute(harness, first.actionId), confirmViaRoute(harness, second.actionId)];
+  try {
+    await waitFor(() => reads.filter(id => id === a1).length === 2, '第一个确认进入产物复核');
+    await waitFor(() => reads.filter(id => id === b1).length === 2, '第二个确认进入产物复核');
+    const busy = await confirmViaRoute(harness, third.actionId);
+    assert.equal(busy.status, 409);
+    assert.equal(busy.body.code, 'HANDOFF_BUSY');
+    assert.equal(reads.filter(id => id === c1).length, 1, '第三个请求只应保留 prepare 时的一次读取');
+    assert.equal((await store.get({ owner: OWNER, actionId: third.actionId })).action.state, 'prepared');
+  } finally {
+    release();
+    await Promise.allSettled(pending);
+  }
+});
+
+test('C-I3: a repeat confirm of a running action only queries and never drops the original key', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const entry = artifactFixture(a1);
+  let armed = false;
+  let reads = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const artifacts = {
+    calls: [],
+    async read({ artifactId }) {
+      if (artifactId !== a1) throw Object.assign(new Error('missing'), { code: 'ARTIFACT_NOT_FOUND' });
+      if (!armed) return entry;
+      reads += 1;
+      if (reads === 1) {
+        await gate;
+        return entry;
+      }
+      throw Object.assign(new Error('重复 confirm 不应再次读取产物'), { code: 'ARTIFACT_NOT_FOUND' });
+    },
+  };
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  armed = true;
+  const pending = confirmViaRoute(harness, prepared.actionId);
+  await waitFor(() => reads === 1, '首个确认进入产物复核');
+  let duplicate;
+  try {
+    duplicate = await confirmViaRoute(harness, prepared.actionId);
+    assert.equal(duplicate.status, 200);
+    assert.equal(duplicate.body.ok, true);
+    assert.equal(reads, 1, '同一 action 的重复确认只应查询');
+  } finally {
+    release();
+  }
+  const first = await pending;
+  assert.equal(first.body.ok, true);
+  assert.equal(first.body.action.state, 'ready');
+  // 重复调用不能删掉原调用的名额/写权：动作结束后再查应是 ready，而不是 busy
+  const afterwards = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(afterwards.status, 200);
+  assert.equal(afterwards.body.action.state, 'ready');
+});
+
+test('C-I4: an artifact stage receipt carrying a private path is never saved into the action', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const artifacts = fakeArtifacts({
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+  });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let stageCalls = 0;
+  const host = fakeHost({
+    async stage(input) {
+      stageCalls += 1;
+      host.calls.push(['stage', input]);
+      if (stageCalls === 2) {
+        return { fileId: '/private/path/secret.md', name: input.name, mime: input.mime };
+      }
+      return { fileId: 'file-1', name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1, b1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  const body = JSON.stringify(response.body);
+  assert.equal(body.includes('/private/path'), false, '无效 fileId 不能进 action');
+  assert.equal(response.body.action.state, 'unknown', '无效回执属于未知结果');
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 1, '只保留可信回执');
+  assert.equal(response.body.action.files[0].fileId, 'file-1');
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 2);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  const persisted = await store.get({ owner: OWNER, actionId: prepared.actionId });
+  assert.equal(JSON.stringify(persisted.action).includes('/private/path'), false);
+});
+
+test('C-I4: an archive stage receipt carrying a private path stops before the custom write', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let stageCalls = 0;
+  const host = fakeHost({
+    async stage(input) {
+      stageCalls += 1;
+      host.calls.push(['stage', input]);
+      if (stageCalls === 2) {
+        return { fileId: '../../private/context', name: input.name, mime: input.mime };
+      }
+      return { fileId: 'file-1', name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(JSON.stringify(response.body).includes('private/context'), false, '无效 fileId 不能进 action');
+  assert.equal(response.body.action.state, 'unknown');
+  assert.equal(response.body.action.files.length, 1);
+  assert.equal(response.body.action.entryId, null);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+});
+
+test('C-I6: a stage that times out is unknown, keeps earlier receipts and is never retried', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const b1 = 'b'.repeat(32);
+  const artifacts = fakeArtifacts({
+    [a1]: artifactFixture(a1, 'a-body'),
+    [b1]: artifactFixture(b1, 'b-body'),
+  });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let stageCalls = 0;
+  const host = fakeHost({
+    async stage(input) {
+      stageCalls += 1;
+      host.calls.push(['stage', input]);
+      if (stageCalls === 2) {
+        const error = new Error('ETIMEDOUT upstream timeout');
+        error.code = 'HANDOFF_HOST_ERROR';
+        throw error;
+      }
+      return { fileId: 'file-1', name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1, b1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'unknown', `超时属于未知结果，实际 ${response.body.action.state}`);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 1);
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 2, '不得自动重试 stage');
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  assert.equal(JSON.stringify(response.body).includes('ETIMEDOUT'), false);
+});
+
+test('C-I6: a stage that resolves without a usable receipt is unknown and saves no bogus fields', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost({
+    async stage(input) {
+      host.calls.push(['stage', input]);
+      return { resource: { kind: 'session-file' } };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'unknown');
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 0);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+});
+
+test('C-I6: a custom write that times out is unknown and keeps every known receipt', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost({
+    async writeContext(input) {
+      host.calls.push(['writeContext', input]);
+      const error = new Error('ECONNRESET while sending');
+      error.code = 'HANDOFF_HOST_ERROR';
+      throw error;
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'unknown', `未知结果不能写成 partial，实际 ${response.body.action.state}`);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 2);
+  assert.equal(response.body.action.entryId, null);
+  assert.equal(host.calls.filter(call => call[0] === 'writeContext').length, 1);
+  assert.equal(JSON.stringify(response.body).includes('ECONNRESET'), false);
+});
+
+test('C-I6: a custom receipt without a usable entryId is unknown, not a silent success', async () => {
+  const dataDir = await makeDir();
+  const a1 = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [a1]: artifactFixture(a1) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost({
+    async writeContext(input) {
+      host.calls.push(['writeContext', input]);
+      return { ok: true, mode: 'notifyOnly' };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [a1] })));
+
+  const response = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'unknown');
+  assert.equal(response.body.action.entryId, null);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  assert.equal(response.body.action.files.length, 2);
+});
+
