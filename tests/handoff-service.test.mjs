@@ -62,6 +62,7 @@ function artifactFixture(artifactId, content = 'artifact-body') {
       bytes: bytes.length,
       sha256: createHash('sha256').update(bytes).digest('hex'),
       status: 'ready',
+      createdAt: '2026-10-25T00:00:00.000Z',
     },
   };
 }
@@ -123,10 +124,13 @@ function fakeHost(overrides = {}) {
 }
 
 function fakeSdk(agentIds = ['agent-a']) {
+  const calls = [];
   return {
+    calls,
     agents: {
-      async list() {
-        return { agents: agentIds.map(id => ({ id, lifecycle: 'active' })) };
+      async list(input) {
+        calls.push(input);
+        return { agents: agentIds.map(id => ({ id, state: 'active', lifecycle: 'active' })) };
       },
     },
   };
@@ -256,17 +260,26 @@ test('prepare rejects a different principal and never exposes another owner acti
   assert.deepEqual(foreignList.body.actions, []);
 });
 
-test('prepare verifies the agent against the host and rejects an inactive target before store or host writes', async () => {
+test('prepare verifies the agent against the host with all/active scope and rejects an inactive target', async () => {
   const dataDir = await makeDir();
   const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
   const host = fakeHost();
-  const harness = makeHarness({ dataDir, store, host, sdk: fakeSdk(['agent-b']) });
+  const sdk = fakeSdk(['agent-b']);
+  const harness = makeHarness({ dataDir, store, host, sdk });
 
   const response = await prepareViaRoute(harness, handoffContext());
   assert.equal(response.body.ok, false);
   assert.equal(response.status >= 400, true);
   assert.deepEqual(await store.list({ owner: OWNER }), []);
   assert.equal(host.calls.length, 0);
+  assert.deepEqual(sdk.calls, [{ scope: 'all', lifecycle: 'active' }]);
+
+  const retiredHarness = makeHarness({ dataDir, store, host, sdk: {
+    agents: { async list() { return { agents: [{ id: 'agent-a', state: 'retired' }] }; } },
+  } });
+  const retired = await prepareViaRoute(retiredHarness, handoffContext());
+  assert.equal(retired.body.ok, false);
+  assert.deepEqual(await store.list({ owner: OWNER }), []);
 });
 
 test('prepare rejects artifact bytes that do not match the stored digest or exceed the single/aggregate limits', async () => {
@@ -298,25 +311,20 @@ test('prepare rejects artifact bytes that do not match the stored digest or exce
 // 确认：只认 actionId、claim 先行、顺序与回执
 // ---------------------------------------------------------------------------
 
-test('confirm accepts only actionId; extra body fields cannot replace the stored context or agent', async () => {
+test('confirm rejects any body field besides actionId', async () => {
   const dataDir = await makeDir();
   const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
   const host = fakeHost();
   const harness = makeHarness({ dataDir, store, host });
 
-  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ agentId: 'agent-a' })));
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
   const response = await harness.call('POST', '/api/handoff/confirm', {
-    body: {
-      actionId: prepared.actionId,
-      agentId: 'agent-b',
-      sessionId: 'attacker-session',
-      context: handoffContext({ agentId: 'agent-b' }),
-    },
+    body: { actionId: prepared.actionId, agentId: 'agent-b' },
   });
-  assert.equal(response.body.ok, true);
-  assert.equal(response.body.action.agentId, 'agent-a');
-  const create = host.calls.find(call => call[0] === 'create');
-  assert.deepEqual(create[1], { agentId: 'agent-a' });
+  assert.equal(response.body.ok, false);
+  assert.equal(response.status, 400);
+  assert.equal(host.calls.length, 0);
+  assert.equal((await store.get({ owner: OWNER, actionId: prepared.actionId })).action.state, 'prepared');
 });
 
 test('confirm never creates a host session when the store claim is lost', async () => {
@@ -328,7 +336,8 @@ test('confirm never creates a host session when the store claim is lost', async 
 
   const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
   const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
-  assert.equal(response.body.ok, false);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'prepared');
   assert.equal(host.calls.some(call => call[0] === 'create'), false);
 });
 
@@ -396,6 +405,263 @@ test('a failing stage keeps the known session and earlier files, and a repeated 
 
   const createCallsBefore = host.calls.filter(call => call[0] === 'create').length;
   const second = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
-  assert.equal(second.body.ok, false);
+  assert.equal(second.body.ok, true);
+  assert.equal(second.body.action.state, first.body.action.state);
   assert.equal(host.calls.filter(call => call[0] === 'create').length, createCallsBefore);
+});
+
+// ---------------------------------------------------------------------------
+// C 补充：流式上限、失败矩阵、并发、生命周期与脱敏
+// ---------------------------------------------------------------------------
+
+test('prepare rejects an oversized streaming body before touching the store', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+  const body = { ...handoffContext(), nextStep: 'x'.repeat(4 * 1024 * 1024) };
+
+  const response = await harness.call('POST', '/api/handoff/prepare', { body });
+  assert.equal(response.status, 413);
+  assert.equal(response.body.ok, false);
+  assert.deepEqual(await store.list({ owner: OWNER }), []);
+  assert.equal(host.calls.length, 0);
+});
+
+test('create without a trusted session becomes unknown and never leaks the host error', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost({
+    async create() {
+      const error = new Error('SECRET_CREATE /private/path');
+      error.code = 'HANDOFF_HOST_ERROR';
+      throw error;
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.action.state, 'unknown');
+  assert.equal(response.body.action.sessionId, null);
+  assert.equal(JSON.stringify(response.body).includes('SECRET_CREATE'), false);
+  assert.equal(host.calls.some(call => call[0] === 'stage'), false);
+});
+
+test('create with a known session is preserved as partial and not retried', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let creates = 0;
+  const host = fakeHost({
+    async create() {
+      creates += 1;
+      const error = new Error('invalid receipt');
+      error.code = 'HANDOFF_INVALID_SESSION';
+      error.sessionId = 'sess-known';
+      throw error;
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const first = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(first.body.action.state, 'partial');
+  assert.equal(first.body.action.sessionId, 'sess-known');
+  const second = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(second.body.ok, true);
+  assert.equal(creates, 1);
+});
+
+test('archive and custom failures keep known receipts and stop later host writes', async () => {
+  const artifactId = 'a'.repeat(32);
+  for (const mode of ['archive', 'custom']) {
+    const dataDir = await makeDir();
+    const artifacts = fakeArtifacts({ [artifactId]: artifactFixture(artifactId) });
+    const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+    let stageCalls = 0;
+    const host = fakeHost({
+      async stage(input) {
+        stageCalls += 1;
+        host.calls.push(['stage', input]);
+        if (mode === 'archive' && stageCalls === 2) {
+          const error = new Error('archive failed');
+          error.code = 'HANDOFF_STAGE_FAILED';
+          throw error;
+        }
+        return { fileId: `file-${stageCalls}`, name: input.name, mime: input.mime };
+      },
+      async writeContext(input) {
+        host.calls.push(['writeContext', input]);
+        if (mode === 'custom') {
+          const error = new Error('custom failed');
+          error.code = 'HANDOFF_CUSTOM_FAILED';
+          throw error;
+        }
+        return { entryId: 'entry-1' };
+      },
+    });
+    const harness = makeHarness({ dataDir, store, host, artifacts });
+
+    const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
+    const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.action.state, 'partial', mode);
+    assert.equal(response.body.action.sessionId, 'sess-1', mode);
+    assert.equal(response.body.action.files.length, mode === 'archive' ? 1 : 2, mode);
+    if (mode === 'archive') assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+    else assert.equal(host.calls.filter(call => call[0] === 'writeContext').length, 1);
+    if (mode === 'archive') {
+      const ownerHash = createHash('sha256').update(OWNER).digest('hex');
+      const archivePath = path.join(dataDir, 'handoff-delivery', ownerHash, prepared.actionId, 'context.md');
+      assert.equal((await realFs.lstat(archivePath)).isFile(), true, '未确认的归档副本应保留');
+    }
+  }
+});
+
+test('a checkpoint failure after the first stage stops further host calls', async () => {
+  const dataDir = await makeDir();
+  const realStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let checkpoints = 0;
+  const store = {
+    ...realStore,
+    async checkpoint(input) {
+      checkpoints += 1;
+      if (checkpoints === 2) throw new Error('checkpoint failed');
+      return realStore.checkpoint(input);
+    },
+  };
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(response.body.ok, true);
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 1);
+  assert.equal(host.calls.some(call => call[0] === 'writeContext'), false);
+  assert.equal(response.body.action.sessionId, 'sess-1');
+  const ownerHash = createHash('sha256').update(OWNER).digest('hex');
+  const deliveryDir = path.join(dataDir, 'handoff-delivery', ownerHash, prepared.actionId);
+  const files = await realFs.readdir(deliveryDir);
+  assert.equal(files.length, 1, 'checkpoint 失败时不能清理未确认的副本');
+});
+
+test('only two different actions can confirm at once and the third is busy before claim', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const host = fakeHost({
+    async stage(input) {
+      host.calls.push(['stage', input]);
+      await gate;
+      return { fileId: 'file-1', name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host });
+  const first = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const second = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const third = actionOf(await prepareViaRoute(harness, handoffContext()));
+
+  const pending = [
+    harness.call('POST', '/api/handoff/confirm', { body: { actionId: first.actionId } }),
+    harness.call('POST', '/api/handoff/confirm', { body: { actionId: second.actionId } }),
+  ];
+  // 等两个确认都进入 stage 前的停顿
+  while (host.calls.filter(call => call[0] === 'stage').length < 2) await new Promise(resolve => setTimeout(resolve, 5));
+  const busy = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: third.actionId } });
+  assert.equal(busy.status, 409);
+  assert.equal(busy.body.code, 'HANDOFF_BUSY');
+  assert.equal((await store.get({ owner: OWNER, actionId: third.actionId })).action.state, 'prepared');
+
+  release();
+  const results = await Promise.all(pending);
+  assert.ok(results.every(result => result.body.ok));
+});
+
+test('all 16 artifacts plus the archive are staged and recorded as 17 files', async () => {
+  const dataDir = await makeDir();
+  const ids = Array.from({ length: 16 }, (_, index) => String(index).padStart(2, '0').repeat(16));
+  const entries = Object.fromEntries(ids.map(id => [id, artifactFixture(id, `body-${id}`)]));
+  const artifacts = fakeArtifacts(entries);
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: ids })));
+  const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(response.body.action.state, 'ready');
+  assert.equal(response.body.action.files.length, 17);
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 17);
+  assert.equal(host.calls.filter(call => call[0] === 'writeContext').length, 1);
+});
+
+test('temporary files are removed after each confirmed stage and the exact action directory is gone before ready', async () => {
+  const dataDir = await makeDir();
+  const artifactId = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [artifactId]: artifactFixture(artifactId) });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host, artifacts });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
+  const response = await harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(response.body.action.state, 'ready');
+  const ownerHash = createHash('sha256').update(OWNER).digest('hex');
+  const deliveryDir = path.join(dataDir, 'handoff-delivery', ownerHash, prepared.actionId);
+  await assert.rejects(realFs.lstat(deliveryDir), error => error.code === 'ENOENT');
+});
+
+test('a restart sees the persisted state and never replays an in-flight action', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const host = fakeHost({
+    async stage(input) {
+      host.calls.push(['stage', input]);
+      await gate;
+      return { fileId: 'file-1', name: input.name, mime: input.mime };
+    },
+  });
+  const harness = makeHarness({ dataDir, store, host });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext()));
+  const pending = harness.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  while (host.calls.filter(call => call[0] === 'stage').length < 1) await new Promise(resolve => setTimeout(resolve, 5));
+
+  const restartedStore = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const restartedHost = fakeHost();
+  const restarted = makeHarness({ dataDir, store: restartedStore, host: restartedHost });
+  const replay = await restarted.call('POST', '/api/handoff/confirm', { body: { actionId: prepared.actionId } });
+  assert.equal(replay.body.ok, true);
+  assert.equal(replay.body.action.state, 'unknown');
+  assert.equal(restartedHost.calls.some(call => call[0] === 'create'), false);
+
+  release();
+  const finished = await pending;
+  assert.equal(finished.body.action.state, 'ready');
+});
+
+test('an unauthenticated caller is refused before the store or host is touched', async () => {
+  const dataDir = await makeDir();
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const host = fakeHost();
+  const harness = makeHarness({ dataDir, store, host });
+  const parsed = new URL('http://local/api/handoff/prepare');
+  const c = {
+    req: {
+      raw: new Request(parsed, { method: 'POST', body: JSON.stringify(handoffContext()) }),
+      param: () => undefined,
+      query: () => null,
+    },
+    get: () => null,
+    json: (value, status = 200) => ({ status, body: value }),
+  };
+  const routes = harness.routes.filter(route => route.method === 'POST' && route.pattern === '/api/handoff/prepare');
+  const response = await routes[0].handler(c);
+  assert.equal(response.status, 403);
+  assert.equal(response.body.ok, false);
+  assert.deepEqual(await store.list({ owner: OWNER }), []);
+  assert.equal(host.calls.length, 0);
 });
