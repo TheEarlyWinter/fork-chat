@@ -248,7 +248,13 @@ export function createPanelSessionUi(deps) {
       flashMessage('会话控制器尚未就绪，无法执行保存。');
       return;
     }
-    const action = sessionCtrl.state.ready ? sessionCtrl.flush() : sessionCtrl.init();
+    let action;
+    if (sessionCtrl.state.ready) {
+      assertMethod(sessionCtrl, 'retrySave', 'btnRetrySave: sessionController');
+      action = sessionCtrl.retrySave();
+    } else {
+      action = sessionCtrl.init();
+    }
     void action.catch(err => {
       flashMessage(`保存失败：${safeDetail(err?.message || String(err))}`);
     });
@@ -276,11 +282,18 @@ export function createPanelSessionUi(deps) {
     }
     // 同一 STORAGE_QUOTA_EXCEEDED 同时覆盖 100 会话数与整库 12MiB 两种限制，
     // 底层英文不适合直接展示：统一给出泛化中文文案，不猜具体触发的是哪个限制。
-    const statusError = state.error
+    const conflictText = state.conflict === 'modified'
+      ? '远端已修改，本地内容未覆盖。请确认覆盖远端并保存，或另存副本。'
+      : state.conflict === 'deleted'
+      ? '会话已在别处删除，请另存副本。'
+      : state.conflict === 'active-changed'
+      ? '其他窗口已切换当前会话，本地内容未覆盖。请重试保存或另存副本。'
+      : null;
+    const statusError = conflictText || (state.error
       ? (typeof state.error === 'string' && state.error.includes('STORAGE_QUOTA_EXCEEDED')
           ? '会话存储已达上限（最多 100 个会话，所有会话合计 12MiB）。本次更改未保存，原有内容未被覆盖；请备份需要保留的内容后清理不再需要的会话再重试'
           : safeDetail(state.error))
-      : null;
+      : null);
     sessionStatusEl.textContent = statusError
       ? `${state.dirty ? '未保存' : '会话操作失败'} · ${statusError}`
       : !state.ready
@@ -289,7 +302,8 @@ export function createPanelSessionUi(deps) {
       ? '暂无会话 · 可点击新建会话'
       : `${state.title} · ${state.busy ? '正在切换…' : state.saving ? '保存中…' : state.dirty ? '待保存' : '已保存'}`;
     sessionStatusEl.title = sessionStatusEl.textContent;
-    btnRetrySave.hidden = !state.error;
+    btnRetrySave.textContent = state.conflict === 'modified' ? '覆盖远端并保存' : '重试保存';
+    btnRetrySave.hidden = !state.error || state.conflict === 'deleted';
     btnSaveCopy.hidden = !state.error || !state.ready;
     btnRetrySave.disabled = Boolean(state.busy);
     btnSaveCopy.disabled = Boolean(state.busy);

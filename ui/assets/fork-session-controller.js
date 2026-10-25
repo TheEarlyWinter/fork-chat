@@ -6,149 +6,394 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
   let active = null, sessions = [], ready = false, busy = false, error = '';
   let generation = 0, changed = 0, saved = 0, timer = null, saving = false;
   let tail = Promise.resolve(), refreshing = 0, closed = false;
-  /** 一次性提示（例如覆盖了别的窗口的修改），读走即清 */
   let notice = '';
+  let conflict = null;
+  let refreshQueued = false;
+  let saveOwner = null, saveOwnerSeq = 0;
+
   const detail = err => `${err?.code || 'SESSION_STORAGE_ERROR'}: ${err?.message || '会话保存失败'}`;
-  const state = () => ({ activeId: active?.id || null, activeRevision: active?.revision || null, title: active?.title || '', ready, busy, saving, dirty: changed > saved, error, notice, sessions, generation });
+  const clone = value => JSON.parse(JSON.stringify(value));
+  const sameSnapshot = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const state = () => ({
+    activeId: active?.id || null,
+    activeRevision: active?.revision || null,
+    title: active?.title || '',
+    ready,
+    busy,
+    saving,
+    dirty: changed > saved,
+    error,
+    notice,
+    conflict,
+    sessions,
+    generation,
+  });
   const notify = () => onChange(state());
   const clearTimer = () => { if (timer !== null) clearTimeout(timer); timer = null; };
 
-  async function refresh() {
-    const sequence = ++refreshing;
-    const list = await store.list();
-    if (sequence !== refreshing || closed) return list;
-
-    sessions = list.sessions;
-    const currentId = active?.id || null;
-    const currentMissing = Boolean(active && !sessions.some(item => item.id === active.id));
-    const activeChanged = list.activeId !== currentId;
-
-    if (currentMissing || activeChanged) {
-      if (list.activeId) {
-        const replacement = await store.get(list.activeId).catch(() => null);
-        if (sequence === refreshing && !closed && replacement
-          && (currentMissing || !active || changed <= saved)) {
-          await adoptExternal(replacement);
-        } else if (sequence === refreshing && !closed && active && !currentMissing && changed > saved) {
-          error = 'SESSION_ACTIVE_CHANGED: 其他窗口已切换当前会话，本窗口有未保存修改。';
-        }
-      } else if (sequence === refreshing && !closed && (currentMissing || !active || changed <= saved)) {
-        await adoptExternal(null);
-      }
-    }
-    notify();
-    return list;
+  function makeError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
   }
-  /**
-   * 别的窗口切了会话（或删掉了当前会话）时，由本窗口被动接受新快照。
-   *
-   * 以前这里直接 install()，既不涨 generation 也不 cancelPending：
-   * 旧回合的异步工作收不到取消，busy 账本也可能留下残影。
-   * 现在和主动切换走同一条转换协议，只是不需要再写盘。
-   */
-  async function adoptExternal(record) {
-    if (closed) return;
+
+  function conflictError(kind = conflict) {
+    if (kind === 'deleted') {
+      return makeError('SESSION_DELETED', '会话已在别处删除，本地修改未保存，请另存副本。');
+    }
+    if (kind === 'active-changed') {
+      return makeError('SESSION_ACTIVE_CHANGED', '其他窗口已切换当前会话，本地修改未保存。');
+    }
+    return makeError('SESSION_CONFLICT', '另一窗口已修改本会话，本地修改未覆盖。');
+  }
+
+  function updateSessionSummary(record) {
+    if (!record) return;
+    sessions = sessions.map(item => item.id === record.id ? {
+      ...item,
+      title: record.title,
+      revision: record.revision,
+      updatedAt: record.updatedAt,
+      cardCount: record.snapshot?.cards?.length || 0,
+    } : item);
+  }
+
+  function markConflict(kind, latest = null) {
+    conflict = kind;
+    clearTimer();
+    if (latest && active?.id === latest.id) {
+      // Keep the local snapshot as the comparison baseline. Only the remote
+      // revision is advanced so an explicit retry can perform a fresh CAS.
+      active = { ...active, revision: latest.revision, title: latest.title };
+      updateSessionSummary(latest);
+    }
+    const conflictErr = conflictError(kind);
+    error = detail(conflictErr);
+    notice = kind === 'deleted'
+      ? '会话已在别处删除，请另存副本保留本地修改'
+      : kind === 'active-changed'
+      ? '其他窗口已切换当前会话，请确认保存或另存副本'
+      : '另一窗口已修改本会话，点击“覆盖远端并保存”才会覆盖它的修改';
+    notify();
+  }
+
+  function clearConflict() {
+    conflict = null;
+    error = '';
+    notice = '';
+  }
+
+  function isSaveScopeCurrent(scope) {
+    return generation === scope.generation
+      && active?.id === scope.id
+      && (!closed || scope.allowClosed);
+  }
+
+  function isRefreshIdentityCurrent(scope) {
+    return !closed
+      && scope.sequence === refreshing
+      && generation === scope.generation
+      && (active?.id || null) === scope.activeId;
+  }
+
+  function isRefreshScopeCurrent(scope) {
+    return isRefreshIdentityCurrent(scope)
+      && changed === scope.changed
+      && saved === scope.saved;
+  }
+
+  function claimSaving() {
+    const owner = ++saveOwnerSeq;
+    saveOwner = owner;
+    saving = true;
+    notify();
+    return owner;
+  }
+
+  function releaseSaving(owner) {
+    if (saveOwner !== owner) return;
+    saveOwner = null;
+    saving = false;
+    notify();
+    if (refreshQueued && !closed) {
+      refreshQueued = false;
+      void refresh().catch(() => {});
+    }
+  }
+
+  async function adoptExternal(record, guard = null) {
+    if (closed || (guard && !isRefreshScopeCurrent(guard))) return false;
     clearTimer();
     generation++;
     cancelPending('会话已在别处切换');
+    const installGeneration = generation;
+    const installId = record?.id || null;
     notify();
     await install(record);
+    if (closed || generation !== installGeneration || (active?.id || null) !== installId) return false;
     notify();
+    return true;
+  }
+
+  async function refresh() {
+    if (saving) {
+      refreshQueued = true;
+      return { activeId: active?.id || null, sessions };
+    }
+
+    const sequence = ++refreshing;
+    const scope = {
+      sequence,
+      generation,
+      activeId: active?.id || null,
+      changed,
+      saved,
+    };
+    const list = await store.list();
+    if (!isRefreshIdentityCurrent(scope)) return list;
+    if (saving) {
+      refreshQueued = true;
+      return list;
+    }
+
+    sessions = list.sessions;
+    const currentSummary = scope.activeId
+      ? sessions.find(item => item.id === scope.activeId) || null
+      : null;
+    const currentMissing = Boolean(scope.activeId && !currentSummary);
+    const activeChanged = list.activeId !== scope.activeId;
+    const revisionChanged = Boolean(currentSummary && active && currentSummary.revision !== active.revision);
+    const needsRemoteRead = currentMissing || activeChanged || revisionChanged;
+
+    if (!needsRemoteRead) {
+      notify();
+      return list;
+    }
+
+    if (list.activeId) {
+      let replacement = null;
+      try {
+        replacement = await store.get(list.activeId);
+      } catch {}
+
+      if (!isRefreshIdentityCurrent(scope)) return list;
+      if (saving) {
+        refreshQueued = true;
+        return list;
+      }
+
+      if (!isRefreshScopeCurrent(scope)) {
+        if (changed > saved && active?.id === scope.activeId && (currentMissing || revisionChanged || !replacement)) {
+          markConflict(currentMissing || !replacement ? 'deleted' : 'modified', replacement);
+        }
+        notify();
+        return list;
+      }
+
+      if (changed > saved) {
+        if (currentMissing || !replacement) markConflict('deleted', replacement);
+        else if (revisionChanged) markConflict('modified', replacement);
+        else if (activeChanged) markConflict('active-changed', replacement);
+      } else if (replacement) {
+        await adoptExternal(replacement, scope);
+      }
+    } else {
+      if (!isRefreshIdentityCurrent(scope)) return list;
+      if (changed > saved) {
+        if (currentMissing) markConflict('deleted');
+        else if (activeChanged) markConflict('active-changed');
+      } else if (currentMissing || activeChanged) {
+        await adoptExternal(null, scope);
+      }
+    }
+
+    notify();
+    return list;
   }
 
   function scheduleSave() {
     if (!ready || busy || closed) return;
     const alreadyDirty = changed > saved;
     changed++;
-    // 新的修改应当允许排队尝试保存，自动打破上一次偶发失败留下的锁死状态
-    if (timer === null) timer = setTimeout(() => {
+    // A sticky conflict records later input but never schedules an implicit
+    // overwrite. The explicit retry button owns that authorization.
+    if (timer === null && !conflict) timer = setTimeout(() => {
       timer = null;
       void flush().catch(() => {});
     }, delayMs);
-    if (!alreadyDirty) notify();
+    if (!alreadyDirty || conflict) notify();
   }
-  function flush(force = false) {
-    clearTimer();
-    if ((!ready || busy || closed) && !force) return tail;
-    const job = tail.catch(() => {}).then(async () => {
-      if (!active) return;
-      const id = active.id;
-      saving = true; error = ''; notify();
-      try {
-        const snapshot = normalizeForkSnapshot(capture());
-        if (JSON.stringify(snapshot) === JSON.stringify(active.snapshot)) {
-          saved = changed; return;
+
+  async function readLatest(id) {
+    try {
+      return await store.get(id);
+    } catch (err) {
+      if (err?.code === 'SESSION_NOT_FOUND') return null;
+      throw err;
+    }
+  }
+
+  async function handleSaveFailure(err, scope) {
+    if (!isSaveScopeCurrent(scope)) return;
+    if (err?.code !== 'SESSION_CONFLICT' && err?.code !== 'SESSION_NOT_FOUND') {
+      error = detail(err);
+      return;
+    }
+
+    let latest = null;
+    try { latest = await readLatest(scope.id); } catch {}
+    if (!isSaveScopeCurrent(scope)) return;
+    markConflict(latest ? 'modified' : 'deleted', latest);
+  }
+
+  function commitSaved(record, scope, version) {
+    if (!isSaveScopeCurrent(scope)) return false;
+    active = record;
+    saved = version;
+    clearConflict();
+    updateSessionSummary(record);
+    return true;
+  }
+
+  async function runFlush({ force, allowOverwrite, allowClosed }) {
+    if (!active) return;
+    const conflictAtStart = conflict;
+    if (conflictAtStart && !allowOverwrite) throw conflictError(conflictAtStart);
+    if (conflictAtStart === 'deleted' && allowOverwrite) throw conflictError('deleted');
+
+    const scope = {
+      generation,
+      id: active.id,
+      changed,
+      allowClosed,
+    };
+    const owner = claimSaving();
+    error = '';
+    notify();
+
+    try {
+      let snapshot;
+      let expectedRevision = active.revision;
+
+      if (conflictAtStart && allowOverwrite) {
+        const latest = await readLatest(scope.id);
+        if (!isSaveScopeCurrent(scope)) return;
+        if (!latest) {
+          markConflict('deleted');
+          throw makeError('SESSION_NOT_FOUND', 'Session not found');
         }
-        if (changed <= saved) changed = saved + 1;
-        const version = changed;
-        let record;
-        try {
-          record = await store.save(id, active.revision, snapshot);
-        } catch (conflict) {
-          if (conflict?.code !== 'SESSION_CONFLICT') throw conflict;
-          // 冲突之后只把版本号对齐到远端最新，不自动重放本地内容。
-          // 以前连版本号都不更新，于是无论点多少次「重试保存」送上去的都是
-          // 同一个过期版本号，永远冲突；而自动覆盖又会悄悄吃掉别人的修改。
-          // 折中：对齐版本，覆盖与否交给用户再点一次决定。
-          const latest = await store.get(id).catch(() => null);
-          if (latest) {
-            active = { ...active, revision: latest.revision };
-            notice = '另一窗口已修改本会话，再次点击「重试保存」将覆盖它的修改';
+        snapshot = normalizeForkSnapshot(capture());
+        if (!isSaveScopeCurrent(scope)) return;
+        expectedRevision = latest.revision;
+        if (sameSnapshot(snapshot, latest.snapshot)) {
+          commitSaved(latest, scope, changed);
+          return;
+        }
+      } else {
+        snapshot = normalizeForkSnapshot(capture());
+        if (!isSaveScopeCurrent(scope)) return;
+        if (sameSnapshot(snapshot, active.snapshot)) {
+          const latest = await readLatest(scope.id);
+          if (!isSaveScopeCurrent(scope) || changed !== scope.changed) return;
+          if (!latest) {
+            if (!closed) await adoptExternal(null);
+            return;
           }
-          throw conflict;
-        }
-        active = record;
-        saved = version;
-        // A successful durable write stays successful even if a later list read fails.
-        sessions = sessions.map(item => item.id === record.id ? {
-          ...item, title: record.title, revision: record.revision, updatedAt: record.updatedAt,
-          cardCount: record.snapshot.cards.length,
-        } : item);
-      } catch (err) { error = detail(err); throw err; }
-      finally {
-        saving = false; notify();
-        if (changed > saved && !busy && !closed && !error && timer === null) {
-          timer = setTimeout(() => { timer = null; void flush().catch(() => {}); }, delayMs);
+          if (latest.revision !== active.revision || !sameSnapshot(latest.snapshot, active.snapshot)) {
+            if (!closed) await adoptExternal(latest);
+            return;
+          }
+          saved = changed;
+          error = '';
+          return;
         }
       }
-    });
+
+      if (changed <= saved) changed = saved + 1;
+      const version = changed;
+      let record;
+      try {
+        record = await store.save(scope.id, expectedRevision, snapshot);
+      } catch (err) {
+        await handleSaveFailure(err, scope);
+        throw err;
+      }
+      commitSaved(record, scope, version);
+      return record;
+    } catch (err) {
+      if (isSaveScopeCurrent(scope) && !conflict && !error) error = detail(err);
+      throw err;
+    } finally {
+      releaseSaving(owner);
+      if (saveOwner !== owner && !closed && changed > saved && !busy && !error && !conflict && timer === null) {
+        timer = setTimeout(() => { timer = null; void flush().catch(() => {}); }, delayMs);
+      }
+    }
+  }
+
+  function enqueueFlush({ force = false, allowOverwrite = false, allowClosed = false }) {
+    clearTimer();
+    if ((!ready || busy || closed) && !force) return tail;
+    const job = tail.catch(() => {}).then(() => runFlush({ force, allowOverwrite, allowClosed }));
     tail = job;
     return job;
   }
+
+  function flush(force = false) {
+    // `force` is deliberately only the lifecycle gate. It never authorizes
+    // a write against a sticky conflict.
+    return enqueueFlush({ force: Boolean(force), allowOverwrite: false, allowClosed: Boolean(force) });
+  }
+
+  function retrySave() {
+    return enqueueFlush({ force: false, allowOverwrite: true, allowClosed: false });
+  }
+
   async function install(record) {
     active = record || null;
     changed = saved = 0;
-    // The live canvas must not mutate the durable comparison baseline.
-    await apply(record ? JSON.parse(JSON.stringify(record.snapshot)) : null);
+    clearConflict();
+    await apply(record ? clone(record.snapshot) : null);
   }
+
   async function init() {
     if (busy || closed) return;
-    busy = true; error = ''; notify();
+    busy = true; error = ''; conflict = null; notify();
+    const owner = claimSaving();
     try {
       const record = await store.ensure(capture());
       if (closed) return;
       await install(record);
       ready = true;
-      await refresh();
-    } catch (err) { error = detail(err); }
-    finally { busy = false; notify(); }
+    } catch (err) {
+      error = detail(err);
+    } finally {
+      releaseSaving(owner);
+      busy = false;
+      notify();
+    }
+    if (ready && !closed) await refresh();
   }
+
   async function transition(id) {
     if (!ready || busy || closed || !id || id === active?.id) return;
     busy = true; error = ''; clearTimer(); generation++;
-    cancelPending('会话已切换');
-    changed++; // Commit interrupted messages and last input drafts before leaving.
+    cancelPending('会话已切换'); changed++;
     notify();
     try {
       await flush(true);
       if (closed) return;
-      const record = await store.activate(id);
-      if (closed) return;
-      await install(record);
+      const owner = claimSaving();
+      try {
+        const record = await store.activate(id);
+        if (closed) return;
+        await install(record);
+      } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
     finally { busy = false; notify(); }
   }
+
   async function newSession(snapshot) {
     // Creation snapshot is supplied separately to avoid reusing the old canvas.
     if (!ready || busy || closed) return;
@@ -157,41 +402,56 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     try {
       await flush(true);
       if (closed) return;
-      const record = await store.create(snapshot);
-      if (closed) return;
-      await install(record);
+      const owner = claimSaving();
+      try {
+        const record = await store.create(snapshot);
+        if (closed) return;
+        await install(record);
+      } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
     finally { busy = false; notify(); }
   }
+
   async function saveCopy() {
     if (!ready || busy || closed) return;
     busy = true; error = ''; clearTimer(); generation++;
     cancelPending('正在保存会话副本'); changed++; notify();
     try {
       await tail.catch(() => {});
-      const record = await store.create(capture(), { title: `${active?.title || '会话'}（副本）` });
-      if (closed) return;
-      await install(record);
+      if (closed || !active) return;
+      const scope = { generation, id: active.id, allowClosed: false };
+      const owner = claimSaving();
+      let record;
+      try {
+        record = await store.create(capture(), { title: `${active?.title || '会话'}（副本）` });
+        if (!isSaveScopeCurrent(scope)) return;
+        await install(record);
+      } finally { releaseSaving(owner); }
       await refresh();
     } catch (err) { error = detail(err); }
     finally { busy = false; notify(); }
   }
+
   function resumeDirty() {
     if (!ready || closed || !active) return;
     try {
-      if (JSON.stringify(normalizeForkSnapshot(capture())) !== JSON.stringify(active.snapshot)) scheduleSave();
+      if (!sameSnapshot(normalizeForkSnapshot(capture()), active.snapshot)) scheduleSave();
     } catch (err) { if (!error) error = detail(err); }
   }
+
   async function rename(id, title, expectedTitle) {
     if (!ready || busy || closed) return { ok: false, error: '会话正忙，请稍后重试。' };
     busy = true; error = ''; clearTimer(); notify();
     try {
       await flush(true);
       if (closed) return { ok: false, error: '画布已关闭。' };
-      const record = await store.rename(id, title, expectedTitle);
-      if (active?.id === id) active = record; // Never apply/reset the live canvas during rename.
-      sessions = sessions.map(item => item.id === id ? { ...item, title: record.title, revision: record.revision, updatedAt: record.updatedAt } : item);
+      const owner = claimSaving();
+      try {
+        const record = await store.rename(id, title, expectedTitle);
+        if (active?.id === id) active = record; // Metadata must not reset the live canvas.
+        updateSessionSummary(record);
+      } finally { releaseSaving(owner); }
       await refresh().catch(() => {});
       return { ok: true };
     } catch (err) {
@@ -201,6 +461,7 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     }
     finally { busy = false; resumeDirty(); notify(); }
   }
+
   async function remove(id, expectedRevision, fallbackSnapshot) {
     if (!ready || busy || closed) return { ok: false, error: '会话正忙，请稍后重试。' };
     const isCurrent = id === active?.id;
@@ -208,31 +469,32 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     if (isCurrent) { generation++; cancelPending('会话正在删除'); changed++; }
     notify();
     try {
-      // Await already-started saves, but do not require another save of data
-      // the user explicitly confirmed deleting (including a full-quota store).
       await tail.catch(() => {});
       if (closed) return { ok: false, error: '画布已关闭。' };
-      // Confirmation supplies the authoritative revision read when it opened.
-      // Local saves accepted after that read may advance it; foreign writes
-      // after either accepted boundary still fail the store's atomic CAS.
       const revision = isCurrent ? Math.max(active.revision, expectedRevision) : expectedRevision;
-      const result = await store.remove(id, revision, fallbackSnapshot);
-      if (isCurrent && !closed) await install(result.session);
-      sessions = sessions.filter(item => item.id !== id);
+      const owner = claimSaving();
+      try {
+        const result = await store.remove(id, revision, fallbackSnapshot);
+        if (isCurrent && !closed) await install(result.session);
+        sessions = sessions.filter(item => item.id !== id);
+      } finally { releaseSaving(owner); }
       await refresh().catch(() => {});
       return { ok: true };
     } catch (err) { return { ok: false, error: detail(err) }; }
     finally { busy = false; resumeDirty(); notify(); }
   }
+
   function close() {
+    if (closed) return tail;
     clearTimer(); closed = true; generation++;
     cancelPending('页面已关闭');
     changed++;
     // Best effort only: the last acknowledged autosave is the recovery boundary.
-    return flush(true);
+    return enqueueFlush({ force: true, allowOverwrite: false, allowClosed: true });
   }
+
   function getSavedSnapshot() {
-    if (!ready || busy || closed || saving || (changed > saved) || Boolean(error) || !active) {
+    if (!ready || busy || closed || saving || (changed > saved) || Boolean(error) || conflict || !active) {
       const err = new Error('当前会话尚未保存或正忙');
       err.code = 'SESSION_NOT_SAVED';
       throw err;
@@ -240,8 +502,25 @@ export function createForkSessionController({ store, capture, apply, cancelPendi
     return {
       id: active.id,
       revision: active.revision,
-      snapshot: JSON.parse(JSON.stringify(active.snapshot)),
+      snapshot: clone(active.snapshot),
     };
   }
-  return { get state() { return state(); }, takeNotice() { const current = notice; notice = ''; return current; }, get generation() { return generation; }, init, refresh, scheduleSave, flush, switchTo: transition, newSession, saveCopy, rename, remove, close, getSavedSnapshot };
+
+  return {
+    get state() { return state(); },
+    takeNotice() { const current = notice; notice = ''; return current; },
+    get generation() { return generation; },
+    init,
+    refresh,
+    scheduleSave,
+    flush,
+    retrySave,
+    switchTo: transition,
+    newSession,
+    saveCopy,
+    rename,
+    remove,
+    close,
+    getSavedSnapshot,
+  };
 }

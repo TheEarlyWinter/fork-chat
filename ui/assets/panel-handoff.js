@@ -145,6 +145,14 @@ export function createPanelHandoff(deps = {}) {
     view.close();
   }
 
+  // 只收尾仍由该 op 拥有的旧 loading；新 op 已接管时不能误关新视图。
+  function closeStalePreview(op) {
+    if (!op || op.closed || activeOp !== op) return false;
+    closeScope(op);
+    flashMessage('当前会话已更新，请重新打开交接预览。');
+    return true;
+  }
+
   // 显式栈有界遍历目标及祖先节点（避免深链递归栈溢出）
   function collectAncestorsWithBoundedStack(targetCardId, allCards) {
     const cardMap = new Map();
@@ -517,22 +525,34 @@ export function createPanelHandoff(deps = {}) {
     try {
       await controller.flush(true);
     } catch (err) {
-      if (!isCurrent(previewOp)) return;
+      if (!isCurrent(previewOp)) {
+        closeStalePreview(previewOp);
+        return;
+      }
       view.setError('会话保存失败：' + safeDetail(err?.message || err));
       return;
     }
-    if (!isCurrent(previewOp)) return;
+    if (!isCurrent(previewOp)) {
+      closeStalePreview(previewOp);
+      return;
+    }
 
     // 7. 获取不可变已保存快照（重新读取最新 savedSnapshot！）
     let savedSnapshot;
     try {
       savedSnapshot = controller.getSavedSnapshot();
     } catch (err) {
-      if (!isCurrent(previewOp)) return;
+      if (!isCurrent(previewOp)) {
+        closeStalePreview(previewOp);
+        return;
+      }
       view.setError('获取已保存快照失败：' + safeDetail(err?.message || err));
       return;
     }
-    if (!isCurrent(previewOp)) return;
+    if (!isCurrent(previewOp)) {
+      closeStalePreview(previewOp);
+      return;
+    }
     if (!savedSnapshot || savedSnapshot.id !== previewOp.activeId) {
       view.setError('会话快照与当前画布不匹配');
       return;
