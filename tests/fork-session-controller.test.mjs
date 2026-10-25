@@ -561,3 +561,66 @@ test('dirty deletion with a replacement activeId remains local and can be copied
   assert.equal((await one.store.get(one.controller.state.activeId)).snapshot.cards[0].draft, 'local deleted');
   await one.controller.close(); await two.controller.close();
 });
+
+test('[I2-1-R2] clean remote adoption never upgrades an old delete confirmation revision', async () => {
+  const host = memoryHost();
+  const one = await setup(host);
+  const two = await setup(host);
+  const id = one.controller.state.activeId;
+  const remote = await two.store.get(id);
+  remote.snapshot.cards[0].draft = 'remote revision 2';
+  const saved = await two.store.save(id, remote.revision, remote.snapshot);
+
+  await one.controller.refresh();
+  assert.equal(one.controller.state.activeRevision, saved.revision);
+  const result = await one.controller.remove(id, 1, snapshot('fallback'));
+
+  assert.equal(result.ok, false, '旧确认 revision 不得删除已采用的远端版本');
+  assert.match(result.error, /SESSION_CONFLICT/);
+  assert.equal((await one.store.get(id)).revision, saved.revision);
+  await one.controller.close();
+  await two.controller.close();
+});
+
+test('[I2-1-R2] dirty remote conflict also rejects the stale delete confirmation and keeps local input', async () => {
+  const host = memoryHost();
+  const one = await setup(host);
+  const two = await setup(host);
+  const id = one.controller.state.activeId;
+  one.canvas.cards[0].draft = 'local draft';
+  one.controller.scheduleSave();
+  const remote = await two.store.get(id);
+  remote.snapshot.cards[0].draft = 'remote draft';
+  const saved = await two.store.save(id, remote.revision, remote.snapshot);
+
+  await one.controller.refresh();
+  assert.equal(one.controller.state.conflict, 'modified');
+  const result = await one.controller.remove(id, 1, snapshot('fallback'));
+
+  assert.equal(result.ok, false, 'dirty 冲突不得用 active revision 升级旧确认');
+  assert.match(result.error, /SESSION_CONFLICT/);
+  assert.equal(one.controller.state.activeId, id);
+  assert.equal(one.canvas.cards[0].draft, 'local draft');
+  assert.equal((await one.store.get(id)).revision, saved.revision);
+  await one.controller.close().catch(() => {});
+  await two.controller.close();
+});
+
+test('[I2-1-R2] a local save after opening delete confirmation still requires the new revision', async () => {
+  const ui = await setup();
+  const id = ui.controller.state.activeId;
+  ui.canvas.cards[0].draft = 'saved after confirmation opened';
+  ui.controller.scheduleSave();
+  await ui.controller.flush();
+  const saved = await ui.store.get(id);
+  assert.equal(saved.revision, 2);
+
+  const stale = await ui.controller.remove(id, 1, snapshot('fallback'));
+  assert.equal(stale.ok, false, '本窗口保存推进 revision 后，旧确认也必须失效');
+  assert.match(stale.error, /SESSION_CONFLICT/);
+  assert.equal((await ui.store.get(id)).revision, 2);
+
+  const fresh = await ui.controller.remove(id, 2, snapshot('fallback'));
+  assert.equal(fresh.ok, true, '重新读取并确认 revision 2 后才允许删除');
+  await ui.controller.close();
+});

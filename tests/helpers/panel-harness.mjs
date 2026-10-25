@@ -318,7 +318,14 @@ function createImports(hana, flashes, captures = { handoff: [], documents: [] })
     './panel-render-diff.js': panelRenderDiff,
     './panel-search-controller.js': panelSearchController,
     './panel-session-state.js': panelSessionState,
-    './panel-session-ui.js': panelSessionUi,
+    './panel-session-ui.js': {
+      ...panelSessionUi,
+      createPanelSessionUi(deps) {
+        const ui = panelSessionUi.createPanelSessionUi(deps);
+        captures.sessionUi?.push({ ui, deps });
+        return ui;
+      },
+    },
     './panel-feedback.js': panelFeedback,
     './panel-search.js': panelSearch,
   };
@@ -332,7 +339,7 @@ export async function loadPanel({
   ui.environment.Blob = Blob;
   const calls = [];
   const flashes = [];
-  const captures = { handoff: [], documents: [] };
+  const captures = { handoff: [], documents: [], sessionUi: [] };
   const firstAgent = agents[0];
   if (firstAgent?.id) ui.environment.localStorage.setItem('fork_chat_active_agent_id', firstAgent.id);
   if (firstAgent?.name) ui.environment.localStorage.setItem('fork_chat_active_agent_name', firstAgent.name);
@@ -366,5 +373,6 @@ export async function loadPanel({
     panel: ui.environment.window.__forkChat,
     handoffCompositions: captures.handoff,
     documentPipelines: captures.documents,
+    sessionUiCompositions: captures.sessionUi,
   };
 }

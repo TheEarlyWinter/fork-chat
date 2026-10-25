@@ -536,3 +536,101 @@ test('[Round4-C3/I4] metadata to automatic preview remains single-flight while f
     handoff.dispose();
   }
 });
+
+test('[I2-2-R2] stale capabilities resolve retires its own loading after clean adoption', async () => {
+  const capsGate = deferred();
+  let capsCalls = 0;
+  const deps = makeControllerDeps({
+    onRequest: path => {
+      if (path === '/api/handoff/capabilities') {
+        capsCalls++;
+        return capsGate.promise;
+      }
+      return undefined;
+    },
+  });
+  const handoff = createPanelHandoff(deps);
+  const opening = handoff.open('target');
+
+  try {
+    await waitFor(() => capsCalls === 1);
+    assert.ok(currentDialog(deps), 'capabilities pending 时必须有 loading');
+    deps.state.generation++;
+    capsGate.resolve(response(CAPS_OK, 200));
+    await opening;
+    assert.equal(currentDialog(deps), null, '旧 capabilities 返回后不得遗留旧 loading');
+  } finally {
+    capsGate.resolve(response(CAPS_OK, 200));
+    await Promise.allSettled([opening]);
+    handoff.dispose();
+  }
+});
+
+test('[I2-2-R2] stale actions rejection retires its own loading after clean adoption', async () => {
+  const actionsGate = deferred();
+  let actionsCalls = 0;
+  const deps = makeControllerDeps({
+    onRequest: (path) => {
+      if (path === '/api/handoff/capabilities') return response(CAPS_OK, 200);
+      if (path === '/api/handoff/actions') {
+        actionsCalls++;
+        return actionsGate.promise;
+      }
+      return undefined;
+    },
+  });
+  const handoff = createPanelHandoff(deps);
+  const opening = handoff.open('target');
+
+  try {
+    await waitFor(() => actionsCalls === 1);
+    assert.ok(currentDialog(deps), 'actions pending 时必须有 loading');
+    deps.state.generation++;
+    actionsGate.reject(new Error('stale actions failure'));
+    await opening;
+    assert.equal(currentDialog(deps), null, '旧 actions reject 后不得遗留旧 loading');
+  } finally {
+    actionsGate.resolve(response({ ok: true, actions: [] }, 200));
+    await Promise.allSettled([opening]);
+    handoff.dispose();
+  }
+});
+
+test('[I2-2-R2] a stale metadata response cannot close a replacement op view', async () => {
+  const firstCaps = deferred();
+  const secondCaps = deferred();
+  let capsCalls = 0;
+  const deps = makeControllerDeps({
+    onRequest: path => {
+      if (path === '/api/handoff/capabilities') {
+        capsCalls++;
+        return capsCalls === 1 ? firstCaps.promise : secondCaps.promise;
+      }
+      return undefined;
+    },
+  });
+  const handoff = createPanelHandoff(deps);
+  const first = handoff.open('target');
+
+  try {
+    await waitFor(() => capsCalls === 1);
+    deps.state.generation++;
+    const second = handoff.open('target');
+    await waitFor(() => capsCalls === 2);
+    const replacementDialog = currentDialog(deps);
+    assert.ok(replacementDialog);
+
+    firstCaps.resolve(response(CAPS_OK, 200));
+    await first;
+    assert.equal(currentDialog(deps), replacementDialog, '旧 metadata 不得关闭新 op 的 view');
+
+    secondCaps.resolve(response(CAPS_OK, 200));
+    await second;
+    assert.ok(currentDialog(deps), '新 op 完成后仍应保留当前 view');
+  } finally {
+    firstCaps.resolve(response(CAPS_OK, 200));
+    secondCaps.resolve(response(CAPS_OK, 200));
+    await Promise.allSettled([first]);
+    handoff.dispose();
+  }
+});
