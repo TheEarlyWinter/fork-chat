@@ -12,6 +12,7 @@ const PERMISSIONS = [
   'app/sessions.read',
   'app/sessions.manage',
   'app/session.stage-file',
+  'app/agents.read',
 ];
 
 function grantMap(overrides = {}) {
@@ -149,6 +150,7 @@ test('capabilities reports availability when the named SDK and all four grants a
     read: true,
     manage: true,
     stageFile: true,
+    agentsRead: true,
     missing: [],
     reason: null,
   });
@@ -191,6 +193,16 @@ test('capabilities lists denied grants as missing and refuses to write', async (
     error => error.code === 'HANDOFF_PERMISSION_MISSING',
   );
   assert.equal(calls.sendCustom.length, 0);
+});
+
+test('capabilities requires the existing agents.read grant for agent validation', async () => {
+  const { sdk } = makeSdk({ permissions: grantMap({ 'app/agents.read': 'not_asked' }) });
+  const caps = await createHandoffHost({ sdk }).capabilities();
+
+  assert.equal(caps.available, false);
+  assert.equal(caps.agentsRead, false);
+  assert.deepEqual(caps.missing, ['app/agents.read']);
+  assert.equal(caps.reason, 'HANDOFF_PERMISSION_MISSING');
 });
 
 test('capabilities fails closed as a permission problem when the ledger cannot be read', async () => {
@@ -266,6 +278,21 @@ test('create rejects a receipt without a trusted session id and exposes no fabri
     assert.equal(error.sessionId, undefined);
     return true;
   });
+});
+
+test('create rejects a receipt whose agent differs from the frozen request but carries the trusted session id', async () => {
+  for (const receipt of [
+    homeReceipt({ sessionId: 'sess-other-agent', agentId: 'agent-b' }),
+    homeReceipt({ sessionId: 'sess-no-agent', agentId: undefined }),
+  ]) {
+    const { sdk } = makeSdk({ createReceipt: receipt });
+    await assert.rejects(createHandoffHost({ sdk }).create({ agentId: 'agent-a' }), error => {
+      assert.equal(error.code, 'HANDOFF_INVALID_SESSION');
+      assert.equal(error.sessionId, receipt.sessionId);
+      assert.equal(error.details?.sessionId, receipt.sessionId);
+      return true;
+    });
+  }
 });
 
 test('create refuses before the host call when the home grant is missing', async () => {
@@ -409,6 +436,29 @@ test('writeContext only accepts ok with notifyOnly mode and a trusted entry id',
 // ---------------------------------------------------------------------------
 // 错误可见性
 // ---------------------------------------------------------------------------
+
+test('upstream errors cannot smuggle raw text through a HANDOFF_ code or details', async () => {
+  const sentinel = 'SECRET_SENTINEL /private/path Authorization: Bearer token';
+  const failures = [
+    { code: 'HANDOFF_HOST_ERROR', message: sentinel },
+    { code: 'HANDOFF_PERMISSION_MISSING', message: sentinel },
+    { code: 'HANDOFF_INVALID_CONTEXT', message: sentinel, details: { body: sentinel } },
+  ];
+
+  for (const failure of failures) {
+    const { sdk } = makeSdk({ sendCustomError: failure });
+    await assert.rejects(
+      createHandoffHost({ sdk }).writeContext({ sessionId: 'sess-1', content: '正文', details: {} }),
+      error => {
+        assert.equal(error.code, 'HANDOFF_HOST_ERROR');
+        assert.equal(error.message, '宿主调用失败');
+        assert.doesNotMatch(error.message, /SECRET_SENTINEL/);
+        assert.doesNotMatch(JSON.stringify(error.details ?? null), /SECRET_SENTINEL/);
+        return true;
+      },
+    );
+  }
+});
 
 test('host failures get a stable code without echoing the raw host message', async () => {
   // 宿主报错可能夹带正文、私有路径或凭据：只允许在内存里分类，绝不回传原文
