@@ -307,8 +307,8 @@ test('round5 C-I5: a symlinked helper root is refused by cleanup and nothing out
   const delivery = createHandoffDelivery({ dataDir });
   await writeBoth(delivery);
 
-  // 正常写完之后再把 helper 根换成指向 outside 的链接
-  await realFs.rm(path.join(dataDir, 'handoff-delivery'), { recursive: true, force: true });
+  // 正常写完之后再把 helper 根换成指向 outside 的链接（旧树 rename 到本测试 base 下留底，不递归删除）
+  await realFs.rename(path.join(dataDir, 'handoff-delivery'), path.join(base, 'backup-helper-root'));
   const outside = path.join(base, 'outside');
   await realFs.mkdir(outside, { mode: 0o700 });
   await fillOutside(outside, [ownerHash(), ACTION_ID]);
@@ -332,7 +332,7 @@ test('round5 C-I5: a symlinked owner directory is refused by cleanup and nothing
   await writeBoth(delivery);
 
   const ownerDir = path.join(dataDir, 'handoff-delivery', ownerHash());
-  await realFs.rm(ownerDir, { recursive: true, force: true });
+  await realFs.rename(ownerDir, path.join(base, 'backup-owner-dir'));
   const outside = path.join(base, 'outside');
   await realFs.mkdir(outside, { mode: 0o700 });
   await fillOutside(outside, [ACTION_ID]);
@@ -356,7 +356,7 @@ test('round5 C-I5: a symlinked action directory is refused by cleanup and the ou
   await writeBoth(delivery);
 
   const actionDir = actionDirOf(dataDir);
-  await realFs.rm(actionDir, { recursive: true, force: true });
+  await realFs.rename(actionDir, path.join(base, 'backup-action-dir'));
   const outside = path.join(base, 'outside');
   await realFs.mkdir(outside, { mode: 0o700 });
   await fillOutside(outside, []);
