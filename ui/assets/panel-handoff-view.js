@@ -138,12 +138,21 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
     errorEl.setAttribute('role', 'alert');
     errorEl.style.display = 'none';
 
+    // 异常中断后的核查提示：只在未完成状态显示，不新增设置或交互
+    const anomalyHint = createEl(
+      'div',
+      'handoff-notice-item handoff-anomaly-hint',
+      '若交接因异常中断而未完成，请先核查目标会话里已暂存的文件与正文，再决定是否重新发起，不要盲目重复交接。',
+    );
+    anomalyHint.style.display = 'none';
+
     body.appendChild(noticesEl);
     body.appendChild(historyRow);
     body.appendChild(formSection);
     body.appendChild(metaSummary);
     body.appendChild(previewSection);
     body.appendChild(errorEl);
+    body.appendChild(anomalyHint);
 
     // 底部操作栏
     const footer = createEl('div', 'handoff-dialog-footer');
@@ -197,6 +206,7 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
       transcriptDetails,
       transcriptPre,
       errorEl,
+      anomalyHint,
     };
 
     return dlg;
@@ -729,7 +739,9 @@ export function createHandoffView({ documentRef = (typeof document !== 'undefine
   }
 
   function setStage(stage, details = {}) {
-    const { prepareBtn, confirmBtn, recoverBtn, focusBtn, newPreviewBtn } = els;
+    const { prepareBtn, confirmBtn, recoverBtn, focusBtn, newPreviewBtn, anomalyHint } = els;
+
+    if (anomalyHint) anomalyHint.style.display = ['partial', 'unknown', 'importing'].includes(stage) ? 'block' : 'none';
 
     if (prepareBtn) prepareBtn.style.display = 'none';
     if (confirmBtn) confirmBtn.style.display = 'none';
