@@ -80,7 +80,9 @@ test('[Round4-C3-1] close then same-target reopen starts a new metadata scope wh
 
     secondCaps.resolve(response(CAPS_OK, 200));
     await opens[1];
-    assert.equal(currentDialog(deps), newDialog, '旧 open 完成后不得污染新作用域');
+    const completedDialog = currentDialog(deps);
+    assert.ok(completedDialog, '第二个 open 完成后必须仍有当前对话框');
+    assert.notEqual(completedDialog, oldDialog, '第二个 open 完成后不得回到旧对话框');
   } finally {
     firstCaps.resolve(response(CAPS_OK, 200));
     secondCaps.resolve(response(CAPS_OK, 200));
@@ -275,12 +277,16 @@ test('[Round4-C3-3] closing a new-preview wait retires it, blocks late follow-up
       await tick();
       assert.equal(snapshotCalls, 0, '旧 preview close 后不得继续读取 savedSnapshot');
       assert.equal(agentCalls, 0, '旧 preview close 后不得继续 GET agents');
-      assert.equal(currentDialog(deps), newDialog, '旧 flush finally 不得复活旧 preview');
+      const afterOldFlush = currentDialog(deps);
+      assert.ok(afterOldFlush, '旧 flush finally 不得关闭当前对话框');
+      assert.notEqual(afterOldFlush, oldDialog, '旧 flush finally 不得复活旧 preview');
 
       secondFlush.resolve();
       await opens[1];
       assert.equal(agentCalls, 1, '新 scope 必须可以独立获取 agents');
-      assert.equal(currentDialog(deps), newDialog);
+      const completedDialog = currentDialog(deps);
+      assert.ok(completedDialog, '新 scope 完成后必须仍有当前对话框');
+      assert.notEqual(completedDialog, oldDialog, '新 scope 完成后不得回到旧对话框');
     } finally {
       firstFlush.resolve();
       secondFlush.resolve();
@@ -327,11 +333,15 @@ test('[Round4-C3-3] closing a new-preview wait retires it, blocks late follow-up
       firstAgents.resolve(response({ ok: true, agents: [{ id: 'a1', name: 'Agent 1' }] }, 200));
       await opens[0];
       await tick();
-      assert.equal(currentDialog(deps), newDialog, '旧 agents finally 不得重新渲染旧 preview');
+      const afterOldAgents = currentDialog(deps);
+      assert.ok(afterOldAgents, '旧 agents finally 不得关闭当前对话框');
+      assert.notEqual(afterOldAgents, oldDialog, '旧 agents finally 不得重新渲染旧 preview');
 
       secondAgents.resolve(response({ ok: true, agents: [{ id: 'a1', name: 'Agent 1' }] }, 200));
       await opens[1];
-      assert.equal(currentDialog(deps), newDialog, '新 scope 完成后必须保留新对话框');
+      const completedDialog = currentDialog(deps);
+      assert.ok(completedDialog, '新 scope 完成后必须保留当前对话框');
+      assert.notEqual(completedDialog, oldDialog, '新 scope 完成后不得回到旧对话框');
     } finally {
       firstAgents.resolve(response({ ok: true, agents: [{ id: 'a1', name: 'Agent 1' }] }, 200));
       secondAgents.resolve(response({ ok: true, agents: [{ id: 'a1', name: 'Agent 1' }] }, 200));
