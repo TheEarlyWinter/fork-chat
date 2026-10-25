@@ -1522,11 +1522,12 @@ test('[Round2-G6] history coexists with explicit new-preview button, and query u
         newPreviewBtn.dispatchEvent({ type: 'click' });
         await new Promise(r => setImmediate(r));
 
-        const prepareBtn = dialog.querySelector('.btn-handoff-prepare');
+        const currentDialog = deps.documentRef.body.querySelector('.handoff-dialog') || dialog;
+        const prepareBtn = currentDialog.querySelector('.btn-handoff-prepare');
         assert.ok(prepareBtn, '点击新建预览后必须展示准备按钮');
         assert.notEqual(prepareBtn.style.display, 'none', '准备按钮必须可见');
         prepareBtn.dispatchEvent({ type: 'click' });
-        await waitForPrepare(dialog);
+        await waitForPrepare(currentDialog);
 
         assert.equal(prepareCalls, 1, '点击新建预览后发起 prepare 必须发送 1 次新的 POST 请求');
       } finally {
@@ -1701,4 +1702,442 @@ test('[Round2-G7] formatHandoffTranscript canonical guarantee, nextStep preview 
     }
   });
 });
+
+// ============================================================================
+// Task 3 Round 3 RED Behavioral Tests ([Round3-A] - [Round3-F])
+// Covering C3 (cross-mode contamination, concurrent open) & I4 (history/preview intent separation, fresh snapshot, retry, multi-history)
+// ============================================================================
+
+test('[Round3-A] pending history query resolving late does not overwrite new preview B or hijack confirm/focus (C3)', async () => {
+  const queryADeferred = deferred();
+  let confirmPayload = null;
+  let confirmCalls = 0;
+  const oldActionA = makeAction({ actionId: ACTION_A, state: 'creating', sessionId: null });
+  const deps = makeControllerDeps({
+    onRequest: (path, init) => {
+      if (path === '/api/handoff/actions') {
+        return response({ ok: true, actions: [oldActionA] });
+      }
+      if (path === `/api/handoff/actions/${ACTION_A}`) {
+        return queryADeferred.promise;
+      }
+      if (path === '/api/handoff/prepare') {
+        return response({ ok: true, action: makeAction({ actionId: ACTION_B, state: 'prepared' }) });
+      }
+      if (path === '/api/handoff/confirm') {
+        confirmCalls++;
+        confirmPayload = JSON.parse(init.body);
+        return response({
+          ok: true,
+          action: makeAction({ actionId: ACTION_B, state: 'ready', sessionId: 'sess-B' }),
+        });
+      }
+      return undefined;
+    },
+  });
+
+  const { handoff } = await openController(deps);
+  try {
+    const getDialog = () => deps.documentRef.body.querySelector('.handoff-dialog');
+
+    // 1. 处于历史模式 A，点击恢复查询，产生在途请求
+    const recoverBtn = getDialog().querySelector('.btn-handoff-recover');
+    assert.ok(recoverBtn, '历史 creating 状态必须展示恢复查询按钮');
+    recoverBtn.dispatchEvent({ type: 'click' });
+
+    // 2. 明确点击【新建预览】，并进行 prepare 生成 action B
+    const newPreviewBtn = getDialog().querySelector('.btn-handoff-new-preview');
+    assert.ok(newPreviewBtn, '必须存在显式新建预览按钮');
+    newPreviewBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    const currentDialog = getDialog();
+    const prepareBtn = currentDialog.querySelector('.btn-handoff-prepare');
+    assert.ok(prepareBtn, '切换到新建预览后必须展示准备按钮');
+    prepareBtn.dispatchEvent({ type: 'click' });
+    await waitForPrepare(currentDialog);
+
+    // 3. 此时界面处于 B 的 prepared 状态，确认按钮可见
+    const preparedDialog = getDialog();
+    const confirmBtn = preparedDialog.querySelector('.btn-handoff-confirm');
+    assert.ok(confirmBtn && confirmBtn.style.display !== 'none', 'B prepare 成功后必须展示确认按钮');
+
+    // 4. 迟到的旧 A query 返回（带 old-session-A）
+    queryADeferred.resolve(response({
+      ok: true,
+      action: makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'old-session-A' }),
+    }));
+    await new Promise(r => setImmediate(r));
+
+    // 5. 断言：界面必须保持 B 的预览与确认状态，不得切回旧 A 的 ready 状态，也不得展示针对 old-session-A 的 focus 按钮
+    const lateDialog = getDialog();
+    const focusBtn = lateDialog.querySelector('.btn-handoff-focus');
+    assert.ok(!focusBtn || focusBtn.style.display === 'none', 'B prepared 状态下不得展示可见的旧 focus 按钮');
+    const lateConfirmBtn = lateDialog.querySelector('.btn-handoff-confirm');
+    assert.ok(lateConfirmBtn && lateConfirmBtn.style.display === 'inline-block', '确认按钮必须依然可见');
+
+    // 6. 点击确认，必须确认 action B，且只发出 1 次 POST
+    lateConfirmBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    assert.equal(confirmCalls, 1, '必须发出确认 POST 请求');
+    assert.equal(confirmPayload?.actionId, ACTION_B, '确认的动作必须是新预览 B，而非旧历史 A');
+  } finally {
+    handoff.dispose();
+  }
+});
+
+test('[Round3-B] open metadata phase does not flush, and concurrent open during pending capabilities is deduplicated (C3/I4)', async () => {
+  const capsDeferred = deferred();
+  let capsCalls = 0;
+  let actionsCalls = 0;
+  let flushCalls = 0;
+
+  const deps = makeControllerDeps({
+    onRequest: (path) => {
+      if (path === '/api/handoff/capabilities') {
+        capsCalls++;
+        return capsDeferred.promise;
+      }
+      if (path === '/api/handoff/actions') {
+        actionsCalls++;
+        return response({ ok: true, actions: [] });
+      }
+      return undefined;
+    },
+  });
+
+  const originalFlush = deps.sessionController.flush;
+  deps.sessionController.flush = async (...args) => {
+    flushCalls++;
+    return originalFlush?.apply(deps.sessionController, args);
+  };
+
+  const handoff = createPanelHandoff(deps);
+  try {
+    // 第一次调用 open，进入 metadata 读取阶段
+    const p1 = handoff.open('target');
+
+    // 确实等待 capabilities 请求在途挂起
+    await waitFor(() => capsCalls === 1);
+
+    // 正在等待 capabilities 时，第二次并发调用 open 同一目标
+    const p2 = handoff.open('target');
+
+    // 在 metadata pending 阶段，不得提前触发 flush，caps 仍只发出了 1 次
+    assert.equal(flushCalls, 0, '只读 metadata 加载阶段不得提前调用 flush');
+    assert.equal(capsCalls, 1, '在途请求期间再次 open 不得发出第二次 caps GET');
+
+    // 放行 capabilities 响应
+    capsDeferred.resolve(response({
+      ok: true,
+      supported: true,
+      available: true,
+      home: true,
+    }));
+
+    await Promise.all([p1, p2]);
+
+    // capabilities 与 actions 请求必须被单飞复用，不得重复发送
+    assert.equal(capsCalls, 1, '并发 open 必须复用在途 capabilities 请求，不得发出多次');
+    assert.equal(actionsCalls, 1, '并发 open 必须复用在途 actions 请求，不得发出多次');
+  } finally {
+    handoff.dispose();
+  }
+});
+
+test('[Round3-C] flush or getSavedSnapshot failure does not block reading history, and history focus works with 0 flush and 0 snapshot reads (I4)', async () => {
+  let flushCalls = 0;
+  let snapshotCalls = 0;
+  let focusCalledWith = [];
+  let postCalls = 0;
+  let prepareCalls = 0;
+  const historyAction = makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'sess-history-ready-888' });
+
+  const deps = makeControllerDeps({
+    onRequest: (path, init) => {
+      if (init?.method === 'POST') postCalls++;
+      if (path === '/api/handoff/actions') {
+        return response({ ok: true, actions: [historyAction] });
+      }
+      if (path === '/api/handoff/prepare') {
+        prepareCalls++;
+      }
+      return undefined;
+    },
+    focus: async ({ sessionId }) => {
+      focusCalledWith.push(sessionId);
+    },
+  });
+
+  // 故意使 flush 与 getSavedSnapshot 抛错（模拟只读/脏画布/未就绪）
+  deps.sessionController.flush = async () => {
+    flushCalls++;
+    throw new Error('CANNOT_FLUSH_DIRTY_CANVAS');
+  };
+  deps.sessionController.getSavedSnapshot = () => {
+    snapshotCalls++;
+    throw new Error('SNAPSHOT_DESERIALIZATION_FAILED');
+  };
+
+  const { handoff } = await openController(deps);
+  try {
+    const getDialog = () => deps.documentRef.body.querySelector('.handoff-dialog');
+
+    // 历史路径必须成功打开，展示 focus 按钮
+    const focusBtn = getDialog().querySelector('.btn-handoff-focus');
+    assert.ok(focusBtn, '存在历史就绪会话时必须展示打开按钮');
+    assert.equal(focusBtn.style.display, 'inline-block', '打开按钮必须可见');
+
+    // 历史读取路径不得调用 flush 或 getSavedSnapshot
+    assert.equal(flushCalls, 0, '只读历史查看路径不得调用 flush');
+    assert.equal(snapshotCalls, 0, '只读历史查看路径不得强制读取/校验最新 savedSnapshot');
+
+    // 点击 focus 能够正常聚焦已有历史会话
+    focusBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(focusCalledWith, ['sess-history-ready-888'], '必须聚焦历史会话');
+    assert.equal(postCalls, 0, '只读历史查看与聚焦不得发出 POST 请求');
+
+    // 正反对照：点击【新建预览】时，由于无法保存，必须被安全阻断，不得发出 prepare POST
+    const newPreviewBtn = getDialog().querySelector('.btn-handoff-new-preview');
+    assert.ok(newPreviewBtn, '必须存在新建预览按钮');
+    newPreviewBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    assert.equal(prepareCalls, 0, 'flush 失败时不得发出 prepare POST');
+    const currentDialog = getDialog();
+    const errorEl = currentDialog.querySelector('.handoff-error');
+    assert.ok(errorEl && errorEl.textContent.includes('保存失败'), '新建预览必须展示标准的保存失败阶段提示');
+  } finally {
+    handoff.dispose();
+  }
+});
+
+test('[Round3-D] opening with existing history then editing canvas ensures new-preview captures fresh snapshot and revision (I4)', async () => {
+  let capturedPrepareDto = null;
+  const historyAction = makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'sess-old-rev' });
+
+  // 初始快照为 revision 1
+  let currentRevision = 1;
+  let currentCardText = '版本1卡片助手正文';
+
+  const deps = makeControllerDeps({
+    onRequest: (path, init) => {
+      if (path === '/api/handoff/actions') {
+        return response({ ok: true, actions: [historyAction] });
+      }
+      if (path === '/api/handoff/prepare') {
+        capturedPrepareDto = JSON.parse(init.body);
+        return response({ ok: true, action: makeAction({ actionId: ACTION_B, state: 'prepared' }) });
+      }
+      return undefined;
+    },
+  });
+
+  deps.sessionController.getSavedSnapshot = () => ({
+    id: 'canvas-1',
+    revision: currentRevision,
+    snapshot: {
+      cards: [
+        { id: 'target', parentId: null, title: '目标节点', messages: [{ role: 'assistant', text: currentCardText }] },
+      ],
+      agent: { id: 'a1', name: 'Agent 1' },
+    },
+  });
+
+  const { handoff } = await openController(deps);
+  try {
+    const getDialog = () => deps.documentRef.body.querySelector('.handoff-dialog');
+
+    // 处于历史模式。此时外部保存更新为 revision 2，正文改变
+    currentRevision = 2;
+    currentCardText = '版本2卡片更新正文_FRESH';
+
+    // 点击【新建预览】
+    const newPreviewBtn = getDialog().querySelector('.btn-handoff-new-preview');
+    assert.ok(newPreviewBtn, '必须提供新建预览按钮');
+    newPreviewBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    // 点击准备交接
+    const currentDialog = getDialog();
+    const prepareBtn = currentDialog.querySelector('.btn-handoff-prepare');
+    assert.ok(prepareBtn, '必须存在准备交接按钮');
+    prepareBtn.dispatchEvent({ type: 'click' });
+    await waitForPrepare(currentDialog);
+
+    // 必须向服务端 POST 真实最新 revision 2 与最新正文
+    assert.ok(capturedPrepareDto, '必须发出 prepare POST 请求');
+    assert.equal(capturedPrepareDto.source.revision, '2', '新建预览必须重新捕获最新快照 revision 2，不得沿用 open 时快照');
+
+    const transcript = formatHandoffTranscript(capturedPrepareDto);
+    assert.ok(transcript.includes('版本2卡片更新正文_FRESH'), '权威转录正文必须包含最新保存正文');
+
+    const renderedTranscript = getDialog().querySelector('.handoff-transcript-preview')?.textContent || '';
+    assert.ok(renderedTranscript.includes('版本2卡片更新正文_FRESH'), '预览区域必须展示最新正文内容');
+  } finally {
+    handoff.dispose();
+  }
+});
+
+test('[Round3-E] actions GET 500 displays retry button, retrying executes GET-only with 0 flush/POST and single-flight guard (I4)', async () => {
+  let actionsCalls = 0;
+  let flushCalls = 0;
+  let postCalls = 0;
+  let retryDeferred = null;
+
+  const deps = makeControllerDeps({
+    onRequest: (path, init) => {
+      if (path === '/api/handoff/actions') {
+        actionsCalls++;
+        if (actionsCalls === 1) {
+          // 第一次 GET 失败 500
+          return response({ ok: false, error: 'DATABASE_TIMEOUT' }, 500);
+        }
+        if (retryDeferred) {
+          return retryDeferred.promise;
+        }
+        return response({
+          ok: true,
+          actions: [makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'sess-after-retry' })],
+        });
+      }
+      if (init.method === 'POST') {
+        postCalls++;
+      }
+      return undefined;
+    },
+  });
+
+  const originalFlush = deps.sessionController.flush;
+  deps.sessionController.flush = async (...args) => {
+    flushCalls++;
+    return originalFlush?.apply(deps.sessionController, args);
+  };
+
+  const { handoff } = await openController(deps);
+  try {
+    const getDialog = () => deps.documentRef.body.querySelector('.handoff-dialog');
+    assert.equal(actionsCalls, 1, '首次 open 发出 1 次 actions GET');
+
+    // 寻找可见的重试按钮（可使用 recover 按钮或独立 retry 按钮）
+    const retryBtn = getDialog().querySelector('.btn-handoff-recover')
+      || getDialog().querySelector('.btn-handoff-retry');
+    assert.ok(retryBtn, '历史查询失败时必须存在可点击的重试按钮');
+    assert.equal(retryBtn.style.display, 'inline-block', '重试按钮必须可见');
+
+    // 设置第二次重试为 deferred，以验证重试中的并发单飞
+    retryDeferred = deferred();
+
+    // 点击重试
+    retryBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+    assert.equal(actionsCalls, 2, '点击重试必须发出第 2 次 actions GET');
+
+    // 正在重试中，再次点击，不得产生第 3 次 GET
+    retryBtn.dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+    assert.equal(actionsCalls, 2, '重试进行中重复点击必须单飞，不得并发请求');
+
+    // 放行重试响应
+    retryDeferred.resolve(response({
+      ok: true,
+      actions: [makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'sess-after-retry' })],
+    }));
+    await new Promise(r => setImmediate(r));
+
+    // 重试成功后，应进入 action A 的就绪态并能点击 focus
+    const focusBtn = getDialog().querySelector('.btn-handoff-focus');
+    assert.ok(focusBtn && focusBtn.style.display === 'inline-block', '重试获取到 ready 动作后必须展示打开按钮');
+
+    // 验证整个过程 0 flush 与 0 POST
+    assert.equal(flushCalls, 0, '只读历史重试全流程不得调用 flush');
+    assert.equal(postCalls, 0, '只读历史重试全流程不得发出 POST 请求');
+  } finally {
+    handoff.dispose();
+  }
+});
+
+test('[Round3-F] multiple history actions for same target are selectable, and switching actions isolates query responses (I4/C3)', async () => {
+  const queryADeferred = deferred();
+  const action1 = makeAction({
+    actionId: ACTION_A,
+    state: 'creating',
+    agentId: 'agent-alpha',
+    sessionId: null,
+    source: { canvasId: 'canvas-1', revision: 1, targetCardId: 'target' },
+  });
+  const action2 = makeAction({
+    actionId: ACTION_B,
+    state: 'ready',
+    agentId: 'agent-beta',
+    sessionId: 'sess-B-chosen',
+    source: { canvasId: 'canvas-1', revision: 2, targetCardId: 'target' },
+  });
+
+  let focusCalledWith = [];
+  const deps = makeControllerDeps({
+    onRequest: (path) => {
+      if (path === '/api/handoff/actions') {
+        return response({ ok: true, actions: [action1, action2] });
+      }
+      if (path === `/api/handoff/actions/${ACTION_A}`) {
+        return queryADeferred.promise;
+      }
+      return undefined;
+    },
+    focus: async ({ sessionId }) => {
+      focusCalledWith.push(sessionId);
+    },
+  });
+
+  const { handoff } = await openController(deps);
+  try {
+    const getDialog = () => deps.documentRef.body.querySelector('.handoff-dialog');
+
+    // 必须有历史动作切换控件（如 select 或选择容器）
+    const historySelect = getDialog().querySelector('.handoff-history-select')
+      || getDialog().querySelector('.handoff-action-select');
+    assert.ok(historySelect, '多条匹配历史动作时必须提供历史选择器');
+
+    const options = historySelect.querySelectorAll('option');
+    assert.equal(options.length, 2, '历史选择器必须包含全部两条匹配动作');
+
+    // 默认选择或显式选择 action1 (A)
+    historySelect.value = ACTION_A;
+    historySelect.dispatchEvent({ type: 'change' });
+    await new Promise(r => setImmediate(r));
+
+    // 点击 A 的恢复查询，请求在途挂起
+    const recoverBtn = getDialog().querySelector('.btn-handoff-recover');
+    assert.ok(recoverBtn, 'creating 状态必须可点击查询');
+    recoverBtn.dispatchEvent({ type: 'click' });
+
+    // 用户切换至 action2 (B)
+    historySelect.value = ACTION_B;
+    historySelect.dispatchEvent({ type: 'change' });
+    await new Promise(r => setImmediate(r));
+
+    // B 是 ready 状态，focus 按钮必须可见
+    const focusBtn = getDialog().querySelector('.btn-handoff-focus');
+    assert.ok(focusBtn && focusBtn.style.display === 'inline-block', '切换到 ready 状态的 B 后必须展示打开按钮');
+
+    // 此时放行 A 的迟到 query 响应
+    queryADeferred.resolve(response({
+      ok: true,
+      action: makeAction({ actionId: ACTION_A, state: 'ready', sessionId: 'sess-A-late' }),
+    }));
+    await new Promise(r => setImmediate(r));
+
+    // 点击 focus，必须打开 B 的会话 'sess-B-chosen'，不得被 A 的迟到响应覆盖
+    getDialog().querySelector('.btn-handoff-focus').dispatchEvent({ type: 'click' });
+    await new Promise(r => setImmediate(r));
+
+    assert.deepEqual(focusCalledWith, ['sess-B-chosen'], '点击打开必须聚焦当前选中的动作 B 会话，不得受 A 的迟到响应污染');
+  } finally {
+    handoff.dispose();
+  }
+});
+
 
