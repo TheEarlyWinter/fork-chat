@@ -189,7 +189,7 @@ fork-chat/
 3. 安装完成后，在应用导航栏点击 **「分叉对话」**。如仍显示旧版，使用 App 的正式重载入口；
 4. 在 Hana 中配置好模型后即可对话，无需自行安装 Node、npm 或项目依赖。该 ZIP 是 Hana App，不是独立桌面程序。
 
-宿主版本须满足 `manifest.json` 的 `minAppVersion`（当前 `0.1050.9`），建议使用 **HanaAgent 1.1.111-beta 或更新的兼容版本**。可选云端 OCR 需另配 MinerU；当前原生解析助手存在 `ERR_ACCESS_DENIED` 已知问题，不作为本版已修复功能承诺。
+宿主版本须满足 `manifest.json` 的 `minAppVersion`（当前 `1.1.111-beta`），建议使用 **HanaAgent 1.1.111-beta 或更新的兼容版本**。可选云端 OCR 需另配 MinerU；当前原生解析助手存在 `ERR_ACCESS_DENIED` 已知问题，不作为本版已修复功能承诺。
 
 Release 同时提供 `SHA256SUMS`（完整性校验）、`.entry.json`（市场元数据）及 `build-info.json`（构建来源）。普通用户只需安装 ZIP。
 
@@ -197,6 +197,19 @@ Release 同时提供 `SHA256SUMS`（完整性校验）、`.entry.json`（市场�
 
 - **Custom 文本导入而非原生历史**：受限于宿主扩展能力边界，分支交接在新会话中以单条结构化 custom 消息呈现推导路径与下一步要求，并以 `handoff.md` 和产物附件形式交付完整上下文，而非以原生多轮对话消息逐条伪造注入历史。
 - **手动授权入口与宿主全链路实机验收尚未完成**：`app/sessions.home` 属于敏感高阶权限，需在支持该能力声明的宿主环境（>= 1.1.111-beta）中由用户明确授予；若宿主环境未开通该权限，交接准备阶段会给出明确阻断提示，绝不私自降级为应用私有会话。
+
+### 本地验证
+
+测试随仓库提供，不依赖任何 npm 包，只需 Node 24 或更新版本：
+
+```bash
+node --experimental-vm-modules --test tests/*.test.mjs
+```
+
+- `--experimental-vm-modules` 不能省。面板集成测试用 `vm.SourceTextModule` 加载 UI 模块，缺这个标志会整批失败并报 `vm.SourceTextModule is not a constructor`，看起来像测试坏了，实际是跑法不对。
+- 测试只使用 Node 内置模块与 `tests/fixtures`、`tests/helpers`，无需安装依赖。
+- CI 在推送 `main`、Pull Request 和标签构建时先跑全量测试，失败即不打包。
+- 安装包与 `git archive` 归档通过 `.gitattributes` 的 `export-ignore` 和打包脚本的排除表剔除测试，仓库本身保留完整基线。
 
 ### 自动构建与发布
 

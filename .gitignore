@@ -15,13 +15,17 @@ node_modules/
 .cache/
 dist/
 build/
+# 本地与 CI 打包产物副本（dist/、dist-ci/、dist-real-device/ 等），一律不入库
+/dist-*/
 # 第三方运行时依赖（lib/vendor）里也有 dist/，不能被上面的规则吃掉，
 # 否则仓库 clone 下来会缺核心代码、直接跑不起来。改这条规则前先想清楚。
 !lib/vendor/**/dist/
 !lib/vendor/**/dist/**
 
-# Internal development, documentation and test suites
-/tests/
+# Internal development notes
 /REPAIR-NOTES.md
-*.test.mjs
+
+# tests/ 与 *.test.mjs 必须入库。
+# 打包时由 scripts/release-package.mjs 的排除表与 .gitattributes export-ignore 剔除，
+# 不靠 git 忽略。改回忽略会同时让 clone 与 CI 失去回归基线。
 

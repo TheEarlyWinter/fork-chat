@@ -1,0 +1,11 @@
+# 安装包与 git archive 归档里只保留运行所需内容。
+# scripts/release-package.mjs 有自己的排除表；这里保证用 git archive 打出来的归档同样干净，
+# 也让“测试必须入库”这件事不依赖单一脚本的实现细节。
+/tests/**          export-ignore
+/docs/**           export-ignore
+/scripts/**        export-ignore
+/.github/**        export-ignore
+/.superpowers/**   export-ignore
+/REPAIR-NOTES.md   export-ignore
+/.gitignore        export-ignore
+/.gitattributes    export-ignore
