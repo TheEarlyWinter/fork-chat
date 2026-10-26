@@ -27,7 +27,10 @@ const RECEIPT = {
 
 const PDF_RECEIPT = {
   ...RECEIPT,
-  files: [{ fileId: 'sf_pdf_1', name: 'report.pdf', mime: 'application/pdf', kind: 'artifact' }],
+  files: [
+    { fileId: 'sf_pdf_1', name: 'report.pdf', mime: 'application/pdf', kind: 'artifact' },
+    { fileId: 'sf_pdf_2', name: 'appendix.pdf', mime: 'application/pdf', kind: 'artifact' },
+  ],
 };
 
 function fakeHana(context) {
@@ -132,10 +135,11 @@ test('a refused preview reports a fixed short error instead of looking opened', 
   };
   const recorder = requestRecorder(async () => response({ ok: true, receipt: PDF_RECEIPT }));
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
 
   documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
-  await waitFor(() => /无法打开|未打开|失败/.test(documentRef.body.querySelector('.handoff-receipt-status').textContent));
+  await waitFor(() => /无法打开|未打开|失败/.test(bodyText(documentRef)));
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-status').textContent, '', '文件错误只写文件状态行');
   card.dispose();
 });
 
@@ -152,7 +156,7 @@ test('a file failure from an old binding cannot overwrite the new card', async (
     return response({ ok: true, receipt: { ...RECEIPT, sessionId: SESSION_B, transcript: 'B 会话正文', files: [] } });
   });
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
 
   const staleButton = documentRef.body.querySelectorAll('.handoff-receipt-file')[0];
   staleButton.dispatchEvent({ type: 'click' });
@@ -164,6 +168,7 @@ test('a file failure from an old binding cannot overwrite the new card', async (
   await new Promise(resolve => setImmediate(resolve));
   const statusText = documentRef.body.querySelector('.handoff-receipt-status').textContent;
   assert.equal(statusText, '', '旧绑定的预览失败不得污染新卡状态');
+  assert.equal(documentRef.body.querySelector('.handoff-file-status').textContent, '', '旧绑定失败不得写文件状态行');
   assert.equal(documentRef.body.textContent.includes('/private/handoff/secret'), false);
 
   // 旧按钮回调不得在新的绑定下打开旧会话的文件
@@ -183,15 +188,17 @@ test('a preview failure after dispose is ignored', async () => {
   };
   const recorder = requestRecorder(async () => response({ ok: true, receipt: PDF_RECEIPT }));
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
 
   documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
   await waitFor(() => hana.resourceCalls.length === 1);
   const status = documentRef.body.querySelector('.handoff-receipt-status');
+  const fileStatus = documentRef.body.querySelector('.handoff-file-status');
   card.dispose();
   preview.reject(new Error('EACCES'));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(status.textContent, '', 'dispose 后的失败不得改写已卸载的状态栏');
+  assert.equal(fileStatus.textContent, '');
   assert.equal(documentRef.body.children.length, 0);
 });
 
@@ -303,6 +310,80 @@ async function openFirstFile(documentRef) {
   button.dispatchEvent({ type: 'click' });
   return button;
 }
+
+function fileButton(documentRef, fileId) {
+  return documentRef.body.querySelectorAll('.handoff-receipt-file')
+    .find(button => button.getAttribute('data-file-id') === fileId);
+}
+
+function previewShown(documentRef) {
+  return documentRef.body.querySelector('.handoff-file-preview')?.style.display === 'block';
+}
+
+test('closing the preview discards a pending file request without killing the binding', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const gates = { sf_report_1: deferred(), sf_archive_1: deferred() };
+  gates.sf_report_1.resolve();
+  const recorder = previewRecorder({
+    previewHttp: fileId => gates[fileId].promise.then(() => response({
+      ok: true,
+      preview: previewOf(fileId, { name: fileId === 'sf_report_1' ? '报告.md' : 'handoff.md', text: `${fileId} 正文` }),
+    })),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  fileButton(documentRef, 'sf_report_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => previewShown(documentRef));
+
+  // 文件 2 挂起时关闭旧预览
+  fileButton(documentRef, 'sf_archive_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => recorder.calls.length === 3);
+  documentRef.body.querySelector('.handoff-file-preview-close').dispatchEvent({ type: 'click' });
+  assert.equal(previewShown(documentRef), false);
+  assert.equal(fileButton(documentRef, 'sf_archive_1').disabled, false, '关闭后必须恢复按钮');
+
+  gates.sf_archive_1.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(previewShown(documentRef), false, '关闭后迟到的文件 2 不得重新打开预览');
+  assert.equal(documentRef.body.textContent.includes('sf_archive_1 正文'), false);
+
+  // 同一绑定下仍可正常再次打开（不得因为关闭而使按钮永久失效）
+  fileButton(documentRef, 'sf_archive_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => previewShown(documentRef));
+  assert.equal(documentRef.body.querySelector('.handoff-file-preview-name').textContent, 'handoff.md');
+  assert.equal(documentRef.body.querySelector('.handoff-file-preview-text').textContent, 'sf_archive_1 正文');
+  card.dispose();
+});
+
+test('a late file failure after closing the preview cannot write status or re-open it', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const pending = deferred();
+  const recorder = previewRecorder({
+    previewHttp: fileId => (fileId === 'sf_report_1'
+      ? Promise.resolve(response({ ok: true, preview: previewOf(fileId) }))
+      : pending.promise.then(() => response({ ok: false, code: 'HANDOFF_FILE_UNAVAILABLE', error: '文件暂时无法预览' }, 409))),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  fileButton(documentRef, 'sf_report_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => previewShown(documentRef));
+  fileButton(documentRef, 'sf_archive_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => recorder.calls.length === 3);
+
+  documentRef.body.querySelector('.handoff-file-preview-close').dispatchEvent({ type: 'click' });
+  pending.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(previewShown(documentRef), false);
+  assert.equal(documentRef.body.querySelector('.handoff-file-status').textContent, '', '关闭后的迟到错误不得写状态');
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-status').textContent, '', '不得污染主收据状态');
+  assert.match(documentRef.body.querySelector('.handoff-receipt-transcript').textContent, /交接正文/);
+  card.dispose();
+});
 
 test('a markdown file opens in-card from the preview route while the host file registry stays untouched', async () => {
   const documentRef = createFakeDocument();
@@ -443,6 +524,76 @@ test('closing the preview and disposing invalidate pending file responses', asyn
   gate.resolve();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(documentRef.body.children.length, 0);
+});
+
+test('native files share the single-request gate and report failures only in the file status line', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const gate = deferred();
+  hana.resources.open = input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return gate.promise;
+  };
+  const recorder = previewRecorder({ receipt: PDF_RECEIPT });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  fileButton(documentRef, 'sf_pdf_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => hana.resourceCalls.length === 1);
+  assert.equal(fileButton(documentRef, 'sf_pdf_2').disabled, true, 'Native 请求也必须禁用其它文件按钮');
+  fileButton(documentRef, 'sf_pdf_2').dispatchEvent({ type: 'click' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(hana.resourceCalls.length, 1, '一次只允许一个文件请求');
+  assert.equal(recorder.calls.length, 1, 'Native 不得请求文本预览接口');
+
+  // 宿主没打开：只写文件状态行，不动主收据状态
+  gate.resolve({ opened: false });
+  await waitFor(() => /无法打开/.test(documentRef.body.querySelector('.handoff-file-status').textContent));
+  assert.match(documentRef.body.querySelector('.handoff-file-status').textContent, /HANDOFF_FILE_UNAVAILABLE/);
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-status').textContent, '', '文件错误不得写主收据状态');
+  assert.equal(fileButton(documentRef, 'sf_pdf_1').disabled, false, '结束（失败）后释放按钮');
+
+  // 释放后可以再试；新调用成功就不留旧错误
+  hana.resources.open = async input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return { opened: true };
+  };
+  fileButton(documentRef, 'sf_pdf_2').dispatchEvent({ type: 'click' });
+  await waitFor(() => fileButton(documentRef, 'sf_pdf_2').disabled === false);
+  assert.equal(documentRef.body.querySelector('.handoff-file-status').textContent, '');
+  assert.equal(hana.resourceCalls.length, 2);
+  card.dispose();
+});
+
+test('a stale native failure after a newer request cannot overwrite the current file status', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const first = deferred();
+  hana.resources.open = input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return first.promise;
+  };
+  const recorder = previewRecorder({
+    receipts: {
+      [SESSION_A]: PDF_RECEIPT,
+      [SESSION_B]: { ...PDF_RECEIPT, sessionId: SESSION_B, transcript: 'B 会话正文', files: [] },
+    },
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  fileButton(documentRef, 'sf_pdf_1').dispatchEvent({ type: 'click' });
+  await waitFor(() => hana.resourceCalls.length === 1);
+
+  // 旧绑定的 Native 失败不得写新卡状态
+  hana.emit({ slot: 'card', embeddedSessionId: SESSION_B });
+  await waitFor(() => documentRef.body.textContent.includes('B 会话正文'));
+  first.reject(new Error('EACCES /home/private/handoff.pdf'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(documentRef.body.querySelector('.handoff-file-status').textContent, '', '旧绑定失败不得写新卡的文件状态');
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-status').textContent, '');
+  assert.equal(documentRef.body.textContent.includes('/home/private'), false);
+  card.dispose();
 });
 
 // ---------------------------------------------------------------------------

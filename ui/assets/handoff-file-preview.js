@@ -29,7 +29,7 @@ function createEl(documentRef, tag, className, textValue) {
   return el;
 }
 
-export function createFilePreviewView({ documentRef } = {}) {
+export function createFilePreviewView({ documentRef, onUserClose } = {}) {
   if (!documentRef || typeof documentRef.createElement !== 'function') {
     throw new TypeError('createFilePreviewView 需要 document');
   }
@@ -110,6 +110,14 @@ export function createFilePreviewView({ documentRef } = {}) {
   closeButton.addEventListener('click', () => {
     if (disposed) return;
     close();
+    // 用户主动关闭是缩略图生命周期的一部分：交回调用方，让它合并中的请求失效
+    if (typeof onUserClose === 'function') {
+      try {
+        onUserClose();
+      } catch {
+        // 关闭回调失败只影响调用方状态，不阻断关闭本身
+      }
+    }
   });
 
   function dispose() {

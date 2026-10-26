@@ -52,14 +52,17 @@ function fakeResources(files) {
         error.status = 404;
         throw error;
       }
-      return {
+      const base = {
         resourceKey: `session-file:${ref.fileId}`,
-        resource: resourceOf(ref, entry.name),
+        resource: entry.statResource ? entry.statResource(ref) : resourceOf(ref, entry.name),
         exists: entry.exists !== false,
         isDirectory: entry.isDirectory === true,
         version: { mtimeMs: 1700000000000, size: entry.statSize ?? entry.bytes.length },
         filePath: '/home/somebody/.hanako/session-files/payload/file',
       };
+      // 可选：整体改写 stat 回执，用于验证元数据不完整时 fail closed
+      if (typeof entry.stat === 'function') return entry.stat(base);
+      return base;
     },
     async read(ref) {
       calls.read.push(ref);
@@ -234,19 +237,16 @@ test('stat decides existence, file kind and the 2 MiB limit before read', async 
 });
 
 test('a stat resource whose identity does not echo the request is refused', async () => {
-  const overrides = [
-    filesFixture({ [MD_ID]: { name: '报告.md', mime: 'text/markdown' } }),
-  ];
-  const { reader, resources } = makeReader({ files: overrides[0] });
   // 让 stat 回显别的会话/别的 kind：生产 _he 会原样回显输入，这里模拟被替换的资源
-  const originalStat = resources.stat;
-  resources.stat = async ref => {
+  const mismatched = makeReader();
+  const originalStat = mismatched.resources.stat;
+  mismatched.resources.stat = async ref => {
     const result = await originalStat(ref);
     return { ...result, resource: { ...result.resource, sessionId: 'sess_other' } };
   };
-  const error = await errorOf(reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID }));
+  const error = await errorOf(mismatched.reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID }));
   assert.equal(error.code, HANDOFF_FILE_PREVIEW_CODES.UNAVAILABLE);
-  assert.equal(resources.calls.read.length, 0);
+  assert.equal(mismatched.resources.calls.read.length, 0);
 
   const kindMismatch = makeReader();
   const stat = kindMismatch.resources.stat;
@@ -256,6 +256,56 @@ test('a stat resource whose identity does not echo the request is refused', asyn
   };
   const kindError = await errorOf(kindMismatch.reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID }));
   assert.equal(kindError.code, HANDOFF_FILE_PREVIEW_CODES.UNAVAILABLE);
+});
+
+test('incomplete or malformed stat metadata fails closed before any read', async () => {
+  const variants = [
+    ['missing isDirectory', base => {
+      const { isDirectory, ...rest } = base;
+      return rest;
+    }],
+    ['null isDirectory', base => ({ ...base, isDirectory: null })],
+    ['string isDirectory', base => ({ ...base, isDirectory: 'false' })],
+    ['missing version', base => {
+      const { version, ...rest } = base;
+      return rest;
+    }],
+    ['null version', base => ({ ...base, version: null })],
+    ['missing size', base => ({ ...base, version: { mtimeMs: base.version.mtimeMs } })],
+    ['negative size', base => ({ ...base, version: { ...base.version, size: -1 } })],
+    ['fractional size', base => ({ ...base, version: { ...base.version, size: 1.5 } })],
+    ['NaN size', base => ({ ...base, version: { ...base.version, size: Number.NaN } })],
+    ['string size', base => ({ ...base, version: { ...base.version, size: '12' } })],
+    ['missing exists', base => {
+      const { exists, ...rest } = base;
+      return rest;
+    }],
+    ['string exists', base => ({ ...base, exists: 'true' })],
+    ['missing filePath-free result', () => null],
+  ];
+  for (const [label, transform] of variants) {
+    const { reader, resources } = makeReader({
+      files: filesFixture({ [MD_ID]: { name: '报告.md', mime: 'text/markdown', stat: transform } }),
+    });
+    const error = await errorOf(reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID }));
+    assert.equal(error?.code, HANDOFF_FILE_PREVIEW_CODES.UNAVAILABLE, `${label} 必须 fail closed`);
+    assert.equal(resources.calls.read.length, 0, `${label} 不得继续 read`);
+  }
+});
+
+test('a stat size exactly at the limit is accepted and one byte more is too large', async () => {
+  const atLimit = makeReader({
+    files: filesFixture({ [MD_ID]: { name: '报告.md', mime: 'text/markdown', statSize: HANDOFF_FILE_PREVIEW_LIMITS.maxFileBytes } }),
+  });
+  const preview = await atLimit.reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID });
+  assert.equal(preview.fileId, MD_ID);
+
+  const over = makeReader({
+    files: filesFixture({ [MD_ID]: { name: '报告.md', mime: 'text/markdown', statSize: HANDOFF_FILE_PREVIEW_LIMITS.maxFileBytes + 1 } }),
+  });
+  const tooLarge = await errorOf(over.reader.read({ owner: OWNER, sessionId: SESSION, fileId: MD_ID }));
+  assert.equal(tooLarge.code, HANDOFF_FILE_PREVIEW_CODES.TOO_LARGE);
+  assert.equal(over.resources.calls.read.length, 0);
 });
 
 test('read content is re-checked for byte size, type and identity', async () => {
