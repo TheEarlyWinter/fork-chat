@@ -41,3 +41,22 @@ test('复用判定：相同签名的卡可复用 DOM，不同签名必须重建'
   assert.equal(canReuseCardElement(card, sig, { __boundCard: card, __contentSignature: 'other' }), false, '签名变化必须重建');
   assert.equal(canReuseCardElement(card, sig, null), false);
 });
+
+test('签名：isReady false->true / true->false 签名必须不同；同状态/坐标变签名不变', () => {
+  const card = { id: 'c1', messages: [{ role: 'user', text: 'hi' }] };
+  const agent = { id: 'a1', name: 'Agent 1' };
+
+  const sigLocked = cardContentSignature(card, { agent, isReady: false });
+  const sigReady = cardContentSignature(card, { agent, isReady: true });
+  const sigDefault = cardContentSignature(card, { agent }); // 默认省略 context.isReady，遵循 buildCardHtml 默认 ready=true
+
+  assert.notEqual(sigLocked, sigReady, 'isReady 从 false 到 true 签名必须不同');
+  assert.equal(sigReady, sigDefault, '省略 isReady 时应默认为 ready 签名');
+
+  // 同状态下，坐标/滚动改变签名不变
+  const sigReadyMoved = cardContentSignature({ ...card, x: 100, y: 200, savedScrollTop: 50 }, { agent, isReady: true });
+  assert.equal(sigReady, sigReadyMoved, '同 ready 状态下卡片坐标变动签名不变');
+
+  const sigLockedMoved = cardContentSignature({ ...card, x: 100, y: 200, savedScrollTop: 50 }, { agent, isReady: false });
+  assert.equal(sigLocked, sigLockedMoved, '同 locked 状态下卡片坐标变动签名不变');
+});

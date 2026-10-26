@@ -92,6 +92,16 @@ export function createAgentListController(deps) {
   let models = [];
   let loadError = '';
   let activeAgentId = storage?.getItem?.('fork_chat_active_agent_id') || 'hakimi';
+  let boundSelectionId = null;
+  let pendingInitialSync = false;
+
+  function setStorageIfChanged(key, value) {
+    if (!storage || !key) return;
+    const strVal = String(value);
+    if (storage.getItem?.(key) !== strVal) {
+      storage.setItem?.(key, strVal);
+    }
+  }
 
   function getAgentReasoningEffort(agentId) {
     if (!agentId) return 'default';
@@ -222,14 +232,15 @@ export function createAgentListController(deps) {
       }
 
       card.addEventListener('click', () => {
+        boundSelectionId = a.id;
         activeAgentId = a.id;
-        storage?.setItem?.('fork_chat_active_agent_id', a.id);
-        storage?.setItem?.('fork_chat_active_agent_name', a.name || a.id);
-        storage?.setItem?.('fork_chat_active_agent_model', a.model || '');
-        storage?.setItem?.('fork_chat_active_agent_provider', a.provider || '');
+        setStorageIfChanged('fork_chat_active_agent_id', a.id);
+        setStorageIfChanged('fork_chat_active_agent_name', a.name || a.id);
+        setStorageIfChanged('fork_chat_active_agent_model', a.model || '');
+        setStorageIfChanged('fork_chat_active_agent_provider', a.provider || '');
 
         const agentEffort = getAgentReasoningEffort(a.id);
-        storage?.setItem?.('fork_chat_reasoning_effort', agentEffort);
+        setStorageIfChanged('fork_chat_reasoning_effort', agentEffort);
 
         const targetCanvasId = getBoundCanvasId ? getBoundCanvasId() : undefined;
 
@@ -285,33 +296,41 @@ export function createAgentListController(deps) {
       return;
     }
 
+    // 确定当前应该激活的 Agent：
+    // 若已有明确绑定的选择（来自用户手动选择或会话恢复），优先保持 boundSelectionId；
+    // 否则回退读取 storage 中的全局默认 storedAgentId 或当前的 activeAgentId
     const storedAgentId = storage?.getItem?.('fork_chat_active_agent_id');
-    const targetId = storedAgentId || activeAgentId;
+    const targetId = boundSelectionId || storedAgentId || activeAgentId;
+
     const current = agents.find(a => a.id === targetId) || agents[0];
 
     if (current) {
       activeAgentId = current.id;
-      storage?.setItem?.('fork_chat_active_agent_id', current.id);
-      storage?.setItem?.('fork_chat_active_agent_name', current.name || current.id);
-      storage?.setItem?.('fork_chat_active_agent_model', current.model || '');
-      storage?.setItem?.('fork_chat_active_agent_provider', current.provider || '');
+      boundSelectionId = current.id;
+      setStorageIfChanged('fork_chat_active_agent_id', current.id);
+      setStorageIfChanged('fork_chat_active_agent_name', current.name || current.id);
+      setStorageIfChanged('fork_chat_active_agent_model', current.model || '');
+      setStorageIfChanged('fork_chat_active_agent_provider', current.provider || '');
 
       const agentEffort = getAgentReasoningEffort(current.id);
-      storage?.setItem?.('fork_chat_reasoning_effort', agentEffort);
+      setStorageIfChanged('fork_chat_reasoning_effort', agentEffort);
 
       const targetCanvasId = getBoundCanvasId ? getBoundCanvasId() : undefined;
-      if (!targetCanvasId) {
+      if (targetCanvasId) {
+        pendingInitialSync = false;
         channel?.postMessage({
           type: 'AGENT_CHANGED',
           agent: current,
           reasoningEffort: agentEffort === 'default' ? null : agentEffort,
-          targetCanvasId: undefined,
+          targetCanvasId,
         });
         channel?.postMessage({
           type: 'REASONING_EFFORT_CHANGED',
           reasoningEffort: agentEffort === 'default' ? null : agentEffort,
-          targetCanvasId: undefined,
+          targetCanvasId,
         });
+      } else {
+        pendingInitialSync = true;
       }
     }
 
@@ -320,17 +339,59 @@ export function createAgentListController(deps) {
 
   function restoreAgent(agentData) {
     if (!agentData || !agentData.id) return;
-    const restoredId = agentData.id;
-    if (agentData.reasoningEffort !== undefined) {
+    let candidateId = agentData.id;
+    let candidateAgent = null;
+
+    if (agents.length > 0) {
+      candidateAgent = agents.find(a => a.id === candidateId);
+      if (!candidateAgent) {
+        candidateAgent = agents[0];
+        candidateId = candidateAgent.id;
+      }
+    }
+
+    const restoredId = candidateId;
+    // 只有当恢复的是同一个 Agent ID 时，才应用该快照中记录的 reasoningEffort；
+    // 若已降级回退到别的 Agent，必须保留目标 Agent 原有设置，不能被已删除 Agent 覆盖
+    if (candidateId === agentData.id && agentData.reasoningEffort !== undefined) {
       setAgentReasoningEffort(restoredId, agentData.reasoningEffort || 'default');
     }
-    if (restoredId !== activeAgentId) {
-      activeAgentId = restoredId;
-      storage?.setItem?.('fork_chat_active_agent_id', restoredId);
-      if (agentData.name) storage?.setItem?.('fork_chat_active_agent_name', agentData.name);
-      if (agentData.model) storage?.setItem?.('fork_chat_active_agent_model', agentData.model);
-      if (agentData.provider) storage?.setItem?.('fork_chat_active_agent_provider', agentData.provider);
+
+    const isInvalidCorrection = Boolean(agents.length > 0 && candidateId !== agentData.id);
+
+    activeAgentId = restoredId;
+    boundSelectionId = restoredId;
+    setStorageIfChanged('fork_chat_active_agent_id', restoredId);
+
+    // 字段更新：已存在 candidateAgent 时使用其实际元数据（缺失则写空串清理残留）；
+    // 仅在真实列表未就绪时沿用原快照元数据
+    if (candidateAgent) {
+      setStorageIfChanged('fork_chat_active_agent_name', candidateAgent.name || candidateAgent.id);
+      setStorageIfChanged('fork_chat_active_agent_model', candidateAgent.model || '');
+      setStorageIfChanged('fork_chat_active_agent_provider', candidateAgent.provider || '');
+    } else {
+      if (agentData.name) setStorageIfChanged('fork_chat_active_agent_name', agentData.name);
+      if (agentData.model) setStorageIfChanged('fork_chat_active_agent_model', agentData.model);
+      if (agentData.provider) setStorageIfChanged('fork_chat_active_agent_provider', agentData.provider);
     }
+
+    const targetCanvasId = getBoundCanvasId ? getBoundCanvasId() : undefined;
+    if (targetCanvasId && candidateAgent && (isInvalidCorrection || pendingInitialSync)) {
+      pendingInitialSync = false;
+      const effort = getAgentReasoningEffort(candidateAgent.id);
+      channel?.postMessage({
+        type: 'AGENT_CHANGED',
+        agent: candidateAgent,
+        reasoningEffort: effort === 'default' ? null : effort,
+        targetCanvasId,
+      });
+      channel?.postMessage({
+        type: 'REASONING_EFFORT_CHANGED',
+        reasoningEffort: effort === 'default' ? null : effort,
+        targetCanvasId,
+      });
+    }
+
     renderAgentList();
   }
 

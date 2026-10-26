@@ -178,7 +178,10 @@ export function createRenderer(deps) {
     // 全部可见卡签名未变 → 走轻量轨道：不 drain 不清场，只挪位/调选中态（流式高频路径）。
     // 任何一张卡需要重建 → 整体走重建轨道（drain+清场），复用元素重新摘挂。
     // 两条轨道互斥：轻量轨道保持全部事件绑定存活，重建轨道靠重绑恢复。
-    const renderContext = { agent: getCurrentAgent() };
+    const currentAgent = getCurrentAgent();
+    const sessionState = getSession()?.state;
+    const isReady = Boolean(sessionState?.ready) && !sessionState?.busy;
+    const renderContext = { agent: currentAgent, isReady };
     const reusable = new Map(); // cardId -> element
     for (const card of cards) {
       const body = doc.getElementById(`body-${card.id}`);
@@ -228,9 +231,6 @@ export function createRenderer(deps) {
     drain(getCardCleanups());
     cardsLayer.innerHTML = '';
 
-    const currentAgent = getCurrentAgent();
-    const session = getSession();
-
     // 重建轨道：保守契约 —— 结构不完整或任何签名变化就整体重建，不做部分复用。
     // （部分复用会让「不完整必须 full fallback」的语义失效，也把事件绑定生命周期搞复杂。）
     visibleCards.forEach(card => {
@@ -269,7 +269,7 @@ export function createRenderer(deps) {
         messageMarkup,
         statusText,
         formatFileSize,
-        isReady: Boolean(session?.state.ready) && !session.state.busy,
+        isReady,
       });
 
       bindCardEvents(cardEl, card);

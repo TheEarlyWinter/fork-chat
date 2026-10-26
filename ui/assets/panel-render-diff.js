@@ -47,9 +47,11 @@ export function cardContentSignature(card, renderContext = null) {
   const messages = Array.isArray(card.messages)
     ? card.messages.map(messageSignature).join('||')
     : 'no-messages';
-  // 外部渲染输入：当前助手名/模型影响未发消息卡的回退展示，变化必须 invalidate
+  // 外部渲染输入：当前助手名/模型影响未发消息卡的回退展示，变化必须 invalidate；
+  // 会话就绪状态 isReady 同样决定输入与操作禁用属性，相位变化必须 invalidate
   const agent = renderContext?.agent ? `${renderContext.agent.id || ''}:${renderContext.agent.name || ''}:${renderContext.agent.model || ''}` : 'no-agent';
-  return `${fields}#${collections}#${selection}#${agent}#${messages.length}:${messages}`;
+  const isReady = renderContext?.isReady !== undefined ? Boolean(renderContext.isReady) : true;
+  return `${fields}#${collections}#${selection}#${agent}#${isReady ? 'ready' : 'locked'}#${messages.length}:${messages}`;
 }
 
 export function canReuseCardElement(card, signature, element) {

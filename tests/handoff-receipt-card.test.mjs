@@ -621,6 +621,6 @@ test('the manifest maps branch-handoff to a declared card whose route page exist
   assert.ok(capabilities.includes('app/resources.write'));
   assert.equal(capabilities.length, 13, '只新增预览必需的只读资源能力');
 
-  assert.equal(manifest.version, '2.5.1');
+  assert.equal(manifest.version, '2.5.2');
   assert.equal(manifest.minAppVersion, '1.2.1-beta');
 });

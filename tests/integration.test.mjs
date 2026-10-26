@@ -164,7 +164,16 @@ function uiEnvironment() {
     window: { innerWidth: 300, innerHeight: 800, addEventListener(type, handler) { windowEvents[type] = handler; }, removeEventListener() {} },
     BroadcastChannel: class {
       constructor(name) { this.name = name; this.listeners = []; channels.push(this); }
-      postMessage(message) { broadcasts.push(message); for (const listener of broadcastListeners) listener(message); }
+      postMessage(message) {
+        broadcasts.push(message);
+        for (const listener of broadcastListeners) listener(message);
+        for (const channel of channels) {
+          if (channel !== this && channel.name === this.name) {
+            channel.onmessage?.({ data: message });
+            for (const listener of channel.listeners) listener({ data: message });
+          }
+        }
+      }
       addEventListener(type, callback) { if (type === 'message') this.listeners.push(callback); }
     },
   };
@@ -265,9 +274,23 @@ test('function panel announces ready before first authenticated request', async 
   assert.ok(order.length >= 2, 'panel performs initial authenticated requests for agents and parser settings');
   assert.ok(order.slice(1).every(item => item === 'fetch'));
   assert.equal(ui.nodes.get('agent-count').textContent, '1');
-  const agents = ui.broadcasts.filter(message => message.type === 'AGENT_CHANGED');
-  assert.equal(agents.length, 1);
-  assert.equal(agents[0].agent.id, 'real');
+  // 未绑定画布前，不得产生无目标广播泄露给其他画布
+  const initialBroadcasts = ui.broadcasts.filter(message => message.type === 'AGENT_CHANGED');
+  assert.equal(initialBroadcasts.length, 0, '未绑定画布前广播必须为 0');
+
+  // 现在通过 FORK_SESSION_STATE 绑定 canvas-1
+  ui.receive({
+    type: 'FORK_SESSION_STATE',
+    canvasId: 'canvas-1',
+    agent: { id: 'real', name: 'Real agent' },
+    cards: [],
+  });
+  await flush();
+
+  const boundBroadcasts = ui.broadcasts.filter(message => message.type === 'AGENT_CHANGED');
+  assert.equal(boundBroadcasts.length, 1, '绑定后必须恰好产生一次定向同步');
+  assert.equal(boundBroadcasts[0].targetCanvasId, 'canvas-1');
+  assert.equal(boundBroadcasts[0].agent.id, 'real');
 });
 
 test('function panel keeps a denied request visible, broadcasts no fake list, and refresh recovers', async () => {
@@ -287,8 +310,20 @@ test('function panel keeps a denied request visible, broadcasts no fake list, an
   denied = false;
   await ui.nodes.get('btn-refresh').events.click();
   assert.equal(ui.nodes.get('agent-count').textContent, '1');
+  // 同样未绑定前不得广播
+  assert.equal(ui.broadcasts.filter(message => message.type === 'AGENT_CHANGED').length, 0);
+
+  // 绑定画布后触发定向同步
+  ui.receive({
+    type: 'FORK_SESSION_STATE',
+    canvasId: 'canvas-retry',
+    agent: { id: 'actual', name: 'Actual' },
+    cards: [],
+  });
+  await flush();
   const agents = ui.broadcasts.filter(message => message.type === 'AGENT_CHANGED');
   assert.equal(agents.length, 1);
+  assert.equal(agents[0].targetCanvasId, 'canvas-retry');
   assert.equal(agents[0].agent.id, 'actual');
 });
 
@@ -2888,5 +2923,405 @@ test('canvas undo/redo: undoes branch creation, hierarchy deletion, and card mov
   assert.equal(app.undo(), true);
   assert.equal(app.getCards().length, 2, '撤销删除后分支卡片应当重新复原');
   assert.equal(app.getCards()[1].id, branch.id);
+});
+
+test('first-run agent sync: deferred /api/agents with stale storage sends real agent to bound canvas, rejecting unknown agent in chat send', async (t) => {
+  const ui = uiEnvironment();
+  // 模拟 stale 的 localStorage（如失效或未知 ID）
+  ui.environment.localStorage.setItem('fork_chat_active_agent_id', 'stale-unknown-id');
+  ui.environment.localStorage.setItem('fork_chat_active_agent_name', 'Stale Agent');
+
+  const deferredAgents = deferredLifetime();
+  const chatRequests = [];
+  const validAgentIds = new Set(['real-first', 'real-second']);
+  const hana = {
+    ready() {},
+    api: {
+      async fetch(route, init) {
+        if (route.endsWith('api/agents')) {
+          return deferredAgents.promise;
+        }
+        if (route.endsWith('api/chat/stream')) {
+          const req = JSON.parse(init.body);
+          chatRequests.push(req);
+          if (!validAgentIds.has(req.agentId)) {
+            return Response.json({ code: 'AGENT_PROFILE_UNAVAILABLE', error: 'Unknown agent profile' }, { status: 422 });
+          }
+          return new Response([
+            JSON.stringify({ type: 'start', requestId: req.requestId, provider: 'prov-real', model: 'model-real' }),
+            JSON.stringify({ type: 'text-delta', requestId: req.requestId, delta: 'hello from real' }),
+            JSON.stringify({ type: 'done', requestId: req.requestId }),
+          ].join('\n') + '\n', { headers: { 'Content-Type': 'application/x-ndjson' } });
+        }
+        return Response.json({ ok: true });
+      },
+    },
+  };
+
+  // 1. 加载主画布 panel.js
+  await loadModule('../ui/assets/panel.js', imports(hana), ui.environment);
+  await flush();
+  const app = ui.environment.window.__forkChat;
+  t.after(() => app?.dispose());
+
+  // 2. 加载侧边栏 function-panel.js（注意此时 api/agents 尚未 resolve）
+  await loadModule('../ui/assets/function-panel.js', imports(hana), ui.environment);
+  await flush();
+
+  // 此时侧边栏发出了 FORK_SESSION_HELLO，主画布回复了 FORK_SESSION_STATE，绑定完成
+  // 现在 resolve 真实代理列表：首项为 real-first
+  deferredAgents.resolve(Response.json({
+    ok: true,
+    agents: [
+      { id: 'real-first', name: '真实首位助手', provider: 'prov-real', model: 'model-real', reasoning: true, thinkingLevels: ['low', 'high'] },
+      { id: 'real-second', name: '真实第二助手', provider: 'prov-real-2', model: 'model-real-2' },
+    ],
+  }));
+  await flush();
+  await flush();
+
+  // 3. 用户不点击任何 Agent，直接在卡片输入并发送
+  const firstCard = app.getCards()[0];
+  const inputEl = ui.nodes.get('input-' + firstCard.id);
+  inputEl.value = 'hello test';
+  inputEl.events.input();
+
+  const sendBtn = ui.nodes.get('dom-' + firstCard.id).querySelector('[data-action="send"]');
+  await sendBtn.events.click();
+  await flush();
+
+  // 断言：首个 /api/chat 请求的 agentId 必须是真实列表中的有效助手 'real-first'，而不是失效的 'stale-unknown-id' 或旧默认
+  assert.equal(chatRequests.length, 1, '必须发出首个聊天请求');
+  assert.equal(chatRequests[0].agentId, 'real-first', '首个请求 agentId 必须来自真实有效列表，无需用户手动再选一次');
+
+  // 断言：顶栏展示文本与实际助手保持一致
+  assert.match(ui.nodes.get('active-agent-display').textContent, /真实首位助手/);
+
+  // 断言：卡片助手回复已完成且没有错误
+  const cardAfterSend = app.getCards()[0];
+  const assistantMsgs = cardAfterSend.messages.filter(m => m.role === 'assistant');
+  const lastAssistant = assistantMsgs.at(-1);
+  assert.ok(lastAssistant, '必须生成 assistant 消息');
+  assert.equal(lastAssistant.text, 'hello from real', '回复正文必须为测试服务返回的内容');
+  assert.equal(lastAssistant.status, 'completed', '首条回复必须成功完成');
+  assert.equal(lastAssistant.streaming, false, '成功终态必须结束流式状态');
+  assert.equal(lastAssistant.error, undefined, '不能含有任何错误状态');
+});
+
+test('first-run agent sync: session valid agent B takes priority over stale global storage A, and deleted snapshot agent falls back to first real agent', async () => {
+  const broadcasts = [];
+  const channel = {
+    postMessage(msg) { broadcasts.push(msg); },
+  };
+  const storageMap = new Map([
+    ['fork_chat_active_agent_id', 'agent-global-a'],
+    ['fork_chat_active_agent_name', 'Global Agent A'],
+  ]);
+  const storage = {
+    getItem(k) { return storageMap.get(k) ?? null; },
+    setItem(k, v) { storageMap.set(k, String(v)); },
+    removeItem(k) { storageMap.delete(k); },
+  };
+
+  const realAgents = [
+    { id: 'agent-first', name: '首位助手', provider: 'p1', model: 'm1' },
+    { id: 'agent-session-b', name: '会话助手 B', provider: 'p2', model: 'm2' },
+  ];
+
+  let boundId = 'canvas-bound-1';
+  let requestHostCalled = false;
+  const hana = {};
+  const requestHost = async () => {
+    requestHostCalled = true;
+    return {
+      json: async () => ({ ok: true, agents: realAgents }),
+    };
+  };
+
+  // Case 1: 已绑定画布恢复的有效 Agent B 应优先于全局 storage A
+  // 即使在 restore(B) 之后、deferred load 返回之前，另一画布将 storage 改成有效 A，仍应选择 B 并保留 B 的 effort
+  const controller = functionAgents.createAgentListController({
+    hana,
+    requestHost,
+    channel,
+    getBoundCanvasId: () => boundId,
+    storage,
+  });
+
+  // 1. 画布已绑定，并且先恢复了有效 agent-session-b，带有 medium effort
+  controller.restoreAgent({ id: 'agent-session-b', name: '会话助手 B', provider: 'p2', model: 'm2', reasoningEffort: 'medium' });
+
+  // 模拟并发：此时另一画布将全局 storage 修改为有效 agent-first (A)
+  storage.setItem('fork_chat_active_agent_id', 'agent-first');
+  storage.setItem('fork_chat_active_agent_name', '首位助手');
+
+  // 2. 加载 agents 列表完成
+  await controller.loadAgents();
+
+  assert.equal(requestHostCalled, true);
+  assert.equal(controller.getActiveAgentId(), 'agent-session-b', '已恢复的会话有效助手 B 必须优先于被其他画布修改的全局 storage A');
+  assert.equal(controller.getAgentReasoningEffort('agent-session-b'), 'medium', '必须保留 B 的 reasoningEffort');
+  const agentChanges = broadcasts.filter(m => m.type === 'AGENT_CHANGED');
+  assert.ok(agentChanges.length >= 1, '必须向画布发出同步广播');
+  assert.equal(agentChanges.at(-1).targetCanvasId, 'canvas-bound-1', '广播必须携带明确的 targetCanvasId');
+  assert.equal(agentChanges.at(-1).agent.id, 'agent-session-b');
+
+  // Case 2: 两个 canvas 只更新目标 targetCanvasId，不产生无目标广播
+  boundId = 'canvas-bound-2';
+  broadcasts.length = 0;
+  // 恢复一个已被删除的快照 Agent（不存在于真实列表中）
+  controller.restoreAgent({ id: 'deleted-agent-xyz' });
+  assert.equal(controller.getActiveAgentId(), 'agent-first', '不存在的 Agent 应沿规则选真实列表首项');
+  const correctionBroadcasts = broadcasts.filter(m => m.type === 'AGENT_CHANGED');
+  assert.ok(correctionBroadcasts.length >= 1, '纠正时必须发送 AGENT_CHANGED');
+  assert.equal(correctionBroadcasts.at(-1).targetCanvasId, 'canvas-bound-2', '纠正广播必须定向发送到当前绑定画布');
+  assert.equal(correctionBroadcasts.at(-1).agent.id, 'agent-first');
+
+  // Case 3: 列表失败时不伪造广播，保持错误提示
+  broadcasts.length = 0;
+  const failController = functionAgents.createAgentListController({
+    hana,
+    requestHost: async () => ({ json: async () => ({ ok: false, error: 'Network error' }) }),
+    channel,
+    getBoundCanvasId: () => 'canvas-bound-3',
+    storage,
+  });
+  await failController.loadAgents();
+  assert.equal(broadcasts.length, 0, '加载失败不得广播虚构可用 Agent');
+});
+
+test('first-run agent sync: deleted snapshot agent fallback preserves targets own effort and cleans model/provider in storage without corrupting fields', async () => {
+  const broadcasts = [];
+  const channel = { postMessage(msg) { broadcasts.push(msg); } };
+  const storageMap = new Map();
+  const storage = {
+    getItem(k) { return storageMap.get(k) ?? null; },
+    setItem(k, v) { storageMap.set(k, String(v)); },
+    removeItem(k) { storageMap.delete(k); },
+  };
+
+  // real-first 没有配置 model/provider（字段缺失或为空）
+  const realAgents = [
+    { id: 'agent-first', name: '首位助手' },
+    { id: 'agent-second', name: '次位助手', provider: 'p2', model: 'm2' },
+  ];
+
+  // 1. 测试时序 B：先 loadAgents 完成，设定 agent-first 专属 effort 为 low
+  const controller = functionAgents.createAgentListController({
+    hana: {},
+    requestHost: async () => ({ json: async () => ({ ok: true, agents: realAgents }) }),
+    channel,
+    getBoundCanvasId: () => 'canvas-test-effort',
+    storage,
+  });
+  await controller.loadAgents();
+  controller.setAgentReasoningEffort('agent-first', 'low');
+  assert.equal(controller.getAgentReasoningEffort('agent-first'), 'low');
+
+  // 现在恢复一个已删除的快照 Agent，带有 high effort 以及旧 model/provider
+  broadcasts.length = 0;
+  controller.restoreAgent({
+    id: 'deleted-agent',
+    name: '旧已删助手',
+    provider: 'old-p',
+    model: 'old-m',
+    reasoningEffort: 'high',
+  });
+
+  // 断言：回退到 agent-first
+  assert.equal(controller.getActiveAgentId(), 'agent-first');
+  // 断言 1：不能把已删除 Agent 的 high 覆盖有效回退 Agent agent-first 的原有 low
+  assert.equal(controller.getAgentReasoningEffort('agent-first'), 'low', '回退 Agent 自身的 effort 必须保持 low，不得被已删除 Agent 的 high 覆盖');
+  assert.equal(storage.getItem('fork_chat_agent_effort_agent-first'), 'low');
+  // 断言 2：纠偏广播的 reasoningEffort 必须是 agent-first 自己的 low
+  const correction = broadcasts.find(m => m.type === 'AGENT_CHANGED');
+  assert.ok(correction);
+  assert.equal(correction.reasoningEffort, 'low');
+  // 断言 3：storage 中的 model/provider 必须清空为实际值（空串），不得残留已删除 Agent 的 old-p / old-m
+  assert.equal(storage.getItem('fork_chat_active_agent_provider'), '', 'provider 必须清空为当前 Agent 实际值，不得残留旧数据');
+  assert.equal(storage.getItem('fork_chat_active_agent_model'), '', 'model 必须清空为当前 Agent 实际值，不得残留旧数据');
+  assert.equal(storage.getItem('fork_chat_active_agent_name'), '首位助手');
+
+  // 2. 测试时序 A：先 restoreAgent (deleted) 后 loadAgents
+  const storageMapA = new Map();
+  const storageA = {
+    getItem(k) { return storageMapA.get(k) ?? null; },
+    setItem(k, v) { storageMapA.set(k, String(v)); },
+    removeItem(k) { storageMapA.delete(k); },
+  };
+  // 先把 agent-first 的 effort 存为 low
+  storageA.setItem('fork_chat_agent_effort_agent-first', 'low');
+
+  const controllerA = functionAgents.createAgentListController({
+    hana: {},
+    requestHost: async () => ({ json: async () => ({ ok: true, agents: realAgents }) }),
+    channel,
+    getBoundCanvasId: () => 'canvas-test-order-a',
+    storage: storageA,
+  });
+
+  // 先恢复已删除的快照
+  controllerA.restoreAgent({
+    id: 'deleted-agent',
+    name: '旧已删助手',
+    provider: 'old-p',
+    model: 'old-m',
+    reasoningEffort: 'high',
+  });
+  // 此时 agents 尚未加载，恢复记录了快照元数据；接着加载完成
+  await controllerA.loadAgents();
+  assert.equal(controllerA.getActiveAgentId(), 'agent-first', 'loadAgents 完成后由于 deleted 不在列表中，应回退首位 agent-first');
+  assert.equal(controllerA.getAgentReasoningEffort('agent-first'), 'low', '时序 A 下 agent-first 的 effort 同样保持自身的 low');
+  assert.equal(storageA.getItem('fork_chat_active_agent_provider'), '', '时序 A 下 provider 必须清空旧残留');
+  assert.equal(storageA.getItem('fork_chat_active_agent_model'), '', '时序 A 下 model 必须清空旧残留');
+});
+
+test('first-run agent sync: user manual selection survives pending refresh and concurrent storage rewrite, and foreign targetCanvasId broadcast does not mutate host canvas', async (t) => {
+  const ui = uiEnvironment();
+  const deferredAgents = deferredLifetime();
+  const refreshAgents = deferredLifetime();
+  let agentsRequests = 0;
+  const chatRequests = [];
+  const hana = {
+    ready() {},
+    api: {
+      async fetch(route, init) {
+        if (route.endsWith('api/agents')) {
+          agentsRequests++;
+          return agentsRequests === 1 ? deferredAgents.promise : refreshAgents.promise;
+        }
+        if (route.endsWith('api/chat/stream')) {
+          const req = JSON.parse(init.body);
+          chatRequests.push(req);
+          return new Response([
+            JSON.stringify({ type: 'start', requestId: req.requestId, provider: req.agentId, model: 'model' }),
+            JSON.stringify({ type: 'text-delta', requestId: req.requestId, delta: 'ok' }),
+            JSON.stringify({ type: 'done', requestId: req.requestId }),
+          ].join('\n') + '\n', { headers: { 'Content-Type': 'application/x-ndjson' } });
+        }
+        return Response.json({ ok: true });
+      },
+    },
+  };
+
+  await loadModule('../ui/assets/panel.js', imports(hana), ui.environment);
+  await flush();
+  const app = ui.environment.window.__forkChat;
+  t.after(() => app?.dispose());
+
+  await loadModule('../ui/assets/function-panel.js', imports(hana), ui.environment);
+  await flush();
+
+  // 1. 验证：在 agents 请求返回后，用户在侧边栏手动点击了 Agent B
+  const realList = [
+    { id: 'agent-first-a', name: '助手 A', provider: 'pA', model: 'mA' },
+    { id: 'agent-second-b', name: '助手 B', provider: 'pB', model: 'mB' },
+  ];
+  deferredAgents.resolve(Response.json({ ok: true, agents: realList }));
+  await flush();
+  await flush();
+
+  // 用户点击选择助手 B 卡片
+  const cardB = ui.nodes.get('agent-agent-second-b');
+  assert.ok(cardB, '列表中应当有助手 B 卡片');
+  cardB.events.click();
+  await flush();
+
+  // 刷新挂起期间，另一个画布把共享默认值改成 A；响应不能撤销当前用户已选择的 B。
+  const btnRefresh = ui.nodes.get('btn-refresh');
+  assert.ok(btnRefresh, '应存在刷新按钮');
+  const pendingRefresh = btnRefresh.events.click();
+  await flush();
+  assert.equal(agentsRequests, 2, '第二次列表请求必须已开始且仍在等待响应');
+  ui.environment.localStorage.setItem('fork_chat_active_agent_id', 'agent-first-a');
+  ui.environment.localStorage.setItem('fork_chat_active_agent_name', '助手 A');
+  refreshAgents.resolve(Response.json({ ok: true, agents: realList }));
+  await pendingRefresh;
+  await flush();
+  assert.equal(ui.nodes.get('agent-count').textContent, '2', '刷新必须成功加载，不能因重复消费 Response 而失败后假通过');
+
+  // 2. 验证：真实主画布收到指向 foreign targetCanvasId 的广播时，不得改变当前画布的 active agent
+  // 模拟从总线收到一条针对 foreign-canvas-999 的 AGENT_CHANGED 消息
+  ui.receive({
+    type: 'AGENT_CHANGED',
+    targetCanvasId: 'foreign-canvas-999',
+    agent: { id: 'foreign-stolen-agent', name: '被盗用的外来助手' },
+  });
+  await flush();
+
+  // 在主画布上发送卡片消息，断言依然是助手 B，而不是 foreign-stolen-agent 或 storage 中的 A
+  const card = app.getCards()[0];
+  const inputEl = ui.nodes.get('input-' + card.id);
+  inputEl.value = 'send test';
+  inputEl.events.input();
+  const sendBtn = ui.nodes.get('dom-' + card.id).querySelector('[data-action="send"]');
+  await sendBtn.events.click();
+  await flush();
+
+  assert.equal(chatRequests.length, 1);
+  assert.equal(chatRequests[0].agentId, 'agent-second-b', '主画布必须保持用户手动选中的助手 B，不受外部 storage 改写和 foreign targetCanvasId 广播干扰');
+});
+
+test('first-run agent sync: unattached loadAgents does not broadcast, and real session B canvas is not overwritten by unattached load', async (t) => {
+  const ui = uiEnvironment();
+  const chatRequests = [];
+  const hana = {
+    ready() {},
+    api: {
+      async fetch(route, init) {
+        if (route.endsWith('api/agents')) {
+          return Response.json({
+            ok: true,
+            agents: [
+              { id: 'agent-default-a', name: '默认助手 A', provider: 'pA', model: 'mA' },
+              { id: 'agent-session-b', name: '会话助手 B', provider: 'pB', model: 'mB' },
+            ],
+          });
+        }
+        if (route.endsWith('api/chat/stream')) {
+          const req = JSON.parse(init.body);
+          chatRequests.push(req);
+          return new Response([
+            JSON.stringify({ type: 'start', requestId: req.requestId, provider: req.agentId, model: 'model' }),
+            JSON.stringify({ type: 'text-delta', requestId: req.requestId, delta: 'ok' }),
+            JSON.stringify({ type: 'done', requestId: req.requestId }),
+          ].join('\n') + '\n', { headers: { 'Content-Type': 'application/x-ndjson' } });
+        }
+        return Response.json({ ok: true });
+      },
+    },
+  };
+
+  // 1. 先加载侧边栏 function-panel.js（此时未绑定任何画布）
+  await loadModule('../ui/assets/function-panel.js', imports(hana), ui.environment);
+  await flush();
+
+  // 断言：在没有绑定画布前，未产生任何无 targetCanvasId 的 AGENT_CHANGED 广播
+  const unattachedBroadcasts = ui.broadcasts.filter(m => m.type === 'AGENT_CHANGED');
+  assert.equal(unattachedBroadcasts.length, 0, '未绑定画布前绝对不能产生无目标的全局 AGENT_CHANGED 广播');
+
+  // 2. 模拟真实主画布加载，该会话历史中保存的是 agent-session-b
+  ui.environment.localStorage.setItem('fork_chat_active_agent_id', 'agent-session-b');
+  ui.environment.localStorage.setItem('fork_chat_active_agent_name', '会话助手 B');
+  await loadModule('../ui/assets/panel.js', imports(hana), ui.environment);
+  await flush();
+  const app = ui.environment.window.__forkChat;
+  t.after(() => app?.dispose());
+
+  // 主画布启动后会向侧边栏握手并绑定；侧边栏在 restoreAgent 时定向同步
+  await flush();
+  await flush();
+
+  // 3. 用户在卡片发送消息，断言真实发送的 agentId 必须是会话的 agent-session-b，没有被列表默认的 agent-default-a 冲掉
+  const card = app.getCards()[0];
+  const inputEl = ui.nodes.get('input-' + card.id);
+  inputEl.value = 'hello test';
+  inputEl.events.input();
+  const sendBtn = ui.nodes.get('dom-' + card.id).querySelector('[data-action="send"]');
+  await sendBtn.events.click();
+  await flush();
+
+  assert.equal(chatRequests.length, 1);
+  assert.equal(chatRequests[0].agentId, 'agent-session-b', '真实主画布必须保持会话自身的 Agent B，未被初始未绑定的默认列表冲掉');
 });
 
