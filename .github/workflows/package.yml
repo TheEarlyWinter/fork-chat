@@ -25,6 +25,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
+      - name: Lint correctness rules
+        shell: bash
+        # 只查正确性，不管风格。未使用变量为 warning，不阻断。
+        # 版本固定，避免上游规则集变动把绿灯变红。
+        run: npx --yes eslint@10.13.0 .
       - name: Run full test suite
         shell: bash
         run: node --experimental-vm-modules --test tests/*.test.mjs
@@ -90,5 +95,5 @@ jobs:
           gh release create "$RELEASE_TAG" ./*.zip ./*.entry.json SHA256SUMS build-info.json \
             --verify-tag --draft "${prerelease[@]}" \
             --title "分叉对话 $RELEASE_TAG" \
-            --notes '下载安装 app-timeline-reverser-*.zip（不要选 Source code）。在 HanaAgent 的扩展管理中导入 ZIP 并确认权限即可。需兼容的 HanaAgent（建议 1.1.111-beta 或更新版本）和已配置的模型。云端 OCR 为可选功能，当前存在已知原生运行时权限问题。SHA256SUMS 提供完整性校验；entry.json 是配套市场元数据。'
+            --notes '下载安装 app-timeline-reverser-*.zip（不要选 Source code）。在 HanaAgent 的扩展管理中导入 ZIP 并确认权限即可。需兼容的 HanaAgent（minAppVersion 1.2.1-beta 或更新版本）和已配置的模型。云端 OCR 为可选功能，当前存在已知原生运行时权限问题。SHA256SUMS 提供完整性校验；entry.json 是配套市场元数据。'
           gh release edit "$RELEASE_TAG" --draft=false

@@ -176,7 +176,7 @@ fork-chat/
 | `app/sessions.manage` | 执行「回传本体」与写入交接正文动作 | 仅在用户于弹窗二次确认后向指定会话发送消息 |
 | `app/session.start-turn` | 回传消息后唤醒宿主会话模型生成回答 | 仅在用户在回传对话框里点「确认投递」之后触发；对话框内会明示该动作可能消耗模型额度 |
 | `app/session.stage-file` | 将推导内容或产物作为文件交付到宿主会话 | 在分支交接中交付产物文件与 handoff.md 存档；需经用户二次确认 |
-| `app/resources.read` | 只读预览交接卡里的宿主会话文件 | 通过 `resources.open` 的 `session-file` 预览打开本应用已交付的文件；只读，不写入或覆盖任何资源 |
+| `app/resources.read` | 只读预览交接卡里的宿主会话文件 | Markdown 与文本经宿主后端 `stat`/`read` 取回内容后在卡内渲染，其余类型通过 `resources.open` 的 `session-file` 预览打开；只读，不写入或覆盖任何资源 |
 | `app/resources.write` | 写入必要的分支交接交付中间文件 | 仅在交接交付期间安全写入受控应用私有目录，完成即时清理 |
 | `app/runtime.execute` | 启动受控后台助手进程完成大文档解析 | 仅启动应用私有目录内的脚本，不调用任意系统程序 |
 | `app/runtime.native` | 允许助手以原生运行时直读大文件流 | 规避主线程 Base64 内存暴涨，严格限制应用数据目录访问 |
@@ -199,7 +199,9 @@ Release 同时提供 `SHA256SUMS`（完整性校验）、`.entry.json`（市场�
 ### 真实限制与已知边界
 
 - **Custom 文本导入而非原生历史**：受限于宿主扩展能力边界，分支交接在新会话中以单条结构化 custom 消息呈现推导路径与下一步要求，并以 `handoff.md` 和产物附件形式交付完整上下文，而非以原生多轮对话消息逐条伪造注入历史。
-- **手动授权入口与宿主全链路实机验收尚未完成**：`app/sessions.home` 属于敏感高阶权限，需在支持该能力声明的宿主环境（>= 1.1.111-beta）中由用户明确授予；若宿主环境未开通该权限，交接准备阶段会给出明确阻断提示，绝不私自降级为应用私有会话。
+- **手动授权入口与宿主全链路实机验收**：`app/sessions.home` 自宿主 **1.1.111-beta** 起可声明，而本应用当前最低要求为 `manifest.json` 的 `minAppVersion`（**1.2.1-beta**），因此在受支持的宿主上该项必然可授予。授权仍需用户在弹窗中明确确认；若宿主未开通该能力，交接准备阶段会给出明确阻断提示，绝不私自降级为应用私有会话。
+  - 已实机验收（2.4.0）：交接准备、确认、主页会话创建与文件交付、交接卡渲染、Markdown 文件预览。
+  - 使用中观察项，不作为安装阻断：模型承接上下文的效果、目标 Agent 已启用 Skill 的实际调用。
 
 ### 本地验证
 
@@ -213,6 +215,20 @@ node --experimental-vm-modules --test tests/*.test.mjs
 - 测试只使用 Node 内置模块与 `tests/fixtures`、`tests/helpers`，无需安装依赖。
 - CI 在推送 `main`、Pull Request 和标签构建时先跑全量测试，失败即不打包。
 - 安装包与 `git archive` 归档通过 `.gitattributes` 的 `export-ignore` 和打包脚本的排除表剔除测试，仓库本身保留完整基线。
+
+### 静态检查
+
+仓库不引入依赖树，静态检查只用 `npx` 拉取固定版本的 ESLint：
+
+```bash
+npx --yes eslint@10.13.0 .
+```
+
+- **只查正确性，不查风格**。启用的是未定义变量、重复键、不可达代码、不可靠的 `finally`、异步执行器里直接传 `async` 函数这一类。风格问题一概不管。
+- 未使用变量与参数属于 `warning`，不会让门禁失败；`error` 为零是 CI 的前置条件。
+- **它抓不到漏掉的 `await`**。浮动 Promise 需要带类型信息的 `no-floating-promises`，本项目不引入那条链路。异步链路的正确性仍然只能靠测试。
+- 检查范围只含本仓库自有源码；SDK、`ui/vendor` 和压缩后的第三方 bundle（`ui/assets/app-ui.js`）不在范围内。
+- 规则与忽略项在仓库根目录的 `eslint.config.mjs`，默认不批量 `--fix`。
 
 ### 自动构建与发布
 
