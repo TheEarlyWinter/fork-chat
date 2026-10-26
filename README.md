@@ -177,10 +177,10 @@ fork-chat/
 | `app/session.start-turn` | 回传消息后唤醒宿主会话模型生成回答 | 仅在用户在回传对话框里点「确认投递」之后触发；对话框内会明示该动作可能消耗模型额度 |
 | `app/session.stage-file` | 将推导内容或产物作为文件交付到宿主会话 | 在分支交接中交付产物文件与 handoff.md 存档；需经用户二次确认 |
 | `app/resources.read` | 只读预览交接卡里的宿主会话文件 | Markdown 与文本经宿主后端 `stat`/`read` 取回内容后在卡内渲染，其余类型通过 `resources.open` 的 `session-file` 预览打开；只读，不写入或覆盖任何资源 |
-| `app/resources.write` | 写入必要的分支交接交付中间文件 | 仅在交接交付期间安全写入受控应用私有目录，完成即时清理 |
+| `app/resources.write` | 将文档产物另存到用户选定的位置 | 仅在用户点击「另存为」后调用 `hana.resources.saveFile`；目标选择、已有文件覆盖确认、冲突与保存回执均由宿主处理。App 自身 `dataDir` 的文件读写不依赖这项授权 |
 | `app/runtime.execute` | 启动受控后台助手进程完成大文档解析 | 仅启动应用私有目录内的脚本，不调用任意系统程序 |
-| `app/runtime.native` | 允许助手以原生运行时直读大文件流 | 规避主线程 Base64 内存暴涨，严格限制应用数据目录访问 |
-| `app/runtime.network` | 允许助手进程与外部云端解析器通信 | 严格遵循 manifest 声明的官方 HTTPS 域名白名单 |
+| `app/runtime.native` | 允许文档解析助手使用原生运行能力 | 本应用只启动固定的 `runtime/parser.mjs`，并在业务代码里校验上传与结果路径。**这不是宿主的只读目录隔离**：macOS/Linux 下原生运行时可以读取当前系统用户可读的工作区外文件，Windows 使用每次运行的新专用身份，边界以宿主策略为准 |
+| `app/runtime.network` | 允许解析助手建立外网连接与服务监听 | 请求的 HTTPS 协议、MinerU 域名白名单与重定向由本应用自行校验（`lib/parser-network.js`）。**原生外网不经过宿主顶层的 `network.allowedHosts` 代理白名单**，不能理解为宿主强制的域名隔离；受宿主清单约束的是 `sdk.network.fetch` 那条通道 |
 | `app/ui.clipboard-write` | 画布卡片文本与推导链的一键复制 | 仅由用户点击复制按钮触发 |
 
 ---
