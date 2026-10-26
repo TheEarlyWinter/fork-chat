@@ -30,8 +30,14 @@ export function createClipboardWriter({ doc, getNavigator } = {}) {
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
     root.body.appendChild(ta);
-    ta.select();
-    root.execCommand('copy');
-    root.body.removeChild(ta);
+    try {
+      ta.select();
+      // execCommand 的返回值是这条兜底路径唯一的成功凭据。返回 false 表示浏览器拒绝
+      // 执行命令，不能解释成“剪贴板为空”，否则调用方会照常显示“已复制”。
+      if (root.execCommand('copy') !== true) throw new Error('浏览器未确认复制成功');
+    } finally {
+      // select 或 copy 失败时同样要释放临时节点，不留残影在 DOM 里。
+      root.body.removeChild(ta);
+    }
   };
 }
