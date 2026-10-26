@@ -1,0 +1,9 @@
+{
+  "name": "fork-chat-lint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "本仓库的 ESLint 工具链。放在 scripts/ 下，随 scripts/** 一起被 .gitattributes 和打包排除表挡在安装包外；根目录保持无 package.json，App 运行时和测试都不依赖 npm。",
+  "devDependencies": {
+    "eslint": "10.13.0"
+  }
+}

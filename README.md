@@ -218,17 +218,21 @@ node --experimental-vm-modules --test tests/*.test.mjs
 
 ### 静态检查
 
-仓库不引入依赖树，静态检查只用 `npx` 拉取固定版本的 ESLint：
+工具链单独放在 `scripts/lint/`，自带 `package.json` 与 `package-lock.json`，根目录仍然没有 `package.json`。App 运行时和测试依旧不需要 npm 安装任何东西。
 
 ```bash
-npx --yes eslint@10.13.0 .
+npm --prefix scripts/lint ci --ignore-scripts --no-audit --no-fund
+node scripts/lint/node_modules/eslint/bin/eslint.js --config scripts/lint/eslint.config.mjs .
 ```
 
-- **只查正确性，不查风格**。启用的是未定义变量、重复键、不可达代码、不可靠的 `finally`、异步执行器里直接传 `async` 函数这一类。风格问题一概不管。
+- 第一次跑需要网络；之后 `node_modules` 已在本地，直接执行第二条。
+- 用 lock 文件安装，顶层和传递依赖都锁住，同一个 lock 在任何机器上拿到同一棵依赖树。不用 `npx`，因为那只能固定顶层版本，剩下的子依赖仍会漂。
+- **只查正确性，不查风格**。启用的是未定义变量、重复键、不可达代码、不可靠的 `finally`、异步执行器里直接传 `async` 函数这一类。
 - 未使用变量与参数属于 `warning`，不会让门禁失败；`error` 为零是 CI 的前置条件。
 - **它抓不到漏掉的 `await`**。浮动 Promise 需要带类型信息的 `no-floating-promises`，本项目不引入那条链路。异步链路的正确性仍然只能靠测试。
 - 检查范围只含本仓库自有源码；SDK、`ui/vendor` 和压缩后的第三方 bundle（`ui/assets/app-ui.js`）不在范围内。
-- 规则与忽略项在仓库根目录的 `eslint.config.mjs`，默认不批量 `--fix`。
+- 默认不批量 `--fix`。
+- `scripts/**` 已被 `.gitattributes` 和打包排除表挡住，所以工具链和它的 `node_modules` 不会进安装包。
 
 ### 自动构建与发布
 

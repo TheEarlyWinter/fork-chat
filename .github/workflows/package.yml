@@ -25,11 +25,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
+          cache: npm
+          cache-dependency-path: scripts/lint/package-lock.json
+      - name: Install lint toolchain
+        shell: bash
+        # 工具链独立在 scripts/lint/，根目录仍无 package.json。
+        # 用 lock 文件装，传递依赖也一并锁住；--ignore-scripts 不跑任何安装脚本。
+        run: npm --prefix scripts/lint ci --ignore-scripts --no-audit --no-fund
       - name: Lint correctness rules
         shell: bash
         # 只查正确性，不管风格。未使用变量为 warning，不阻断。
-        # 版本固定，避免上游规则集变动把绿灯变红。
-        run: npx --yes eslint@10.13.0 .
+        run: node scripts/lint/node_modules/eslint/bin/eslint.js --config scripts/lint/eslint.config.mjs .
       - name: Run full test suite
         shell: bash
         run: node --experimental-vm-modules --test tests/*.test.mjs
