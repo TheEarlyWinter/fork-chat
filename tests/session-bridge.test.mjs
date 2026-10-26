@@ -62,7 +62,7 @@ test("bridge: 会话列表只保留宿主正常会话，不返回路径与提示
       "session:list": () => ({
         sessions: [
           { ...SESSION, path: "/secret/path.jsonl" },
-          { sessionId: "sess-app", ownerPluginId: "timeline-reverser", title: "本 App 私有" },
+          { sessionId: "sess-app", ownerPluginId: "fork-chat", title: "本 App 私有" },
           { sessionId: null, path: "/x" },
         ],
       }),

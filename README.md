@@ -187,10 +187,20 @@ fork-chat/
 
 ## 安装与使用
 
-1. 从 [GitHub Releases](https://github.com/TheEarlyWinter/fork-chat/releases) 下载 **`app-timeline-reverser-版本号.zip`**，不要下载自动生成的 **Source code**；
+1. 从 [GitHub Releases](https://github.com/TheEarlyWinter/fork-chat/releases) 下载 **`app-fork-chat-版本号.zip`**，不要下载自动生成的 **Source code**；
 2. 打开 **HanaAgent** 桌面客户端，进入「扩展管理」，导入 ZIP 并核对、确认权限；升级前先保存当前会话；
-3. 安装完成后，在应用导航栏点击 **「分叉对话」**。如仍显示旧版，使用 App 的正式重载入口；
+3. 安装完成后，在应用导航栏点击 **「fork-chat」**。如仍显示旧版，使用 App 的正式重载入口；
 4. 在 Hana 中配置好模型后即可对话，无需自行安装 Node、npm 或项目依赖。该 ZIP 是 Hana App，不是独立桌面程序。
+
+### 从旧版本升级（App 标识变更）
+
+从 `2.5.0` 起，内部标识由 `timeline-reverser` 改为 `fork-chat`，与仓库名、发布包名统一。宿主只认标识，因此：
+
+- 新版本会被当成另一个 App 安装，旧的两个目录不会自动迁移：`~/.hanako/apps/timeline-reverser/` 与 `~/.hanako/app-data/timeline-reverser/`。
+- 需要保留画布与文档时，先退出 HanaAgent，再把 `~/.hanako/app-data/timeline-reverser/` 整个复制为 `~/.hanako/app-data/fork-chat/`，然后重新安装新包并按需重新授权。
+- 升级后确认数据仍在，再删除旧的两份目录。不先复制就删除会丢掉画布。
+- 旧版本产生的交接记录消息带原标识的命名空间（`app:timeline-reverser/branch-handoff`），新版本的卡片渲染器不会认领它们，表现为空白卡片；这些记录属于历史，不影响新发起的交接。
+- 三项授权需要在新 App 上重新确认一遍。
 
 宿主版本须满足 `manifest.json` 的 `minAppVersion`（当前 `1.2.1-beta`），建议使用 **HanaAgent 1.2.1-beta 或更新的兼容版本**。可选云端 OCR 需另配 MinerU；当前原生解析助手存在 `ERR_ACCESS_DENIED` 已知问题，不作为本版已修复功能承诺。
 

@@ -12,10 +12,10 @@ import {
 
 // 交接卡只读投影：宿主 get/entries 的真实 DTO 形状（{session} / {sessionId,entries,leafId}）
 // 加当前 owner 的动作记录，作为旧消息的唯一回退依据。
-const OWNER = JSON.stringify(['timeline-reverser', 'authenticated', 'user-1']);
-const OTHER_OWNER = JSON.stringify(['timeline-reverser', 'authenticated', 'user-2']);
+const OWNER = JSON.stringify(['fork-chat', 'authenticated', 'user-1']);
+const OTHER_OWNER = JSON.stringify(['fork-chat', 'authenticated', 'user-2']);
 const SESSION = 'sess_home_1';
-const CUSTOM_TYPE = 'app:timeline-reverser/branch-handoff';
+const CUSTOM_TYPE = 'app:fork-chat/branch-handoff';
 const ARTIFACT_FILE = { fileId: 'sf_report_1', name: '报告.md', mime: 'text/markdown', kind: 'artifact', artifactId: 'a'.repeat(32) };
 const ARCHIVE_FILE = { fileId: 'sf_archive_1', name: 'handoff.md', mime: 'text/markdown', kind: 'archive' };
 const SOURCE = { canvasId: 'canvas-1', revision: 'rev-1', targetCardId: 'card-1' };
@@ -42,7 +42,7 @@ function sessionMeta(overrides = {}) {
     sessionId: SESSION,
     namespace: 'home',
     visibility: 'public',
-    ownerPluginId: 'timeline-reverser',
+    ownerPluginId: 'fork-chat',
     lifecycle: 'active',
     archivedAt: null,
     path: 'home',

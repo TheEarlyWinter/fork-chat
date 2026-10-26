@@ -18,7 +18,7 @@ import { createHash } from 'node:crypto';
  * 验证 v1→v2→v3 链条、归组、上下文投影与 deliveredOnly 语义的组合行为。
  */
 
-const OWNER = JSON.stringify(['timeline-reverser', 'app', 'owner-a']);
+const OWNER = JSON.stringify(['fork-chat', 'app', 'owner-a']);
 
 async function tempDataDir(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fork-revise-e2e-'));
@@ -117,7 +117,7 @@ test('组合：跨 owner 引用旧文件被拒绝（同 owner 读取不变式）
   const dir = await tempDataDir(t);
   const { artifacts } = makeChatHarness({ dataDir: dir });
   const v1 = await artifacts.create({ owner: OWNER, cardId: 'c', requestId: 'r', filename: 'x.md', content: '# x' });
-  const otherOwner = JSON.stringify(['timeline-reverser', 'app', 'owner-b']);
+  const otherOwner = JSON.stringify(['fork-chat', 'app', 'owner-b']);
   const executor = createDocumentReviseExecutor({
     artifacts, owner: otherOwner,
     rewriteSource: async () => { throw new Error('不应被调用'); },

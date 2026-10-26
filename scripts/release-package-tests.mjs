@@ -16,7 +16,7 @@ function fixture(t, variant = '') {
   const write = (name, text) => { const p = path.join(repo, name); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
   git(['init']); git(['config', 'user.name', 'Package test']); git(['config', 'user.email', 'test@example.invalid']);
   for (const name of ['index.js', 'sdk/client.js', 'runtime/parser.mjs', 'lib/vendor/demo/dist/runtime.js', 'ui/fonts/example.woff2', 'README.md', 'docs/internal.md', 'scripts/development.mjs']) write(name, 'synthetic');
-  write('manifest.json', JSON.stringify({ id: 'timeline-reverser', version: '2.2.0', entry: 'index.js' }));
+  write('manifest.json', JSON.stringify({ id: 'fork-chat', version: '2.2.0', entry: 'index.js' }));
   const commit = () => { git(['add', '.']); git(['commit', '-m', 'synthetic fixture']); };
   commit();
   const tools = path.join(dir, 'tools'); fs.mkdirSync(path.join(tools, 'scripts'), { recursive: true });
@@ -26,8 +26,8 @@ function fixture(t, variant = '') {
     if(${JSON.stringify(variant)}==='pack-failure') process.exit(1);
     const args=process.argv.slice(2), out=args[args.indexOf('--out')+1];
     const bytes=Buffer.from('UNIT-FAKE-ZIP-NOT-A-REAL-ARCHIVE');
-    fs.writeFileSync(path.join(out,'app-timeline-reverser-2.2.0.zip'),bytes);
-    fs.writeFileSync(path.join(out,'app-timeline-reverser-2.2.0.entry.json'),JSON.stringify({kind:'app',id:${variant === 'badentry' ? "'wrong-id'" : "'timeline-reverser'"},version:'2.2.0',archive:{url:'https://example.invalid/file.zip',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}}));
+    fs.writeFileSync(path.join(out,'app-fork-chat-2.2.0.zip'),bytes);
+    fs.writeFileSync(path.join(out,'app-fork-chat-2.2.0.entry.json'),JSON.stringify({kind:'app',id:${variant === 'badentry' ? "'wrong-id'" : "'fork-chat'"},version:'2.2.0',archive:{url:'https://example.invalid/file.zip',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}}));
   `);
   return { dir, repo, tools, git, write, commit, out: path.join(dir, 'output'), build: opts => buildPackage({ repoRoot: repo, toolsRoot: tools, out: path.join(dir, 'output'), tag: 'v2.2.0', ...opts }) };
 }
@@ -81,7 +81,7 @@ for (const variant of ['malformed','false','badentry','pack-failure']) test(`uni
 });
 test('unit fake-tool success keeps official entry schema and writes separate provenance/checksums', async t => {
   const f = fixture(t); const result = await f.build(); assert.equal(result.version,'2.2.0');
-  const entry = JSON.parse(fs.readFileSync(path.join(f.out,'app-timeline-reverser-2.2.0.entry.json')));
+  const entry = JSON.parse(fs.readFileSync(path.join(f.out,'app-fork-chat-2.2.0.entry.json')));
   assert.equal(entry.sourceCommit,undefined); assert.ok(entry.archive.url.startsWith('https://github.com/TheEarlyWinter/fork-chat/releases/download/v2.2.0/'));
   const metadata = JSON.parse(fs.readFileSync(path.join(f.out,'build-info.json'))); assert.match(metadata.sourceCommit,/^[a-f0-9]{40}$/);
   for (const line of fs.readFileSync(path.join(f.out,'SHA256SUMS'),'utf8').trim().split('\n')) {

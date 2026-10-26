@@ -13,7 +13,7 @@ function createMockContext({
   body,
   query = {},
   principal = { principalId: "user-1", credentialId: "surface-1", kind: "app" },
-  appId = "timeline-reverser",
+  appId = "fork-chat",
   reqSignal,
 } = {}) {
   const store = new Map();

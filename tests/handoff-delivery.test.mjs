@@ -11,7 +11,7 @@ import { createHandoffDelivery } from '../lib/handoff-delivery.js';
 // 夹具：真实临时目录 + 真实 fs，不碰用户工作区
 // ---------------------------------------------------------------------------
 
-const OWNER = JSON.stringify(['timeline-reverser', 'authenticated', 'user-1']);
+const OWNER = JSON.stringify(['fork-chat', 'authenticated', 'user-1']);
 const ACTION_ID = `ha_${'a'.repeat(32)}`;
 const ARTIFACT_ID = 'b'.repeat(32);
 

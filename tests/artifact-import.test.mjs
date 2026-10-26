@@ -22,7 +22,7 @@ async function tempDir(t) {
   return dir;
 }
 
-const OWNER = JSON.stringify(['timeline-reverser', 'app', 'owner-a']);
+const OWNER = JSON.stringify(['fork-chat', 'app', 'owner-a']);
 const docxBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, ...Buffer.alloc(100, 7)]);
 
 test('导入：prepare 校验头部与后缀一致性，拒绝不符文件', () => {
@@ -49,7 +49,7 @@ test('导入：importFile 生成新 UUID、origin=imported、字节与 SHA 一�
   const preview = await service.preview({ owner: OWNER, artifactId: artifact.artifactId });
   assert.ok(preview.html.includes('暂不提供内容预览'));
   // 旧 owner 桶（owner-b）不能读到 owner-a 的导入
-  await assert.rejects(() => service.preview({ owner: JSON.stringify(['timeline-reverser', 'app', 'owner-b']), artifactId: artifact.artifactId }));
+  await assert.rejects(() => service.preview({ owner: JSON.stringify(['fork-chat', 'app', 'owner-b']), artifactId: artifact.artifactId }));
 });
 
 test('导入：无 owner / 并发超限拒绝', async t => {
@@ -72,7 +72,7 @@ function makeImportApp(service) {
 }
 
 const principalContext = (principal = { kind: 'app', principalId: 'owner-a' }) => ({
-  get: key => key === 'appRequestContext' ? { appId: 'timeline-reverser', principal } : undefined,
+  get: key => key === 'appRequestContext' ? { appId: 'fork-chat', principal } : undefined,
 });
 
 test('导入 HTTP：正常导入回 artifact；注入字段拒绝；未鉴权拒绝', async t => {

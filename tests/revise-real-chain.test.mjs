@@ -21,7 +21,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const load = name => import(pathToFileURL(path.join(repoRoot, 'ui/assets', name)).href);
 const [engineModule, cardsModule] = await Promise.all([load('panel-chat-engine.js'), load('panel-cards.js')]);
 
-const OWNER_CTX = { get: key => key === 'appRequestContext' ? { appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'owner-a' } } : undefined };
+const OWNER_CTX = { get: key => key === 'appRequestContext' ? { appId: 'fork-chat', principal: { kind: 'app', principalId: 'owner-a' } } : undefined };
 
 async function tempDataDir(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fork-real-e2e-'));
@@ -111,7 +111,7 @@ test('真实链路：chat 流入口 create→revise 双工具，真实 store 落
   assert.equal(revised.version, 2, '修订版 lineage 由真实 store 派生');
   assert.equal(revised.revisedFrom, created.artifactId);
   // 真实磁盘验证
-  const exported = await artifacts.exportFile({ owner: JSON.stringify(['timeline-reverser', 'app', 'owner-a']), artifactId: revised.artifactId });
+  const exported = await artifacts.exportFile({ owner: JSON.stringify(['fork-chat', 'app', 'owner-a']), artifactId: revised.artifactId });
   const bytes = Buffer.from(exported.contentBase64, 'base64');
   assert.ok(bytes.toString('utf8').includes('收窄'), '修订正文真实落盘');
   assert.equal(events.at(-1).type, 'done');

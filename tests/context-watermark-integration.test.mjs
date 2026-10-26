@@ -74,7 +74,7 @@ test('HTTP watermark: oversize initial request rejected before profile or model,
     getAgentFullProfile: async () => { profileCalls++; return { provider: 'p', model: 'm' }; },
   });
   const context = messages => ({
-    get: key => key === 'appRequestContext' ? { appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'synthetic' } } : undefined,
+    get: key => key === 'appRequestContext' ? { appId: 'fork-chat', principal: { kind: 'app', principalId: 'synthetic' } } : undefined,
     req: { json: async () => ({ requestId: 'synthetic-watermark', agentId: 'agent', cardId: 'c', messages }) },
     json: (data, status = 200) => Response.json(data, { status }),
   });

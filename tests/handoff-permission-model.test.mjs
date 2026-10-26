@@ -12,7 +12,7 @@ import { handoffUsesSynchronousWrites, handoffWriteFlags } from '../lib/handoff-
 // 只给项目源码读权限和本次自建短数据目录的读写权限，不授予任何通配写权限。
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const childPath = path.join(repoRoot, 'tests', 'helpers', 'handoff-permission-child.mjs');
-const OWNER = JSON.stringify(['timeline-reverser', 'authenticated', 'user-1']);
+const OWNER = JSON.stringify(['fork-chat', 'authenticated', 'user-1']);
 
 async function shortTempDir(t) {
   // 短独立目录：不复用历史目录，也避免长路径问题

@@ -16,41 +16,41 @@ const ctx = (appId, principal) => ({ get: key => key === 'appRequestContext' ? {
 
 test('owner：合法 principalId 的 owner 编码与旧实现逐字节一致', () => {
   const cases = [
-    { principal: { principalId: 'app:timeline-reverser@studio:node-a', kind: 'app' } },
+    { principal: { principalId: 'app:fork-chat@studio:node-a', kind: 'app' } },
     { principal: { principalId: 'user-123' } },                              // 缺 kind 默认 authenticated
     { principal: { principalId: 'UPPER-case_NoTrim  ' , kind: 'app' } },    // 保留空白与大小写
   ];
   for (const { principal } of cases) {
-    const owner = getArtifactOwner(ctx('timeline-reverser', principal));
-    const legacy = JSON.stringify(['timeline-reverser', principal.kind || 'authenticated', principal.principalId]);
+    const owner = getArtifactOwner(ctx('fork-chat', principal));
+    const legacy = JSON.stringify(['fork-chat', principal.kind || 'authenticated', principal.principalId]);
     assert.equal(owner, legacy);
   }
 });
 
 test('owner：credentialId/id 变化而 principalId 不变时 owner 不变；只有兜底字段时拒绝', () => {
-  const stable = getArtifactOwner(ctx('timeline-reverser', { principalId: 'p1', kind: 'app', credentialId: 'c1' }));
-  const rotated = getArtifactOwner(ctx('timeline-reverser', { principalId: 'p1', kind: 'app', credentialId: 'c2' }));
+  const stable = getArtifactOwner(ctx('fork-chat', { principalId: 'p1', kind: 'app', credentialId: 'c1' }));
+  const rotated = getArtifactOwner(ctx('fork-chat', { principalId: 'p1', kind: 'app', credentialId: 'c2' }));
   assert.equal(stable, rotated);
 
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { credentialId: 'c-only' })),
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { credentialId: 'c-only' })),
     err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { id: 'id-only' })),
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { id: 'id-only' })),
     err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { id: 'x', credentialId: 'y', principalId: '   ' })),
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { id: 'x', credentialId: 'y', principalId: '   ' })),
     err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
 });
 
 test('owner：不可信上下文拒绝为 ARTIFACT_FORBIDDEN', () => {
   assert.throws(() => getArtifactOwner(ctx('other-app', { principalId: 'p' })), err => err.code === 'ARTIFACT_FORBIDDEN');
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', null)), err => err.code === 'ARTIFACT_FORBIDDEN');
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', null)), err => err.code === 'ARTIFACT_FORBIDDEN');
   assert.throws(() => getArtifactOwner({ get: () => undefined }), err => err.code === 'ARTIFACT_FORBIDDEN');
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { principalId: 123 })), err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { principalId: 'ok', kind: 7 })), err => err.code === 'ARTIFACT_FORBIDDEN');
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { principalId: 123 })), err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { principalId: 'ok', kind: 7 })), err => err.code === 'ARTIFACT_FORBIDDEN');
 });
 
 test('owner：错误文案固定且不泄漏身份细节', () => {
   for (const code of ['ARTIFACT_FORBIDDEN', 'ARTIFACT_STABLE_ID_REQUIRED']) {
-    try { getArtifactOwner(ctx(code === 'ARTIFACT_FORBIDDEN' ? 'x' : 'timeline-reverser', code === 'ARTIFACT_FORBIDDEN' ? { principalId: 'secret-value' } : { credentialId: 'secret-cred' })); assert.fail('应当抛出'); }
+    try { getArtifactOwner(ctx(code === 'ARTIFACT_FORBIDDEN' ? 'x' : 'fork-chat', code === 'ARTIFACT_FORBIDDEN' ? { principalId: 'secret-value' } : { credentialId: 'secret-cred' })); assert.fail('应当抛出'); }
     catch (error) {
       assert.equal(error.code, code);
       assert.ok(!String(error.message).includes('secret'), `${code} 文案不得包含身份原文`);
@@ -60,13 +60,13 @@ test('owner：错误文案固定且不泄漏身份细节', () => {
 });
 
 test('accessContext：ownerScopeKey 为 owner 的 sha256，仅作分区指纹', () => {
-  const { ownerScheme, ownerScopeKey } = getArtifactAccessContext(ctx('timeline-reverser', { principalId: 'p1', kind: 'app' }));
+  const { ownerScheme, ownerScopeKey } = getArtifactAccessContext(ctx('fork-chat', { principalId: 'p1', kind: 'app' }));
   assert.equal(ownerScheme, 'principal-v1');
-  const owner = getArtifactOwner(ctx('timeline-reverser', { principalId: 'p1', kind: 'app' }));
+  const owner = getArtifactOwner(ctx('fork-chat', { principalId: 'p1', kind: 'app' }));
   assert.equal(ownerScopeKey, createHash('sha256').update(owner).digest('hex'));
 });
 
 test('owner：超长身份拒绝（沿用 store 2000 上限语义）', () => {
-  assert.throws(() => getArtifactOwner(ctx('timeline-reverser', { principalId: 'x'.repeat(2100), kind: 'app' })),
+  assert.throws(() => getArtifactOwner(ctx('fork-chat', { principalId: 'x'.repeat(2100), kind: 'app' })),
     err => err.code === 'ARTIFACT_FORBIDDEN');
 });

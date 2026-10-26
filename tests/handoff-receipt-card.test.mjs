@@ -80,7 +80,7 @@ function bodyText(documentRef) {
 }
 
 test('without an embedded session the card requests nothing and says why', async () => {
-  for (const context of [null, { slot: 'card', cardInstanceId: 'card-1', appId: 'timeline-reverser' }, { slot: 'card', embeddedSessionId: '' }]) {
+  for (const context of [null, { slot: 'card', cardInstanceId: 'card-1', appId: 'fork-chat' }, { slot: 'card', embeddedSessionId: '' }]) {
     const documentRef = createFakeDocument();
     const hana = fakeHana(context);
     const recorder = requestRecorder();
@@ -96,7 +96,7 @@ test('without an embedded session the card requests nothing and says why', async
 
 test('the card reads the receipt for its embedded session and renders text and file buttons', async () => {
   const documentRef = createFakeDocument();
-  const hana = fakeHana({ slot: 'card', cardInstanceId: 'card-1', appId: 'timeline-reverser', embeddedSessionId: SESSION_A });
+  const hana = fakeHana({ slot: 'card', cardInstanceId: 'card-1', appId: 'fork-chat', embeddedSessionId: SESSION_A });
   const recorder = requestRecorder();
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
 
@@ -621,6 +621,6 @@ test('the manifest maps branch-handoff to a declared card whose route page exist
   assert.ok(capabilities.includes('app/resources.write'));
   assert.equal(capabilities.length, 13, '只新增预览必需的只读资源能力');
 
-  assert.equal(manifest.version, '2.4.1');
+  assert.equal(manifest.version, '2.5.0');
   assert.equal(manifest.minAppVersion, '1.2.1-beta');
 });

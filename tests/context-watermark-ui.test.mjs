@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
  * 断言落在真实引擎 sendCardPrompt 驱动路径上。
  */
 
-const OWNER = { get: key => key === 'appRequestContext' ? { appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'owner-a' } } : undefined };
+const OWNER = { get: key => key === 'appRequestContext' ? { appId: 'fork-chat', principal: { kind: 'app', principalId: 'owner-a' } } : undefined };
 const { default: engineModule } = await import('../ui/assets/panel-chat-engine.js').then(m => ({ default: m }));
 const { applyContextWatermark } = await import('../ui/assets/context-watermark.js');
 

@@ -11,7 +11,7 @@ import {
 // stat → {resourceKey, resource, exists, isDirectory, version:{mtimeMs,size}, filePath}
 // read → {resourceKey, resource, content: Buffer, version, filePath}
 // resource 回显输入的 sessionId/fileId，因此 fixture 必须回显，不能用宽松假成功。
-const OWNER = JSON.stringify(['timeline-reverser', 'authenticated', 'user-1']);
+const OWNER = JSON.stringify(['fork-chat', 'authenticated', 'user-1']);
 const SESSION = 'sess_home_1';
 const MD_ID = 'sf_md_1';
 const TXT_ID = 'sf_txt_1';

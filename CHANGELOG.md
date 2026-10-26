@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2.5.0
+
+### 变更：App 内部标识统一为 `fork-chat`
+
+- `manifest.json` 的 `id` 由 `timeline-reverser` 改为 `fork-chat`，与仓库名、发布包名一致；`name` 同步。代码中四处硬编码的应用身份（产物校验、文档服务调用方校验、交接归属、交接卡渲染命名空间）一并更新。
+- 这是破坏性变更：宿主按标识区分应用，因此新版本会被当成一个独立 App 安装，不会覆盖旧的 `timeline-reverser`。
+- 需要保留数据时，先退出 HanaAgent，把 `~/.hanako/app-data/timeline-reverser/` 复制为 `~/.hanako/app-data/fork-chat/` 再安装；三项授权需重新确认。具体步骤见 README 的「从旧版本升级」一节。
+- 旧版本产生的交接记录消息带原标识的命名空间，新版本的卡片渲染器不会认领，表现为空白卡；不影响新发起的交接。
+- 发布包文件名随之变为 `app-fork-chat-版本号.zip`。
+
 ## 2.4.1
 
 ### 修复：复制失败时界面仍显示「已复制」

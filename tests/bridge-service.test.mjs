@@ -78,7 +78,7 @@ function makeApp() {
   };
 }
 
-function makeContext({ body = {}, principal = { kind: "app", credentialId: "cred-1" }, appId = "timeline-reverser", param = null } = {}) {
+function makeContext({ body = {}, principal = { kind: "app", credentialId: "cred-1" }, appId = "fork-chat", param = null } = {}) {
   const text = JSON.stringify(body);
   return {
     req: {
@@ -336,7 +336,7 @@ test("service: 缺 start-turn 权限时 prepare 直接拒绝，不等到 confirm
   const { app } = await makeService(bus);
   const handler = app.routes.get("POST /api/bridge/prepare");
   const response = await handler(makeContext({
-    appId: "timeline-reverser",
+    appId: "fork-chat",
     body: { sessionId: "sess-1", kind: "send-text", text: "hi" },
   }));
   assert.equal(response.status, 403);

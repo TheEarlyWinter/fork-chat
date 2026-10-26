@@ -24,7 +24,7 @@ function routeMatcher(routes, method, pathname) {
   });
 }
 
-function makeRequestHost({ routes, owner = { appId: 'timeline-reverser', principal: { principalId: 'test-user-p1', kind: 'authenticated' } }, onBody = () => {}, onResponse = () => {} }) {
+function makeRequestHost({ routes, owner = { appId: 'fork-chat', principal: { principalId: 'test-user-p1', kind: 'authenticated' } }, onBody = () => {}, onResponse = () => {} }) {
   return async (_hana, reqPath, init = {}) => {
     if (reqPath === '/api/agents') {
       return response({ ok: true, agents: [{ id: 'agent-sol', name: 'Sol Architect' }] });
@@ -90,7 +90,7 @@ function makeSdk({ capabilities, sdkCalls, pdfBytes, missingCreate = false } = {
     { capability: 'app/agents.read', status: 'always' },
   ];
   return {
-    appId: 'timeline-reverser',
+    appId: 'fork-chat',
     principalId: 'test-user-p1',
     logger: { info() {}, warn() {}, error() {} },
     capabilities: { async get() { return { capabilities: grants }; } },
@@ -104,7 +104,7 @@ function makeSdk({ capabilities, sdkCalls, pdfBytes, missingCreate = false } = {
           namespace: 'home',
           agentId,
           visibility: 'public',
-          ownerPluginId: 'timeline-reverser',
+          ownerPluginId: 'fork-chat',
         };
       },
       async context(input) {

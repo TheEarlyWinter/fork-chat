@@ -39,7 +39,7 @@ function homeReceipt(overrides = {}) {
     agentId: 'agent-a',
     visibility: 'public',
     // 真实宿主用创建者 App 盖章，home 不等于 owner 为 null
-    ownerPluginId: 'timeline-reverser',
+    ownerPluginId: 'fork-chat',
     ...overrides,
   };
 }

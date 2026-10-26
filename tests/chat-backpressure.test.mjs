@@ -13,7 +13,7 @@ function latch() {
 function mockContext(body, reqSignal) {
   const store = new Map([[
     'appRequestContext',
-    { appId: 'timeline-reverser', principal: { principalId: 'test-user', credentialId: 'test-surface' } },
+    { appId: 'fork-chat', principal: { principalId: 'test-user', credentialId: 'test-surface' } },
   ]]);
   return {
     get: (key) => store.get(key),

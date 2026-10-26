@@ -13,13 +13,13 @@ import { parserError } from "./lib/parser-network.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export const name = "timeline-reverser";
+export const name = "fork-chat";
 
 export default defineApp(async (sdk) => {
   await sdk.logger.info("分叉对话 (Fork Chat) 初始化启动...");
 
   // 数据存储路径：优先使用 sdk.dataDir，保证全局唯一
-  const dataDir = sdk.dataDir || path.resolve(process.env.HOME || "", ".hanako", "app-data", "timeline-reverser");
+  const dataDir = sdk.dataDir || path.resolve(process.env.HOME || "", ".hanako", "app-data", "fork-chat");
 
   const agentDirectory = createAgentDirectory(sdk);
   const getAgentFullProfile = agentDirectory.getProfile;

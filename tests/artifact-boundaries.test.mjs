@@ -14,7 +14,7 @@ for (const [label, body, expected] of [
   const raw = new Request('http://app/api/artifacts/export', { method: 'POST', body });
   const response = await routes.get('/api/artifacts/export')({
     req: { raw, header: () => undefined },
-    get: () => ({ appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'synthetic' } }),
+    get: () => ({ appId: 'fork-chat', principal: { kind: 'app', principalId: 'synthetic' } }),
     json: (value, status = 200) => Response.json(value, { status }),
   });
   assert.equal(response.status, expected); assert.equal(calls, 0);
@@ -42,7 +42,7 @@ test('artifact boundary: access-context returns scope fingerprint only, never ra
   registerArtifactRoutes({ post: (r, h) => routes.set(r, h), get: (r, h) => routes.set(r, h) }, {});
   const principal = { kind: 'app', principalId: 'stable-id' };
   const response = await routes.get('/api/artifacts/access-context')({
-    get: key => key === 'appRequestContext' ? { appId: 'timeline-reverser', principal } : undefined,
+    get: key => key === 'appRequestContext' ? { appId: 'fork-chat', principal } : undefined,
     json: (value, status = 200) => Response.json(value, { status }),
   });
   const body = await response.json();

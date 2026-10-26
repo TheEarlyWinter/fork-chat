@@ -40,7 +40,7 @@ async function fork(scenario) {
   const service = createChatService({ models }, { timeoutMs: 5000 });
   const body = { requestId: 'offline-parity', modelRef: 'openai-codex/gpt-5.6-luna', messages: [{ role: 'user', content: 'offline fixture' }] };
   const context = {
-    get(key) { return key === 'appRequestContext' ? { appId: 'timeline-reverser', principal: { principalId: 'offline', credentialId: 'offline-surface' } } : undefined; },
+    get(key) { return key === 'appRequestContext' ? { appId: 'fork-chat', principal: { principalId: 'offline', credentialId: 'offline-surface' } } : undefined; },
     req: { async json() { return body; }, raw: {} },
     json(data, status = 200) { return Response.json(data, { status }); },
   };

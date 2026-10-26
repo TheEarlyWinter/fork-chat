@@ -119,7 +119,7 @@ async function findFileContaining(root, expected) {
   return null;
 }
 
-function ownerContext(id, appId = 'timeline-reverser') {
+function ownerContext(id, appId = 'fork-chat') {
   return { appId, principal: { kind: 'app', principalId: id } };
 }
 
@@ -352,13 +352,13 @@ test('document-artifacts: owner identity comes only from appRequestContext, neve
   const owner = getArtifactOwner(context);
   context.req.header = () => 'different-forgery';
   assert.equal(getArtifactOwner(context), owner);
-  const withSurfaceCredential = { get: () => ({ appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'stable-principal', credentialId: 'surface-a' } }) };
-  const withReopenedCredential = { get: () => ({ appId: 'timeline-reverser', principal: { kind: 'app', principalId: 'stable-principal', credentialId: 'surface-b' } }) };
+  const withSurfaceCredential = { get: () => ({ appId: 'fork-chat', principal: { kind: 'app', principalId: 'stable-principal', credentialId: 'surface-a' } }) };
+  const withReopenedCredential = { get: () => ({ appId: 'fork-chat', principal: { kind: 'app', principalId: 'stable-principal', credentialId: 'surface-b' } }) };
   assert.equal(getArtifactOwner(withSurfaceCredential), getArtifactOwner(withReopenedCredential), 'principalId takes precedence over a changing credentialId when the host provides both');
   assert.notEqual(owner, getArtifactOwner({ get: () => ownerContext('other-owner') }));
   assert.throws(() => getArtifactOwner({ get: () => null }), err => err.code === 'ARTIFACT_FORBIDDEN');
   assert.throws(() => getArtifactOwner({ get: () => ownerContext('other-app', 'other-app') }), err => err.code === 'ARTIFACT_FORBIDDEN');
-  assert.throws(() => getArtifactOwner({ get: () => ({ appId: 'timeline-reverser', principal: {} }) }), err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
+  assert.throws(() => getArtifactOwner({ get: () => ({ appId: 'fork-chat', principal: {} }) }), err => err.code === 'ARTIFACT_STABLE_ID_REQUIRED');
 });
 
 test('document-artifacts: create_document is the only public generation declaration and executor forwards app-owned identity', async () => {
@@ -399,7 +399,7 @@ test('document-artifacts: register exposes only artifactId routes and enforces r
   const dataDir = await tempDataDir(t);
   const service = createArtifactService({ dataDir, renderer: makeRenderer({ html: '<p>route preview</p>' }) });
   const metadata = await service.create({
-    owner: JSON.stringify(['timeline-reverser', 'app', 'owner-a']),
+    owner: JSON.stringify(['fork-chat', 'app', 'owner-a']),
     cardId: 'card-a', requestId: 'req-a', filename: 'route.md', content: 'route body',
   });
   const app = makeApp();

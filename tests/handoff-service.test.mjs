@@ -19,7 +19,7 @@ import { createHandoffService } from '../lib/handoff-service.js';
 // ---------------------------------------------------------------------------
 
 const PRINCIPAL = 'user-1';
-const OWNER = JSON.stringify(['timeline-reverser', 'authenticated', PRINCIPAL]);
+const OWNER = JSON.stringify(['fork-chat', 'authenticated', PRINCIPAL]);
 
 function msg(role, text) {
   return { role, text };
@@ -141,7 +141,7 @@ function fakeSdk(agentIds = ['agent-a'], { sessions = null, resources = null } =
   return sdk;
 }
 
-function requestContext({ principalId = PRINCIPAL, appId = 'timeline-reverser' } = {}) {
+function requestContext({ principalId = PRINCIPAL, appId = 'fork-chat' } = {}) {
   return {
     appId,
     principal: { principalId, kind: 'authenticated' },
@@ -157,7 +157,7 @@ function makeHarness({ host = fakeHost(), artifacts = fakeArtifacts(), sdk = fak
   const service = createHandoffService({ sdk, dataDir, artifacts, host, store, delivery });
   service.register(app);
 
-  async function call(method, url, { body, principal = principalId, appId = 'timeline-reverser' } = {}) {
+  async function call(method, url, { body, principal = principalId, appId = 'fork-chat' } = {}) {
     const parsed = new URL(`http://local${url}`);
     const parts = parsed.pathname.split('/').filter(Boolean);
     const route = routes.find(candidate => {
@@ -367,7 +367,7 @@ test('confirm writes v1 handoffView and the receipt route projects the saved cus
   let entries = [];
   const sessions = {
     async get({ sessionId }) {
-      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'timeline-reverser' } };
+      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'fork-chat' } };
     },
     async entries({ sessionId }) {
       return { sessionId, entries, leafId: entries.at(-1)?.id ?? null };
@@ -399,7 +399,7 @@ test('confirm writes v1 handoffView and the receipt route projects the saved cus
     id: 'entry-1',
     parentId: null,
     type: 'custom_message',
-    customType: 'app:timeline-reverser/branch-handoff',
+    customType: 'app:fork-chat/branch-handoff',
     display: true,
     content: write.content,
     details: write.details,
@@ -500,7 +500,7 @@ test('the read-only file preview route reads a receipt file through the official
   let entries = [];
   const sessions = {
     async get({ sessionId }) {
-      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'timeline-reverser' } };
+      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'fork-chat' } };
     },
     async entries({ sessionId }) {
       return { sessionId, entries, leafId: entries.at(-1)?.id ?? null };
@@ -520,7 +520,7 @@ test('the read-only file preview route reads a receipt file through the official
     id: 'entry-1',
     parentId: null,
     type: 'custom_message',
-    customType: 'app:timeline-reverser/branch-handoff',
+    customType: 'app:fork-chat/branch-handoff',
     display: true,
     content: write.content,
     details: write.details,

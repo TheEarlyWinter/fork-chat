@@ -131,7 +131,7 @@ test('same-index concurrent writes reject one without corrupting accounting', as
 
 test('untrusted headers never become upload owner and missing context fails closed', () => {
   assert.throws(() => getDocumentOwner({ req: { header: () => 'forged' } }), /可信/);
-  const c = { get: () => ({ appId: 'timeline-reverser', principal: { principalId: 'real-owner', kind: 'app' } }), req: { header: () => 'forged' } };
+  const c = { get: () => ({ appId: 'fork-chat', principal: { principalId: 'real-owner', kind: 'app' } }), req: { header: () => 'forged' } };
   const owner = getDocumentOwner(c); c.req.header = () => 'different-forgery';
   assert.equal(getDocumentOwner(c), owner);
 });
@@ -206,7 +206,7 @@ test('26,764,891 bytes traverse real helper HTTP and a local HTTP upstream with 
 });
 
 function context(body, who = 'alice', params = {}) {
-  return { get: () => ({ appId: 'timeline-reverser', principal: { principalId: who, kind: 'app' } }), req: { json: async () => body, param: key => params[key] }, json: (value, status = 200) => Response.json(value, { status }) };
+  return { get: () => ({ appId: 'fork-chat', principal: { principalId: who, kind: 'app' } }), req: { json: async () => body, param: key => params[key] }, json: (value, status = 200) => Response.json(value, { status }) };
 }
 
 test('parent routes reject foreign references and cancellation settles without creating success', async t => {

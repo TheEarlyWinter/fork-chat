@@ -134,5 +134,5 @@ jobs:
           gh release create "$RELEASE_TAG" ./*.zip ./*.entry.json SHA256SUMS build-info.json \
             --verify-tag --draft "${prerelease[@]}" \
             --title "分叉对话 $RELEASE_TAG" \
-            --notes '下载安装 app-timeline-reverser-*.zip（不要选 Source code）。在 HanaAgent 的扩展管理中导入 ZIP 并确认权限即可。需兼容的 HanaAgent（minAppVersion 1.2.1-beta 或更新版本）和已配置的模型。云端 OCR 为可选功能，当前存在已知原生运行时权限问题。SHA256SUMS 提供完整性校验；entry.json 是配套市场元数据。'
+            --notes '下载安装 app-fork-chat-*.zip（不要选 Source code）。在 HanaAgent 的扩展管理中导入 ZIP 并确认权限即可。需兼容的 HanaAgent（minAppVersion 1.2.1-beta 或更新版本）和已配置的模型。云端 OCR 为可选功能，当前存在已知原生运行时权限问题。SHA256SUMS 提供完整性校验；entry.json 是配套市场元数据。'
           gh release edit "$RELEASE_TAG" --draft=false
