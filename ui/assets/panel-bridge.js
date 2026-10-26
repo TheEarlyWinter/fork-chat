@@ -354,12 +354,17 @@ export function createBridge(deps = {}) {
       }
       sourceRef.contentHash = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 
-      createBridgeDocCard({
+      const imported = createBridgeDocCard({
         title: preview.session?.title || '本体会话',
         text,
         sourceRef,
         messageCount: messages.length,
       });
+      if (!imported) {
+        // 没有活动会话（或画布刚失效）时保留对话框：让用户看到原因、先去新建会话再试。
+        bridgeFail(errorEl, new Error('请先新建画布会话，再导入本体内容。'));
+        return;
+      }
       dialog?.close();
     } catch (err) {
       bridgeFail(errorEl, err);
@@ -459,7 +464,13 @@ export function createBridge(deps = {}) {
       messageCount: importedCount,
     });
 
-    if (!imported || !canMutateCanvas(generation)) { await release(); return; }
+    if (!imported) {
+      // 没有活动会话就不能落盘：释放凭条，不 ACK，不留下内存孤卡。
+      if (canMutateCanvas(generation)) flashMessage('请先新建画布会话，再导入本体内容。');
+      await release();
+      return;
+    }
+    if (!canMutateCanvas(generation)) { await release(); return; }
     // 先落盘再 ACK：ACK 一旦发出，这条凭条就没了。
     // 如果卡片只在内存里、随后的自动保存又因配额或磁盘错误失败，
     // 就会变成「凭条已消费、内容没存下」的静默丢失。

@@ -43,6 +43,7 @@ import * as panelSessionState from '../../ui/assets/panel-session-state.js';
 import * as panelSessionUi from '../../ui/assets/panel-session-ui.js';
 import * as panelFeedback from '../../ui/assets/panel-feedback.js';
 import * as panelSearch from '../../ui/assets/panel-search.js';
+import * as panelCanvasTools from '../../ui/assets/panel-canvas-tools.js';
 import { memoryHost } from './fork-memory.mjs';
 
 function matchesSelector(node, selector) {
@@ -328,6 +329,7 @@ function createImports(hana, flashes, captures = { handoff: [], documents: [] })
     },
     './panel-feedback.js': panelFeedback,
     './panel-search.js': panelSearch,
+    './panel-canvas-tools.js': panelCanvasTools,
   };
 }
 

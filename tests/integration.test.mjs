@@ -48,6 +48,7 @@ import * as panelSearchController from '../ui/assets/panel-search-controller.js'
 import * as panelSessionState from '../ui/assets/panel-session-state.js';
 import * as panelSessionUi from '../ui/assets/panel-session-ui.js';
 import * as panelFeedback from '../ui/assets/panel-feedback.js';
+import * as panelCanvasTools from '../ui/assets/panel-canvas-tools.js';
 import * as panelArtifactView from '../ui/assets/panel-artifact-view.js';
 import * as panelArtifactPanel from '../ui/assets/panel-artifact-panel.js';
 import { memoryHost } from './helpers/fork-memory.mjs';
@@ -243,6 +244,7 @@ function imports(hana) {
     './panel-session-state.js': panelSessionState,
     './panel-session-ui.js': panelSessionUi,
     './panel-feedback.js': panelFeedback,
+    './panel-canvas-tools.js': panelCanvasTools,
   };
 }
 function chatResponse(requestId, text = 'answer', terminal = 'done') {

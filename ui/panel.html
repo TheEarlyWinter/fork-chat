@@ -16,27 +16,34 @@
         <span class="brand-tag">FORK CHAT / NON-LINEAR</span>
         <h1 class="brand-title">分叉对话</h1>
         <span class="meta-badge" id="badge-stats">1 卡片 · 0 追问分支</span>
+
+        <div class="session-info-cluster">
+          <span class="session-status-dot" id="session-save-indicator" data-state="booting" title="会话状态"></span>
+          <span id="session-status" role="status" aria-live="polite">正在恢复会话…</span>
+          <button class="btn btn-outline btn-session-action" id="btn-retry-save" type="button" hidden>重试保存</button>
+          <button class="btn btn-outline btn-session-action" id="btn-save-copy" type="button" hidden>保存副本</button>
+        </div>
       </div>
       <div class="header-center">
-        <span class="hint-text" id="active-agent-display">当前助手: 正在连接...</span>
+        <div class="agent-pill" title="当前连接的推理助手">
+          <span class="agent-pill-dot" aria-hidden="true"></span>
+          <span class="hint-text" id="active-agent-display">当前助手: 正在连接...</span>
+        </div>
       </div>
       <div class="header-right">
-        <button class="btn btn-outline" id="btn-import-doc" title="导入本地文档/资料生成独立卡片">+ 导入资料</button>
-        <button class="btn btn-outline" id="btn-bridge-open" title="从 Hana 本体会话导入，或把内容回传过去">连接本体</button>
-        <button class="btn btn-outline" id="btn-bridge-send" title="把当前选中卡片的内容回传到本体会话">回传</button>
-        <button class="btn btn-outline" id="btn-artifact-panel" title="查看本会话的全部文档与版本链">文档</button>
-        <button class="btn btn-outline" id="btn-auto-tidy" title="自动整理树状排版 (Shift+A)">整理</button>
-        <button class="btn btn-outline" id="btn-reset-view">居中视野</button>
+        <div class="btn-group" role="group" aria-label="资料与本体协同">
+          <button class="btn btn-outline" id="btn-import-doc" title="导入本地文档/资料生成独立卡片">+ 导入资料</button>
+          <button class="btn btn-outline" id="btn-bridge-open" title="从 Hana 本体会话导入，或把内容回传过去">连接本体</button>
+          <button class="btn btn-outline" id="btn-bridge-send" title="把当前选中卡片的内容回传到本体会话">回传</button>
+          <button class="btn btn-outline" id="btn-artifact-panel" title="查看本会话的全部文档与版本链">文档</button>
+        </div>
+        <div class="btn-group" role="group" aria-label="画布整理">
+          <button class="btn btn-outline" id="btn-auto-tidy" title="自动整理树状排版 (Shift+A)">整理</button>
+        </div>
         <button class="btn btn-primary" id="btn-new-root">+ 新对话卡片</button>
         <input type="file" id="global-doc-input" style="display: none;" accept=".md,.markdown,.txt,.docx,.pdf,.json,.csv,.py,.js,.ts,.html,.css,.yml,.yaml,.xml,.sh,.sql">
       </div>
     </header>
-
-    <div class="session-strip">
-      <span id="session-status" role="status" aria-live="polite">正在恢复会话…</span>
-      <button class="btn btn-outline" id="btn-retry-save" type="button" hidden>重试保存</button>
-      <button class="btn btn-outline" id="btn-save-copy" type="button" hidden>保存副本</button>
-    </div>
 
     <!-- 主视口：无限画布层 -->
     <main class="canvas-viewport" id="viewport">
@@ -50,22 +57,74 @@
         <div class="cards-layer" id="cards-layer"></div>
       </div>
 
-      <!-- 画布空状态（无任何会话时显示，纯白极简风格） -->
-      <div class="canvas-empty-state" id="canvas-empty-state" hidden>
-        <div class="canvas-empty-title">暂无活动会话</div>
-        <div class="canvas-empty-desc">所有会话已清空。点击下方按钮或在侧边栏新建会话。</div>
+      <!-- 画布空状态（无任何会话或无活动会话时显示，纯白极简风格） -->
+      <div class="session-empty-state" id="session-empty-state" data-canvas-ui hidden>
+        <div class="session-empty-title">暂无活动会话</div>
+        <div class="session-empty-desc">请新建会话，或从侧边栏选择已有会话。</div>
         <button class="btn btn-primary" id="btn-empty-new-session" type="button">+ 新建会话</button>
       </div>
 
-      <!-- 视口底部浮动缩放微件 -->
-      <div class="floating-zoom-bar">
-        <button class="zoom-btn" id="btn-zoom-out">-</button>
-        <span class="zoom-level mono" id="zoom-text">100%</span>
-        <button class="zoom-btn" id="btn-zoom-in">+</button>
+      <!-- 活动会话空画布发射台 (empty-session 状态显示) -->
+      <div class="canvas-launchpad" id="canvas-launchpad" data-canvas-ui hidden>
+        <div class="launchpad-badge mono">READY TO EXPLORE</div>
+        <h2 class="launchpad-title">开启树状多分支思考</h2>
+        <p class="launchpad-desc">打破单一直线聊天的局限。在无限画布上发散推导不同分支方案，横向对比多模型观点，最终汇聚最佳决策。</p>
+
+        <div class="launchpad-cards-grid">
+          <button class="launchpad-card" id="btn-launchpad-new-root" type="button">
+            <div class="launchpad-card-icon">+</div>
+            <div class="launchpad-card-title">新对话卡片</div>
+            <div class="launchpad-card-sub">建立初始根问题，随后按 Tab 随时分支发散。</div>
+          </button>
+
+          <button class="launchpad-card" id="btn-launchpad-import-doc" type="button">
+            <div class="launchpad-card-icon">⎘</div>
+            <div class="launchpad-card-title">拖入资料文档</div>
+            <div class="launchpad-card-sub">导入本地 PDF/DOCX/MD，作为思考源根节点。</div>
+          </button>
+
+          <button class="launchpad-card" id="btn-launchpad-bridge" type="button">
+            <div class="launchpad-card-icon">⑂</div>
+            <div class="launchpad-card-title">从宿主导入</div>
+            <div class="launchpad-card-sub">从主会话或外部上下文引入正在讨论的关键难题。</div>
+          </button>
+        </div>
+
+        <div class="launchpad-shortcuts-footer mono">
+          <span class="shortcut-pill"><kbd class="kbd">Tab</kbd> 选中卡片后衍生分支</span>
+          <span class="shortcut-pill"><kbd class="kbd">Space + 拖动</kbd> 平移画布</span>
+          <span class="shortcut-pill"><kbd class="kbd">Shift + A</kbd> 自动整理</span>
+          <span class="shortcut-pill"><kbd class="kbd">Ctrl + F</kbd> 全局搜字</span>
+        </div>
+      </div>
+
+      <!-- 画布加载/恢复状态 (booting / restore-error) -->
+      <div class="canvas-loading-state" id="canvas-loading-state" data-canvas-ui hidden>
+        <div class="loading-state-box loading-state-booting">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <div class="loading-state-title">正在准备画布会话…</div>
+          <div class="loading-state-desc">请稍候，正在恢复会话快照与推导拓扑。</div>
+        </div>
+        <div class="loading-state-box loading-state-error">
+          <div class="loading-error-icon" aria-hidden="true">!</div>
+          <div class="loading-state-title">会话快照恢复失败</div>
+          <div class="loading-state-desc">无法加载当前画布会话。请使用顶栏重试保存或保存副本，或在侧边栏切换会话。</div>
+        </div>
+      </div>
+
+      <!-- 控制岛 (Floating Control Dock)：右下角集成式视口工具 -->
+      <div class="floating-dock floating-zoom-bar" data-canvas-ui>
+        <button class="dock-btn zoom-btn" id="btn-zoom-out" type="button" title="缩小视野">-</button>
+        <span class="dock-text zoom-level mono" id="zoom-text">100%</span>
+        <button class="dock-btn zoom-btn" id="btn-zoom-in" type="button" title="放大视野">+</button>
+        <div class="dock-divider"></div>
+        <button class="dock-btn btn-reset-view-dock" id="btn-reset-view" type="button" title="视野居中复位">居中</button>
+        <button class="dock-btn" id="btn-fullscreen" type="button" title="全屏模式" aria-label="全屏模式">⛶</button>
+        <button class="dock-btn" id="btn-shortcuts" type="button" title="快捷键速查" aria-label="快捷键速查">?</button>
       </div>
 
       <!-- 全画布内容搜索悬浮栏 (Ctrl+F) -->
-      <div class="floating-search-bar" id="canvas-search-bar" hidden>
+      <div class="floating-search-bar" id="canvas-search-bar" data-canvas-ui hidden>
         <span class="search-icon-symbol" title="全画布检索">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         </span>
@@ -77,14 +136,14 @@
       </div>
 
       <!-- 多选分支合并悬浮操作栏（纯白极简规范） -->
-      <div class="floating-merge-toolbar" id="merge-toolbar" hidden>
+      <div class="floating-merge-toolbar" id="merge-toolbar" data-canvas-ui hidden>
         <span class="merge-count-text" id="merge-count-text">已选 2 个分支</span>
         <button class="btn btn-primary" id="btn-merge-submit">合并总结 ▾</button>
         <button class="btn btn-outline" id="btn-merge-cancel">取消</button>
       </div>
 
       <!-- 画布文件拖拽释放指示区 -->
-      <div class="canvas-drop-indicator" id="canvas-drop-indicator" hidden>
+      <div class="canvas-drop-indicator" id="canvas-drop-indicator" data-canvas-ui hidden>
         <div class="drop-indicator-box">
           <span class="drop-title">释放以导入文档资料</span>
           <span class="drop-sub">支持 MD / Word (.docx) / PDF / 代码与纯文本，生成资料源根卡片</span>
@@ -92,6 +151,47 @@
       </div>
     </main>
   </div>
+
+  <dialog class="shortcuts-dialog" id="shortcuts-dialog" aria-labelledby="shortcuts-dialog-title">
+    <div class="shortcuts-dialog-header">
+      <h2 id="shortcuts-dialog-title">画布快捷键速查</h2>
+      <button class="shortcuts-dialog-close" id="btn-shortcuts-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="shortcuts-dialog-body">
+      <div class="shortcut-row">
+        <span class="shortcut-desc">选中卡片后衍生子分支</span>
+        <kbd class="kbd">Tab</kbd>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">拖拽平移画布</span>
+        <span class="shortcut-keys"><kbd class="kbd">Space</kbd> + 鼠标左键拖动</span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">以鼠标为中心缩放画布</span>
+        <span class="shortcut-keys">滚轮上下滚动</span>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">自动整理树状排版</span>
+        <kbd class="kbd">Shift + A</kbd>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">全画布关键字搜索</span>
+        <kbd class="kbd">Ctrl + F</kbd>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">撤销画布布局与操作</span>
+        <kbd class="kbd">Ctrl + Z</kbd>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">重做画布布局与操作</span>
+        <kbd class="kbd">Ctrl + Shift + Z / Ctrl + Y</kbd>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-desc">多选分支合并</span>
+        <span class="shortcut-keys"><kbd class="kbd">Shift</kbd> + 点击卡片</span>
+      </div>
+    </div>
+  </dialog>
 
   <dialog class="bridge-dialog" id="bridge-dialog" aria-labelledby="bridge-dialog-title">
     <div class="bridge-dialog-header">

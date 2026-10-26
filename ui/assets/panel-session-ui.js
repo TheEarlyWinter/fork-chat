@@ -9,6 +9,25 @@
 import { readRenameIntent, clearRenameIntent } from './fork-session-commands.js';
 import { assertFunction, assertOptionalFunctions, assertObject, assertString, assertMethod } from './panel-contracts.js';
 
+/**
+ * 画布展示状态的唯一派生入口。
+ *
+ * 只回答「这一刻该显示哪种引导/内容」，不读 DOM、不读 visibleCards。
+ * 保存错误与 conflict 是正交状态：已恢复的本地内容继续按 content 展示。
+ */
+export function deriveCanvasPresentation(state, cardCount) {
+  if (!state || typeof state !== 'object' || !state.ready) {
+    return state && state.error ? 'restore-error' : 'booting';
+  }
+  if (state.busy) return 'transitioning';
+  if (!state.activeId) {
+    const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+    return sessions.length === 0 ? 'no-session' : 'no-active';
+  }
+  const count = Number(cardCount);
+  return Number.isFinite(count) && count > 0 ? 'content' : 'empty-session';
+}
+
 export function createPanelSessionUi(deps) {
   if (!deps || typeof deps !== 'object') {
     throw new TypeError('createPanelSessionUi: deps must be an object');
@@ -38,6 +57,12 @@ export function createPanelSessionUi(deps) {
     btnSaveCopy,
     btnNewRoot,
     btnEmptyNewSession,
+    getCardCount,
+    sessionSaveIndicator,
+    sessionEmptyState,
+    canvasLaunchpad,
+    canvasLoadingState,
+    canvasSurface,
     flashMessage,
     isDisposed = () => false,
     hasActiveRequests = () => false,
@@ -68,6 +93,16 @@ export function createPanelSessionUi(deps) {
   assertObject(btnNewRoot, 'btnNewRoot', 'createPanelSessionUi');
   assertObject(btnEmptyNewSession, 'btnEmptyNewSession', 'createPanelSessionUi');
 
+  assertOptionalFunctions(deps, ['getCardCount'], 'createPanelSessionUi');
+
+  // 新增展示节点允许缺省：构造期只校验形状，不调用晚绑定 getter。
+  for (const [name, binding] of Object.entries({
+    sessionSaveIndicator, sessionEmptyState, canvasLaunchpad, canvasLoadingState, canvasSurface,
+  })) {
+    if (binding === undefined || binding === null) continue;
+    if (typeof binding !== 'function') assertObject(binding, name, 'createPanelSessionUi');
+  }
+
   assertString(canvasId, 'canvasId', 'createPanelSessionUi');
 
   // 构造期方法契约校验
@@ -78,6 +113,52 @@ export function createPanelSessionUi(deps) {
 
   let localDisposed = false;
   const checkDisposed = () => localDisposed || (typeof isDisposed === 'function' ? isDisposed() : Boolean(isDisposed));
+
+  // 展示节点支持晚绑定：传函数就在每次同步时解析，允许 Task 2 后补的 HTML 立即生效。
+  const resolveBoundNode = binding => (typeof binding === 'function' ? binding() : binding) || null;
+  const setDataState = (node, value) => {
+    if (!node) return;
+    if (node.dataset && typeof node.dataset === 'object') node.dataset.state = value;
+    else if (typeof node.setAttribute === 'function') node.setAttribute('data-state', value);
+  };
+
+  // 保存指示灯与引导区域独立：有错误时指示灯报 error，但已恢复的内容照旧可见。
+  function deriveSaveIndicatorState(state) {
+    if (!state || !state.ready) return state && state.error ? 'error' : 'booting';
+    if (state.error) return 'error';
+    if (state.busy) return 'busy';
+    if (state.saving) return 'saving';
+    if (state.dirty) return 'dirty';
+    return 'saved';
+  }
+
+  /**
+   * 把派生状态落到展示节点。只改可见性与 data-state，不重建卡片、不扫正文。
+   * 已销毁时直接返回，迟到调用不得改动任何 DOM。
+   */
+  function syncCanvasPresentation() {
+    if (checkDisposed()) return;
+    const state = getSessionController()?.state || null;
+    const cardCount = typeof getCardCount === 'function' ? getCardCount() : 0;
+    const presentation = deriveCanvasPresentation(state, cardCount);
+
+    const emptyState = resolveBoundNode(sessionEmptyState);
+    const launchpad = resolveBoundNode(canvasLaunchpad);
+    const loadingState = resolveBoundNode(canvasLoadingState);
+    const surface = resolveBoundNode(canvasSurface);
+    const saveIndicator = resolveBoundNode(sessionSaveIndicator);
+
+    if (emptyState) emptyState.hidden = !(presentation === 'no-session' || presentation === 'no-active');
+    if (launchpad) launchpad.hidden = presentation !== 'empty-session';
+    if (loadingState) {
+      loadingState.hidden = !(presentation === 'booting' || presentation === 'restore-error');
+      if (!loadingState.hidden) setDataState(loadingState, presentation);
+    }
+    // 首次恢复未完成（含恢复失败）时藏起临时卡片：此时 cards 里还是本地默认卡，
+    // 与“已就绪后的保存错误仍显示真实内容”是两件事，不能混同。
+    if (surface) surface.hidden = presentation === 'booting' || presentation === 'restore-error';
+    if (saveIndicator) setDataState(saveIndicator, deriveSaveIndicatorState(state));
+  }
 
   // 重命名意图并发锁
   const activeRenameCommands = new Set();
@@ -321,6 +402,7 @@ export function createPanelSessionUi(deps) {
       lastPhase = phase;
       renderCards();
     }
+    syncCanvasPresentation();
     publishSessionState();
   }
 
@@ -385,6 +467,7 @@ export function createPanelSessionUi(deps) {
   return {
     handleSessionMessage,
     handleSessionStateChange,
+    syncCanvasPresentation,
     flashMessage,
     getDeleteIntent,
     hasDeleteIntent,

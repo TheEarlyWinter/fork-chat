@@ -248,6 +248,13 @@ export function createCanvasActions(deps) {
   function createBridgeDocCard({ title, text, sourceRef, messageCount }) {
     if (checkDisposed()) return null;
     if (canMutateCanvas && !canMutateCanvas()) return null;
+    // 宿主导入没有可归属的画布会话时立刻拒绝：不自动建会话、不切目标，
+    // 也不在内存里留一张没人保存的孤卡（否则 flush 失败就会静默丢失）。
+    const sessionCtrl = typeof getSessionController === 'function' ? getSessionController() : sessionController;
+    if (!sessionCtrl?.state?.activeId) {
+      flashMessage?.('请先新建画布会话，再导入本体内容。');
+      return null;
+    }
     const currentCards = assertCardsArray(getCards(), 'canvas-actions:createBridgeDocCard');
 
     // 去重只看内容与导入类型：同内容的快照生成两张一模一样的卡没有意义，

@@ -539,6 +539,96 @@ test('panel-viewport: bindViewportController manages mouse dragging, wheel zoom,
   assert.equal(listeners.length, 0, '调用 cleanup 后必须解绑所有事件监听');
 });
 
+test('panel-viewport: data-canvas-ui 浮层与卡片在按住 Space 与滚轮时严格隔离视口拖拽与缩放', () => {
+  const listeners = [];
+  const mockListen = (target, event, handler, options) => {
+    const record = { target, event, handler, options };
+    listeners.push(record);
+    return () => {
+      const idx = listeners.indexOf(record);
+      if (idx !== -1) listeners.splice(idx, 1);
+    };
+  };
+
+  const mockViewport = {
+    classList: {
+      classes: new Set(),
+      add(c) { this.classes.add(c); },
+      remove(c) { this.classes.delete(c); },
+      contains(c) { return this.classes.has(c); },
+    },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }),
+    style: {},
+  };
+  const mockSurface = { style: {} };
+  const mockZoomText = { textContent: '' };
+  const view = { x: 60, y: 40, scale: 1.0, isDragging: false, dragStartX: 0, dragStartY: 0 };
+  let isDisposed = false;
+  let isSpacePressed = false;
+
+  const controller = bindViewportController({
+    viewport: mockViewport,
+    surface: mockSurface,
+    zoomText: mockZoomText,
+    view,
+    getState: () => ({ isDisposed, isSpacePressed }),
+    listen: mockListen,
+  });
+
+  const mousedownHandler = listeners.find(l => l.target === mockViewport && l.event === 'mousedown').handler;
+  const wheelHandler = listeners.find(l => l.target === mockViewport && l.event === 'wheel').handler;
+
+  // 构造带 data-canvas-ui 属性的元素与子元素
+  const uiElement = { dataset: { canvasUi: '' } };
+  const buttonInsideUi = {
+    closest: (sel) => {
+      if (sel.includes('data-canvas-ui') || sel.includes('[data-canvas-ui]')) return uiElement;
+      return null;
+    },
+  };
+
+  // 1. 在 data-canvas-ui 元素上按下鼠标，Space 未按下时：不得拖拽
+  let defaultPrevented = false;
+  mousedownHandler({
+    button: 0,
+    clientX: 200,
+    clientY: 150,
+    target: buttonInsideUi,
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.equal(view.isDragging, false, '在 data-canvas-ui 内部按下鼠标不得启动画布拖拽');
+  assert.equal(defaultPrevented, false, '不得 preventDefault 抢占浮层内按钮点击');
+
+  // 2. 关键防御：在 data-canvas-ui 元素上按下鼠标，即使按住了 Space：也绝对不得启动画布拖拽或抢占事件
+  isSpacePressed = true;
+  defaultPrevented = false;
+  mousedownHandler({
+    button: 0,
+    clientX: 200,
+    clientY: 150,
+    target: buttonInsideUi,
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.equal(view.isDragging, false, 'Space 激活时，点击 data-canvas-ui 内部按钮也绝对不得拖拽画布');
+  assert.equal(defaultPrevented, false, 'Space 激活时，也不得 preventDefault 抢占浮层内按钮点击');
+  assert.equal(mockViewport.classList.contains('is-dragging-canvas'), false);
+
+  // 3. 在 data-canvas-ui 上滚轮：不得缩放画布
+  defaultPrevented = false;
+  const initialScale = view.scale;
+  wheelHandler({
+    deltaY: -100,
+    clientX: 200,
+    clientY: 150,
+    target: buttonInsideUi,
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.equal(view.scale, initialScale, '在 data-canvas-ui 浮层上滚轮不得触发画布缩放');
+  assert.equal(defaultPrevented, false, '在 data-canvas-ui 浮层上滚轮不得被 preventDefault 接管');
+
+  controller.cleanup();
+});
+
 test('panel-battle: validateBattleInput and buildBattleBranchCards pure functions', () => {
   // 1. 输入校验
   assert.deepEqual(validateBattleInput({ prompt: '', selectedCount: 2 }), {

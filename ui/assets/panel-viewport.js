@@ -141,16 +141,18 @@ export function bindViewportController({
       const state = getState();
       if (state.isDisposed || e.button !== 0) return;
 
+      // 无论 Space 是否按下，如果点击目标在 data-canvas-ui 浮层或 chat-card 内部，
+      // 都严禁启动视口拖拽，也不得 preventDefault 抢占按钮与交互原生事件
+      if (e.target?.closest?.('[data-canvas-ui], .chat-card, .floating-zoom-bar, .floating-dock, .canvas-header, .floating-merge-toolbar')) {
+        return;
+      }
+
       if (state.isSpacePressed) {
         view.isDragging = true;
         view.dragStartX = e.clientX - view.x;
         view.dragStartY = e.clientY - view.y;
         viewport.classList?.add('is-dragging-canvas');
         e.preventDefault?.();
-        return;
-      }
-
-      if (e.target?.closest?.('.chat-card, .floating-zoom-bar, .canvas-header, .floating-merge-toolbar')) {
         return;
       }
 
@@ -166,6 +168,10 @@ export function bindViewportController({
     addListener(viewport, 'wheel', (e) => {
       const state = getState();
       if (state.isDisposed) return;
+      // data-canvas-ui 交互浮层内部不接管滚轮，保持浮层自身的滚动或交互
+      if (e.target?.closest?.('[data-canvas-ui]')) {
+        return;
+      }
       // 卡片内部的正文区自己要能滚。以前这里无条件接管滚轮，
       // 结果鼠标停在长回答上滚一下就变成画布缩放，卡片里根本翻不动。
       const scrollHost = e.target?.closest?.('.card-body, .bridge-preview, .card-attachment-body');

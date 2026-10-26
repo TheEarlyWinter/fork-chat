@@ -39,6 +39,7 @@ import { createArtifactPanel } from './panel-artifact-panel.js';
 import { createSessionState } from './panel-session-state.js';
 import { createBridge } from './panel-bridge.js';
 import { findCardsByKeyword, getNextMatchIndex, bindSearchBarController } from './panel-search.js';
+import { createCanvasTools } from './panel-canvas-tools.js';
 
 const activeRequests = new Map();
 
@@ -151,7 +152,6 @@ const renderer = createRenderer({
   documentRef: document,
   getCardsLayer: () => cardsLayer,
   getBadgeStats: () => badgeStats,
-  getEmptyState: () => canvasEmptyState,
   getIsDisposed: () => isDisposed,
   getCards: () => cards,
   getSelectedCardId: () => selectedCardId,
@@ -318,7 +318,22 @@ const sessionStatusEl = document.getElementById('session-status');
 const btnRetrySave = document.getElementById('btn-retry-save');
 const btnSaveCopy = document.getElementById('btn-save-copy');
 const canvasEmptyState = document.getElementById('canvas-empty-state');
+const canvasLaunchpad = document.getElementById('canvas-launchpad');
+const canvasLoadingState = document.getElementById('canvas-loading-state');
+const sessionSaveIndicator = document.getElementById('session-save-indicator');
+const sessionEmptyState = document.getElementById('session-empty-state');
+const btnLaunchpadNewRoot = document.getElementById('btn-launchpad-new-root');
+const btnLaunchpadImportDoc = document.getElementById('btn-launchpad-import-doc');
+const btnLaunchpadBridge = document.getElementById('btn-launchpad-bridge');
 const btnEmptyNewSession = document.getElementById('btn-empty-new-session');
+const btnFullscreen = document.getElementById('btn-fullscreen');
+const btnShortcuts = document.getElementById('btn-shortcuts');
+const shortcutsDialog = document.getElementById('shortcuts-dialog');
+const btnShortcutsClose = document.getElementById('btn-shortcuts-close');
+const fullscreenTarget = (typeof document?.querySelector === 'function' ? document.querySelector('.canvas-app') : null)
+  || document.getElementById('viewport')
+  || document?.documentElement
+  || {};
 const deleteDialog = document.getElementById('delete-session-dialog');
 const deleteTargetTitle = document.getElementById('delete-target-title');
 const deleteDialogError = document.getElementById('delete-dialog-error');
@@ -661,6 +676,9 @@ function createMergeCardFromSelected() {
 
 function renderCards(preserve = true, options = {}) {
   renderer.renderCards(preserve, options);
+  // renderer 在输入法组词、纯布局和销毁路径都会提前返回；
+  // 展示同步必须无条件跟在后面，否则零卡片/布局更新会漏掉空引导。
+  sessionUi?.syncCanvasPresentation();
 }
 
 function bindCardEvents(cardEl, card) {
@@ -940,6 +958,23 @@ listen(globalDocInput, 'change', async (e) => {
   globalDocInput.value = '';
 });
 
+// 空画布发射台：直接接既有业务动作，不复用重复 ID、不模拟点击。
+// 节点可能还没落地（Task 2），listen 对缺失节点是空操作。
+listen(btnLaunchpadNewRoot, 'click', async () => {
+  await createRootCard();
+});
+
+listen(btnLaunchpadImportDoc, 'click', () => {
+  globalDocInput?.click();
+});
+
+listen(btnLaunchpadBridge, 'click', () => {
+  if (isDisposed) return;
+  bridgeDialogEl?.showModal?.();
+  void loadBridgeSessions();
+  void loadOutboxList();
+});
+
 // 画布全局拖拽释放文档
 let dragOverTimer = null;
 listen(viewport, 'dragenter', (e) => {
@@ -1036,12 +1071,31 @@ sessionUi = createPanelSessionUi({
   btnSaveCopy,
   btnNewRoot,
   btnEmptyNewSession,
+  getCardCount: () => cards.length,
+  sessionSaveIndicator: () => sessionSaveIndicator,
+  // Task 2 会换上新节点；新节点未落地前继续用既有空状态节点，保证行为不变。
+  sessionEmptyState: () => sessionEmptyState || canvasEmptyState,
+  canvasLaunchpad: () => canvasLaunchpad,
+  canvasLoadingState: () => canvasLoadingState,
+  canvasSurface: () => surface,
   documentRef: document,
   later,
   cancelLater,
   flashMessage,
   isDisposed: () => isDisposed,
   hasActiveRequests: () => activeRequests.size > 0,
+});
+
+const canvasTools = createCanvasTools({
+  documentRef: document,
+  fullscreenTarget: fullscreenTarget || document?.documentElement,
+  btnFullscreen: btnFullscreen || {},
+  btnShortcuts: btnShortcuts || {},
+  shortcutsDialog: shortcutsDialog || {},
+  btnShortcutsClose: btnShortcutsClose || {},
+  listen,
+  flashMessage,
+  isDisposed: () => isDisposed,
 });
 
 sessionController = createForkSessionController({
@@ -1087,8 +1141,9 @@ function disposePanel() {
     if (input) input.disabled = true;
   }
   for (const control of document.querySelectorAll?.('button, input, textarea, select') || []) control.disabled = true;
-  for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl]) dialog?.close?.();
+  for (const dialog of [battleDialog, deleteDialog, bridgeDialogEl, bridgeSendDialogEl, shortcutsDialog]) dialog?.close?.();
   closeAllTransientUI();
+  canvasTools?.dispose();
   historyManager.clear();
   sessionUi?.dispose();
   feedbackService?.dispose();

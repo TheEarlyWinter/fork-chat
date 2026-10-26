@@ -31,13 +31,12 @@ export function createRenderer(deps) {
   assertMethod(deps.documentRef, 'getElementById', 'createRenderer');
   assertMethod(deps.documentRef, 'createElement', 'createRenderer');
 
-  assertOptionalFunctions(deps, ['getBadgeStats', 'getEmptyState', 'onBeforeRender', 'onAfterRender'], 'createRenderer');
+  assertOptionalFunctions(deps, ['getBadgeStats', 'onBeforeRender', 'onAfterRender'], 'createRenderer');
 
   const {
     documentRef,
     getCardsLayer,
     getBadgeStats = () => null,
-    getEmptyState = () => null,
     onBeforeRender,
     onAfterRender,
     getIsDisposed,
@@ -304,8 +303,6 @@ export function createRenderer(deps) {
     const badgeStats = getBadgeStats();
     if (badgeStats) badgeStats.textContent = `${cards.length} 卡片 · ${branchCount} 追问分支`;
     renderConnectors();
-    const emptyState = getEmptyState();
-    if (emptyState) emptyState.hidden = cards.length > 0;
 
     if (typeof onAfterRender === 'function') {
       try { onAfterRender(); } catch {}
