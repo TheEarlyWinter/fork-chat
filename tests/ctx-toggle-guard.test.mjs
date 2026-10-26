@@ -31,7 +31,6 @@ function makeHarness({ mutateAllowed = true } = {}) {
     recordSnapshot: () => { snapshots += 1; },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: id => { if (timers[id - 1]) timers[id - 1].fired = true; },
-    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
   });
   const click = () => listeners.get('click')({ stopPropagation() {} });
   const leave = () => listeners.get('pointerleave')?.();
