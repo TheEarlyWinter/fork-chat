@@ -26,7 +26,7 @@
 
 新页不加载画布、模型池、KaTeX 或新依赖。每次绑定一次 GET，无轮询。SDK entries 没有分页，因此只在首次读取时调用，缓存仅含经授权的不可变交接投影。服务端按 ownerScopeKey+sessionId 去重并缓存，最多32项且总UTF-8数据不超过16MiB；失败不缓存，不保存其他历史。缓存丢弃可重读，不参与业务状态机。
 
-原有 owner/claim/回执/unknown 不重发、home、指定Agent、memoryEnabled=false、triggerTurn=false 保留。不扩权限、不改网络。版本 2.3.0-beta.4；最低宿主取已验证的1.2.1-beta，不断言这是功能首次引入版本。
+原有 owner/claim/回执/unknown 不重发、home、指定Agent、memoryEnabled=false、triggerTurn=false 保留。权限仅新增预览必需的只读资源能力 `app/resources.read`（与已有 `app/resources.write` 并列，其余 12 项与网络不变）；该能力需在装载/更新确认时由本人确认。版本 2.3.0-beta.4；最低宿主取已验证的1.2.1-beta，不断言这是功能首次引入版本。
 
 ## 验证与交付
 

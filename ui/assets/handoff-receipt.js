@@ -9,6 +9,7 @@
 import { safeDetail } from './host-api.js';
 
 const STATUS_IDLE = '';
+const PREVIEW_FAILED = '文件无法打开，请稍后重试。';
 
 function createEl(documentRef, tag, className, textValue) {
   const el = documentRef.createElement(tag);
@@ -64,27 +65,37 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
     setStatus('');
   }
 
-  async function openFile(receiptSessionId, file) {
+  async function openFile(token, receiptSessionId, file) {
+    let receipt;
     try {
-      await hana.resources.open({
+      receipt = await hana.resources.open({
         resource: { kind: 'session-file', sessionId: receiptSessionId, fileId: file.fileId },
         mode: 'preview',
       });
-    } catch (error) {
-      setStatus(errorText(error));
+    } catch {
+      // 只对当前绑定改状态：旧绑定/已卸载的迟到失败一律丢弃
+      if (token === generation && !disposed) setStatus(PREVIEW_FAILED);
+      return;
     }
+    if (token !== generation || disposed) return;
+    // 宿主可以“没抛错但也没打开”：不把未打开当成功
+    if (receipt?.opened !== true) setStatus(PREVIEW_FAILED);
   }
 
   function render(receipt) {
     const files = Array.isArray(receipt.files) ? receipt.files : [];
-    meta.textContent = `助手 ${receipt.agentId || '未知'} · ${files.length} 个交付文件`;
+    const actionLabel = typeof receipt.actionId === 'string' && receipt.actionId ? receipt.actionId : '未记录动作标识';
+    meta.textContent = `会话 ${receipt.sessionId} · 动作 ${actionLabel} · 助手 ${receipt.agentId || '未知'} · ${files.length} 个交付文件`;
     transcript.textContent = receipt.transcript;
     for (const file of files) {
       const button = createEl(documentRef, 'button', 'handoff-receipt-file', file.name);
       button.type = 'button';
       button.setAttribute('data-file-id', file.fileId);
+      // 按钮绑定自己的代号：切换会话后旧按钮不得再打开旧会话的文件
+      const token = generation;
       button.addEventListener('click', () => {
-        void openFile(receipt.sessionId, file);
+        if (token !== generation || disposed) return;
+        void openFile(token, receipt.sessionId, file);
       });
       fileSection.appendChild(button);
     }

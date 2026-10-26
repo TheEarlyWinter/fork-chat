@@ -19,6 +19,7 @@
     "app/sessions.manage",
     "app/session.start-turn",
     "app/session.stage-file",
+    "app/resources.read",
     "app/resources.write"
   ],
   "network": {

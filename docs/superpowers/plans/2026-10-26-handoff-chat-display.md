@@ -14,7 +14,7 @@
 
 - 基线8fa083d、分支fix/handoff-chat-display；开发副本单源码写手，原项目/平台/安装目录不动。
 - 不改PM IO、claim状态机或失败不重发。不重新create/stage/补发已有消息，不启动真实模型/GUI。
-- 版本2.3.0-beta.4，minAppVersion=1.2.1-beta，12项权限和网络不变。
+- 版本2.3.0-beta.4，minAppVersion=1.2.1-beta，权限仅在原 12 项上新增预览必需的只读资源能力 `app/resources.read`，其余能力与网络不变。
 - 只使用正式SDK与已有已鉴权requestHost；卡片只认embeddedSessionId，无绑定不请求，不借getActive/origin/URL猜。
 - 原生附件气泡不是当前接口能力；本次提供卡片中的真实SessionFile预览入口，不伪造消息。
 - 必要RED/GREEN、Node26全量一次、一次独立审查；不复跑Node24全套或掉电测试。
@@ -50,7 +50,7 @@
 - [ ] manifest新增cards/messageRenderers，版本/min宿主按全局值；README简述旧会话重开即可投影（有旧回执时）和卡片文件入口，不宣称原生附件气泡。
 - [ ] 定向GREEN：新2文件+service/host/integration/panel相关+PM新3例；JS --check。必要失败只定向修，不扩大无关重构。
 - [ ] 点名git add并本地提交。冻结HEAD后Node26全量一次：`node --experimental-vm-modules --test --test-concurrency=4 "tests/*.test.mjs"`，无fail/skip/cancel。
-- [ ] 正式打包至新目录fork-chat-2.3.0-beta.4-handoff-chat-display-fix，原TOOLS，tag v2.3.0-beta.4。核静态0错误、ZIP CRC/SHA、build-info最终commit、源码相同、权限网络不变。不删除旧包；动态依赖warning如实。
+- [ ] 正式打包至新目录fork-chat-2.3.0-beta.4-handoff-chat-display-fix，原TOOLS，tag v2.3.0-beta.4。核静态0错误、ZIP CRC/SHA、build-info最终commit、源码相同、权限（13项，新增 app/resources.read）与网络不变。不删除旧包；动态依赖warning如实。
 - [ ] 报告写本轮task1-report.md，含RED/GREEN命令与统计、commit、包路径/hash、未验。停止源码写入，不安装/push/merge/真实GUI或模型。
 
 ### Task 2: 审查、正式更新与实机收口

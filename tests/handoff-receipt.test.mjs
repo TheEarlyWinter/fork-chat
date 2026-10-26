@@ -203,9 +203,11 @@ test('invalid or downgraded view metadata is refused, never treated as a legacy 
 
 test('a legacy message without view metadata is readable only through the current owner action receipts', async () => {
   const content = '旧版交接正文';
-  const entries = [entry({ id: 'legacy-1', content })];
+  const actionId = 'ha_' + 'c'.repeat(32);
+  // beta.3 的正式 writeContext 一直带 actionId/source，夹具必须与真实形状一致
+  const entries = [entry({ id: 'legacy-1', content, details: { actionId, source: SOURCE } })];
   const actions = [{
-    actionId: 'ha_' + 'c'.repeat(32),
+    actionId,
     state: 'ready',
     sessionId: SESSION,
     entryId: 'legacy-1',
@@ -218,7 +220,7 @@ test('a legacy message without view metadata is readable only through the curren
 
   const receipt = await reader.read({ owner: OWNER, sessionId: SESSION });
   assert.equal(receipt.transcript, content);
-  assert.equal(receipt.actionId, actions[0].actionId);
+  assert.equal(receipt.actionId, actionId);
   assert.equal(receipt.agentId, 'agent-old');
   assert.deepEqual(receipt.source, SOURCE);
   assert.deepEqual(receipt.files.map(file => file.kind), ['artifact', 'archive']);
@@ -236,6 +238,37 @@ test('a legacy message without view metadata is readable only through the curren
     await errorCodeOf(foreignReader.read({ owner: OWNER, sessionId: SESSION })),
     HANDOFF_RECEIPT_CODES.UNAVAILABLE,
   );
+});
+
+test('legacy recovery requires the entry actionId to match the owner record exactly', async () => {
+  const content = '旧版交接正文';
+  const recordActionId = 'ha_' + 'c'.repeat(32);
+  const actions = [{
+    actionId: recordActionId,
+    state: 'ready',
+    sessionId: SESSION,
+    entryId: 'legacy-1',
+    agentId: 'agent-old',
+    source: SOURCE,
+    files: [{ ...ARTIFACT_FILE }],
+  }];
+  // 缺失 / 非法 / 与动作记录不一致都不得恢复（三 ID 必须同时对上）
+  const badDetails = [
+    undefined,
+    { source: SOURCE },
+    { actionId: 'ha_' + 'e'.repeat(32), source: SOURCE },
+    { actionId: 'not-an-action-id', source: SOURCE },
+  ];
+  for (const details of badDetails) {
+    const entries = [entry({ id: 'legacy-1', content, details })];
+    const store = fakeStore(actions);
+    const reader = createHandoffReceiptReader({ sdk: fakeSdk({ entries }), store });
+    assert.equal(
+      await errorCodeOf(reader.read({ owner: OWNER, sessionId: SESSION })),
+      HANDOFF_RECEIPT_CODES.UNAVAILABLE,
+      JSON.stringify(details),
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

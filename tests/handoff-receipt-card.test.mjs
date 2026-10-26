@@ -104,6 +104,11 @@ test('the card reads the receipt for its embedded session and renders text and f
   const buttons = documentRef.body.querySelectorAll('.handoff-receipt-file');
   assert.deepEqual(buttons.map(button => button.textContent), ['报告.md', 'handoff.md']);
 
+  // 卡片元信息必须可核对到具体会话与动作，纯文本可选中
+  const meta = documentRef.body.querySelector('.handoff-receipt-meta');
+  assert.match(meta.textContent, new RegExp(SESSION_A));
+  assert.match(meta.textContent, new RegExp(RECEIPT.actionId));
+
   buttons[0].dispatchEvent({ type: 'click' });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(hana.resourceCalls, [{
@@ -111,6 +116,78 @@ test('the card reads the receipt for its embedded session and renders text and f
     options: undefined,
   }]);
   card.dispose();
+});
+
+test('a refused preview reports a fixed short error instead of looking opened', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  hana.resources.open = async input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return { opened: false };
+  };
+  const recorder = requestRecorder();
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
+  await waitFor(() => /无法打开|未打开|失败/.test(documentRef.body.querySelector('.handoff-receipt-status').textContent));
+  card.dispose();
+});
+
+test('a file failure from an old binding cannot overwrite the new card', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const preview = deferred();
+  hana.resources.open = input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return preview.promise;
+  };
+  const recorder = requestRecorder(({ path }) => {
+    if (path.includes(SESSION_A)) return response({ ok: true, receipt: RECEIPT });
+    return response({ ok: true, receipt: { ...RECEIPT, sessionId: SESSION_B, transcript: 'B 会话正文', files: [] } });
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  const staleButton = documentRef.body.querySelectorAll('.handoff-receipt-file')[0];
+  staleButton.dispatchEvent({ type: 'click' });
+  await waitFor(() => hana.resourceCalls.length === 1);
+
+  hana.emit({ slot: 'card', embeddedSessionId: SESSION_B });
+  await waitFor(() => documentRef.body.textContent.includes('B 会话正文'));
+  preview.reject(new Error('EACCES /private/handoff/secret'));
+  await new Promise(resolve => setImmediate(resolve));
+  const statusText = documentRef.body.querySelector('.handoff-receipt-status').textContent;
+  assert.equal(statusText, '', '旧绑定的预览失败不得污染新卡状态');
+  assert.equal(documentRef.body.textContent.includes('/private/handoff/secret'), false);
+
+  // 旧按钮回调不得在新的绑定下打开旧会话的文件
+  staleButton.dispatchEvent({ type: 'click' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(hana.resourceCalls.length, 1, '旧按钮必须失效');
+  card.dispose();
+});
+
+test('a preview failure after dispose is ignored', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const preview = deferred();
+  hana.resources.open = input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return preview.promise;
+  };
+  const recorder = requestRecorder();
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+
+  documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
+  await waitFor(() => hana.resourceCalls.length === 1);
+  const status = documentRef.body.querySelector('.handoff-receipt-status');
+  card.dispose();
+  preview.reject(new Error('EACCES'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(status.textContent, '', 'dispose 后的失败不得改写已卸载的状态栏');
+  assert.equal(documentRef.body.children.length, 0);
 });
 
 test('a binding change clears the old receipt immediately and a late answer cannot overwrite it', async () => {
@@ -197,6 +274,12 @@ test('the manifest maps branch-handoff to a declared card whose route page exist
   const page = await fs.readFile(path.join(repoRoot, 'ui', 'handoff-receipt.html'), 'utf8');
   assert.match(page, /assets\/handoff-receipt-boot\.js/, '卡页面必须加载自己的轻量启动脚本');
   assert.equal(page.includes('panel.html'), false, '交接卡不得加载完整画布');
+
+  // 官方 APPS.md：resources.open/pick/requestAccess 共用 app/resources.read
+  const capabilities = Array.isArray(manifest.capabilities) ? manifest.capabilities : [];
+  assert.ok(capabilities.includes('app/resources.read'), '预览会话文件必须声明只读资源能力');
+  assert.ok(capabilities.includes('app/resources.write'));
+  assert.equal(capabilities.length, 13, '只新增预览必需的只读资源能力');
 
   assert.equal(manifest.version, '2.3.0-beta.4');
   assert.equal(manifest.minAppVersion, '1.2.1-beta');
