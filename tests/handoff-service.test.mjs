@@ -125,7 +125,7 @@ function fakeHost(overrides = {}) {
   return Object.assign(host, overrides);
 }
 
-function fakeSdk(agentIds = ['agent-a'], { sessions = null } = {}) {
+function fakeSdk(agentIds = ['agent-a'], { sessions = null, resources = null } = {}) {
   const calls = [];
   const sdk = {
     calls,
@@ -137,6 +137,7 @@ function fakeSdk(agentIds = ['agent-a'], { sessions = null } = {}) {
     },
   };
   if (sessions) sdk.sessions = sessions;
+  if (resources) sdk.resources = resources;
   return sdk;
 }
 
@@ -440,6 +441,116 @@ test('confirm writes v1 handoffView and the receipt route projects the saved cus
   const missing = await emptyHarness.call('GET', '/api/handoff/sessions/sess-1/receipt');
   assert.equal(missing.status, 404);
   assert.equal(missing.body.code, 'HANDOFF_RECEIPT_NOT_FOUND');
+});
+
+/** 生产 session-file ResourceIO 回执形状：resource 必须回显输入的 sessionId/fileId */
+function fakeSessionResources(files) {
+  const calls = { stat: [], read: [] };
+  const resourceOf = (ref, displayName) => ({
+    kind: 'session-file',
+    fileId: ref.fileId,
+    ...(ref.sessionId ? { sessionId: ref.sessionId } : {}),
+    provider: 'session_file',
+    filePath: '/home/somebody/.hanako/session-files/payload/file',
+    displayName,
+  });
+  return {
+    calls,
+    async stat(ref) {
+      calls.stat.push(ref);
+      const entry = files[ref.fileId];
+      if (!entry) {
+        const error = new Error('session file not found');
+        error.code = 'resource_not_found';
+        throw error;
+      }
+      return {
+        resourceKey: `session-file:${ref.fileId}`,
+        resource: resourceOf(ref, entry.name),
+        exists: true,
+        isDirectory: false,
+        version: { mtimeMs: 1, size: entry.bytes.length },
+        filePath: '/home/somebody/.hanako/session-files/payload/file',
+      };
+    },
+    async read(ref) {
+      calls.read.push(ref);
+      const entry = files[ref.fileId];
+      if (!entry) {
+        const error = new Error('session file not found');
+        error.code = 'resource_not_found';
+        throw error;
+      }
+      return {
+        resourceKey: `session-file:${ref.fileId}`,
+        resource: resourceOf(ref, entry.name),
+        content: entry.bytes,
+        version: { mtimeMs: 1, size: entry.bytes.length },
+        filePath: '/home/somebody/.hanako/session-files/payload/file',
+      };
+    },
+  };
+}
+
+test('the read-only file preview route reads a receipt file through the official ResourceIO', async () => {
+  const dataDir = await makeDir();
+  const artifactId = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [artifactId]: artifactFixture(artifactId, '# 报告\n\n真实产物正文\n') });
+  const host = fakeHost();
+  let entries = [];
+  const sessions = {
+    async get({ sessionId }) {
+      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'timeline-reverser' } };
+    },
+    async entries({ sessionId }) {
+      return { sessionId, entries, leafId: entries.at(-1)?.id ?? null };
+    },
+  };
+  const resources = fakeSessionResources({
+    'file-1': { name: '报告.md', bytes: Buffer.from('# 报告\n\n真实产物正文\n', 'utf8') },
+  });
+  const sdk = fakeSdk(['agent-a'], { sessions, resources });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const harness = makeHarness({ dataDir, store, artifacts, host, sdk });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
+  await confirmViaRoute(harness, prepared.actionId);
+  const write = host.calls.find(call => call[0] === 'writeContext')[1];
+  entries = [{
+    id: 'entry-1',
+    parentId: null,
+    type: 'custom_message',
+    customType: 'app:timeline-reverser/branch-handoff',
+    display: true,
+    content: write.content,
+    details: write.details,
+  }];
+
+  const response = await harness.call('GET', '/api/handoff/sessions/sess-1/files/file-1/preview');
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.ok, true);
+  const preview = response.body.preview;
+  assert.equal(preview.fileId, 'file-1');
+  assert.equal(preview.name, '报告.md');
+  assert.equal(preview.mime, 'text/markdown');
+  assert.equal(preview.format, 'markdown');
+  assert.equal(preview.text, '# 报告\n\n真实产物正文\n');
+  assert.match(preview.html, /<h1>报告<\/h1>/);
+  assert.deepEqual(resources.calls.stat, [{ kind: 'session-file', fileId: 'file-1', sessionId: 'sess-1' }]);
+  assert.deepEqual(resources.calls.read, [{ kind: 'session-file', fileId: 'file-1', sessionId: 'sess-1' }]);
+  // 路由不回传路径、owner 指纹或无关消息
+  assert.equal(JSON.stringify(response.body).includes('/home/'), false);
+
+  // 不属于该回执的 fileId：404 且不触碰 ResourceIO
+  const foreign = await harness.call('GET', '/api/handoff/sessions/sess-1/files/file-999/preview');
+  assert.equal(foreign.status, 404);
+  assert.equal(foreign.body.code, 'HANDOFF_FILE_NOT_FOUND');
+  assert.equal(resources.calls.stat.length, 1);
+
+  // 其它调用方的同一会话：回执归属不符，仍然拒绝
+  const other = await harness.call('GET', '/api/handoff/sessions/sess-1/files/file-1/preview', { principal: 'user-2' });
+  assert.equal(other.body.ok, false);
+  assert.equal(resources.calls.read.length, 1);
 });
 
 test('a dispatch.decision write or close failure stops the claim before any host create', async () => {

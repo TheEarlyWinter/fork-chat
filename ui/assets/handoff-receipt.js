@@ -1,15 +1,24 @@
 /**
  * 交接卡的只读前端：只认宿主盖戳的 embeddedSessionId，不借 URL、全局焦点、
  * getActive 或 originSessionId 猜会话。正文以文本节点显示（不注入 HTML），
- * 文件入口走正式 resources.open 的 session-file 预览。
+ * Markdown/纯文本文件按需读应用自己的只读预览接口并在卡内显示，其它文件入口
+ * 继续走正式 resources.open 的 session-file 预览。
  *
  * 没有绑定就明确不可用且不发请求；绑定变化立即清空旧内容，迟到响应直接丢弃。
- * 这里没有业务写、没有模型调用、也没有轮询。
+ * 每张卡同时只发一个文件请求；这里没有业务写、没有模型调用、也没有轮询。
  */
 import { safeDetail } from './host-api.js';
+import { createFilePreviewView } from './handoff-file-preview.js';
 
 const STATUS_IDLE = '';
 const PREVIEW_FAILED = '文件无法打开，请稍后重试。';
+const FILE_PREVIEW_FAILED = '文件暂时无法预览';
+const TEXT_MIMES = new Set(['text/markdown', 'text/plain']);
+
+function isTextFile(file) {
+  if (typeof file?.mime !== 'string') return false;
+  return TEXT_MIMES.has(file.mime.split(';')[0].trim().toLowerCase());
+}
 
 function createEl(documentRef, tag, className, textValue) {
   const el = documentRef.createElement(tag);
@@ -41,20 +50,35 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
   const transcript = createEl(documentRef, 'pre', 'handoff-receipt-transcript');
   transcript.id = 'handoff-receipt-transcript';
   const fileSection = createEl(documentRef, 'div', 'handoff-receipt-files');
+  const fileStatus = createEl(documentRef, 'div', 'handoff-file-status');
+  fileStatus.setAttribute('role', 'status');
+  const previewView = createFilePreviewView({ documentRef });
   root.appendChild(title);
   root.appendChild(meta);
   root.appendChild(status);
   root.appendChild(transcript);
   root.appendChild(fileSection);
+  root.appendChild(fileStatus);
+  root.appendChild(previewView.root);
   documentRef.body.appendChild(root);
 
   let sessionId;
   let generation = 0;
   let disposed = false;
+  let previewBusy = false;
 
   function setStatus(value) {
     status.textContent = value || STATUS_IDLE;
     status.style.display = value ? 'block' : 'none';
+  }
+
+  function setFileStatus(value) {
+    fileStatus.textContent = value || STATUS_IDLE;
+    fileStatus.style.display = value ? 'block' : 'none';
+  }
+
+  function setFileButtonsDisabled(disabled) {
+    for (const child of fileSection.children) child.disabled = disabled;
   }
 
   function clearContent() {
@@ -62,6 +86,9 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
     meta.textContent = '';
     // 文件按钮属于上一条绑定：绑定一变就整批移除，避免旧 fileId 被点开
     while (fileSection.children.length > 0) fileSection.removeChild(fileSection.children[0]);
+    previewView.close();
+    setFileStatus('');
+    previewBusy = false;
     setStatus('');
   }
 
@@ -82,6 +109,44 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
     if (receipt?.opened !== true) setStatus(PREVIEW_FAILED);
   }
 
+  async function openTextPreview(token, receiptSessionId, file) {
+    if (previewBusy) return;
+    previewBusy = true;
+    setFileButtonsDisabled(true);
+    setFileStatus('');
+    try {
+      const response = await requestHost(
+        hana,
+        `/api/handoff/sessions/${encodeURIComponent(receiptSessionId)}/files/${encodeURIComponent(file.fileId)}/preview`,
+        { method: 'GET' },
+      );
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      // 旧绑定/已卸载的迟到响应一律丢弃，不重开预览
+      if (token !== generation || disposed) return;
+      if (response.ok === false || body?.ok !== true || !body.preview) {
+        const code = typeof body?.code === 'string' ? body.code : 'HANDOFF_FILE_PREVIEW_FAILED';
+        setFileStatus(`${FILE_PREVIEW_FAILED}（${code}）`);
+        return;
+      }
+      setFileStatus('');
+      previewView.open(body.preview);
+    } catch {
+      if (token === generation && !disposed) {
+        setFileStatus(`${FILE_PREVIEW_FAILED}（HANDOFF_FILE_PREVIEW_FAILED）`);
+      }
+    } finally {
+      if (token === generation && !disposed) {
+        previewBusy = false;
+        setFileButtonsDisabled(false);
+      }
+    }
+  }
+
   function render(receipt) {
     const files = Array.isArray(receipt.files) ? receipt.files : [];
     const actionLabel = typeof receipt.actionId === 'string' && receipt.actionId ? receipt.actionId : '未记录动作标识';
@@ -95,7 +160,8 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
       const token = generation;
       button.addEventListener('click', () => {
         if (token !== generation || disposed) return;
-        void openFile(token, receipt.sessionId, file);
+        if (isTextFile(file)) void openTextPreview(token, receipt.sessionId, file);
+        else void openFile(token, receipt.sessionId, file);
       });
       fileSection.appendChild(button);
     }
@@ -162,6 +228,7 @@ export function createHandoffReceiptCard({ hana, documentRef, requestHost } = {}
       // 卸载阶段的取消失败不影响页面销毁
     }
     unsubscribe = null;
+    previewView.dispose();
     root.remove();
   }
 

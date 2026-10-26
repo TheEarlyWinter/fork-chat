@@ -79,6 +79,57 @@
     }
     .handoff-receipt-file:hover { border-color: #18181b; }
     .handoff-receipt-file:focus-visible { outline: 1px solid #18181b; outline-offset: 2px; }
+    .handoff-receipt-file:disabled { cursor: default; color: var(--text-muted); border-color: var(--border); }
+    .handoff-file-status {
+      display: none;
+      font-size: 10.5px;
+      color: #b42318;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .handoff-file-preview {
+      display: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #fdfdfc;
+    }
+    .handoff-file-preview-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .handoff-file-preview-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .handoff-file-preview-toggle,
+    .handoff-file-preview-close {
+      font-family: inherit;
+      font-size: 10.5px;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #ffffff;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .handoff-file-preview-toggle:hover,
+    .handoff-file-preview-close:hover { border-color: #18181b; }
+    .handoff-file-preview-body { max-height: 420px; overflow: auto; padding: 8px 10px; }
+    .handoff-file-preview-frame { width: 100%; min-height: 260px; border: 0; background: #ffffff; }
+    .handoff-file-preview-text {
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
   </style>
 </head>
 <body>

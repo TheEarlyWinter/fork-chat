@@ -25,6 +25,11 @@ const RECEIPT = {
   ],
 };
 
+const PDF_RECEIPT = {
+  ...RECEIPT,
+  files: [{ fileId: 'sf_pdf_1', name: 'report.pdf', mime: 'application/pdf', kind: 'artifact' }],
+};
+
 function fakeHana(context) {
   const listeners = new Set();
   const resourceCalls = [];
@@ -111,10 +116,10 @@ test('the card reads the receipt for its embedded session and renders text and f
 
   buttons[0].dispatchEvent({ type: 'click' });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(hana.resourceCalls, [{
-    input: { resource: { kind: 'session-file', sessionId: SESSION_A, fileId: 'sf_report_1' }, mode: 'preview' },
-    options: undefined,
-  }]);
+  // Markdown 不再借宿主 resources.open，而是按需请求应用自己的只读预览接口
+  assert.equal(recorder.calls.length, 2);
+  assert.equal(recorder.calls[1].path, `/api/handoff/sessions/${SESSION_A}/files/sf_report_1/preview`);
+  assert.deepEqual(hana.resourceCalls, [], 'MD 不得再走 resources.open');
   card.dispose();
 });
 
@@ -125,9 +130,9 @@ test('a refused preview reports a fixed short error instead of looking opened', 
     hana.resourceCalls.push({ input, options: undefined });
     return { opened: false };
   };
-  const recorder = requestRecorder();
+  const recorder = requestRecorder(async () => response({ ok: true, receipt: PDF_RECEIPT }));
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
 
   documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
   await waitFor(() => /无法打开|未打开|失败/.test(documentRef.body.querySelector('.handoff-receipt-status').textContent));
@@ -143,11 +148,11 @@ test('a file failure from an old binding cannot overwrite the new card', async (
     return preview.promise;
   };
   const recorder = requestRecorder(({ path }) => {
-    if (path.includes(SESSION_A)) return response({ ok: true, receipt: RECEIPT });
+    if (path.includes(SESSION_A)) return response({ ok: true, receipt: PDF_RECEIPT });
     return response({ ok: true, receipt: { ...RECEIPT, sessionId: SESSION_B, transcript: 'B 会话正文', files: [] } });
   });
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
 
   const staleButton = documentRef.body.querySelectorAll('.handoff-receipt-file')[0];
   staleButton.dispatchEvent({ type: 'click' });
@@ -176,9 +181,9 @@ test('a preview failure after dispose is ignored', async () => {
     hana.resourceCalls.push({ input, options: undefined });
     return preview.promise;
   };
-  const recorder = requestRecorder();
+  const recorder = requestRecorder(async () => response({ ok: true, receipt: PDF_RECEIPT }));
   const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
-  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
 
   documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
   await waitFor(() => hana.resourceCalls.length === 1);
@@ -257,6 +262,190 @@ test('dispose unsubscribes the surface so later context changes do nothing', asy
 });
 
 // ---------------------------------------------------------------------------
+// 文件预览：MD/纯文本走新只读接口，不再依赖宿主 resources.open
+// ---------------------------------------------------------------------------
+
+const PREVIEW_TEXT = '# 报告\n\n真实字节正文，<script>alert(1)</script> 必须当文本。\n';
+const PREVIEW_HTML = '<h1>报告</h1>\n<p>真实字节正文，&lt;script&gt;alert(1)&lt;/script&gt; 必须当文本。</p>';
+
+function previewRecorder({ receipt = RECEIPT, receipts = null, previewByFile = {}, previewHttp = null } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async requestHost(hana, requestPath, init) {
+      calls.push({ path: requestPath, init });
+      if (requestPath.endsWith('/receipt')) {
+        if (receipts) {
+          const match = /\/sessions\/([^/]+)\/receipt$/.exec(requestPath);
+          const key = match ? decodeURIComponent(match[1]) : '';
+          return response({ ok: true, receipt: receipts[key] ?? receipts.default });
+        }
+        return response({ ok: true, receipt });
+      }
+      const match = /\/files\/([^/]+)\/preview$/.exec(requestPath);
+      if (!match) throw new Error(`unexpected path ${requestPath}`);
+      const fileId = decodeURIComponent(match[1]);
+      if (previewHttp) return previewHttp(fileId);
+      const preview = previewByFile[fileId];
+      if (!preview) return response({ ok: false, code: 'HANDOFF_FILE_NOT_FOUND', error: '文件不在本次交接回执中' }, 404);
+      return response({ ok: true, preview });
+    },
+  };
+}
+
+function previewOf(fileId, { text = PREVIEW_TEXT, html = PREVIEW_HTML, format = 'markdown', name = '报告.md', mime = 'text/markdown' } = {}) {
+  return { fileId, name, mime, format, text, ...(html === undefined ? {} : { html }) };
+}
+
+async function openFirstFile(documentRef) {
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 2);
+  const button = documentRef.body.querySelectorAll('.handoff-receipt-file')[0];
+  button.dispatchEvent({ type: 'click' });
+  return button;
+}
+
+test('a markdown file opens in-card from the preview route while the host file registry stays untouched', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const recorder = previewRecorder({ previewByFile: { sf_report_1: previewOf('sf_report_1') } });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  await openFirstFile(documentRef);
+  await waitFor(() => documentRef.body.querySelector('.handoff-file-preview-frame')?.srcdoc !== undefined);
+
+  assert.equal(recorder.calls.length, 2, '收据 + 一次文件预览请求');
+  assert.equal(recorder.calls[1].path, `/api/handoff/sessions/${SESSION_A}/files/sf_report_1/preview`);
+  assert.equal(hana.resourceCalls.length, 0, 'MD 预览不得依赖宿主 resources.open');
+
+  const frame = documentRef.body.querySelector('.handoff-file-preview-frame');
+  assert.equal(frame.getAttribute('sandbox'), '', 'Markdown iframe 必须是空 sandbox');
+  assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
+  assert.ok(frame.srcdoc.includes('default-src \'none\''), 'iframe 必须带严格 CSP');
+  assert.ok(frame.srcdoc.includes(PREVIEW_HTML));
+
+  // 完整原文可切换查看
+  const toggle = documentRef.body.querySelector('.handoff-file-preview-toggle');
+  toggle.dispatchEvent({ type: 'click' });
+  const text = documentRef.body.querySelector('.handoff-file-preview-text');
+  assert.equal(text.textContent, PREVIEW_TEXT);
+  assert.equal(frame.style.display, 'none');
+  toggle.dispatchEvent({ type: 'click' });
+  assert.notEqual(frame.style.display, 'none');
+
+  // 关闭后预览区隐藏，收据正文不受影响
+  documentRef.body.querySelector('.handoff-file-preview-close').dispatchEvent({ type: 'click' });
+  assert.equal(documentRef.body.querySelector('.handoff-file-preview').style.display, 'none');
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-transcript').textContent, RECEIPT.transcript);
+  card.dispose();
+});
+
+test('only one file preview runs at a time and the buttons are disabled while loading', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const gate = deferred();
+  const recorder = previewRecorder({
+    previewHttp: fileId => gate.promise.then(() => response({ ok: true, preview: previewOf(fileId) })),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  const button = await openFirstFile(documentRef);
+  await waitFor(() => recorder.calls.length === 2);
+  assert.equal(button.disabled, true, '加载中必须禁用文件按钮');
+  button.dispatchEvent({ type: 'click' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(recorder.calls.length, 2, '加载中再次点击不得发第二个请求');
+
+  gate.resolve();
+  await waitFor(() => button.disabled === false);
+  card.dispose();
+});
+
+test('a late file response after rebinding cannot open a preview or leak into the new card', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const gate = deferred();
+  const recorder = previewRecorder({
+    receipts: {
+      [SESSION_A]: RECEIPT,
+      [SESSION_B]: { ...RECEIPT, sessionId: SESSION_B, transcript: 'B 会话正文', files: [] },
+    },
+    previewHttp: fileId => gate.promise.then(() => response({ ok: true, preview: previewOf(fileId) })),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  await openFirstFile(documentRef);
+  await waitFor(() => recorder.calls.length === 2);
+
+  hana.emit({ slot: 'card', embeddedSessionId: SESSION_B });
+  await waitFor(() => documentRef.body.textContent.includes('B 会话正文'));
+  gate.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(documentRef.body.querySelector('.handoff-file-preview')?.style.display, 'none', '旧绑定响应不得重开预览');
+  assert.equal(documentRef.body.textContent.includes('真实字节正文'), false);
+  card.dispose();
+});
+
+test('a preview failure shows a fixed message and code without touching the receipt transcript', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const recorder = previewRecorder({
+    previewHttp: () => response({ ok: false, code: 'HANDOFF_FILE_UNAVAILABLE', error: '文件内容暂时不可用' }, 409),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  await openFirstFile(documentRef);
+  await waitFor(() => /HANDOFF_FILE_UNAVAILABLE/.test(bodyText(documentRef)));
+  assert.match(documentRef.body.textContent, /文件暂时无法预览|文件预览失败/);
+  assert.equal(documentRef.body.textContent.includes('/home/'), false);
+  assert.equal(documentRef.body.querySelector('.handoff-receipt-transcript').textContent, RECEIPT.transcript);
+  assert.equal(documentRef.body.querySelector('.handoff-file-preview').style.display, 'none');
+  card.dispose();
+});
+
+test('a non-text file keeps the official resources.open path and its opened check', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  hana.resources.open = async input => {
+    hana.resourceCalls.push({ input, options: undefined });
+    return { opened: false };
+  };
+  const receipt = {
+    ...RECEIPT,
+    files: [{ fileId: 'sf_pdf_1', name: 'report.pdf', mime: 'application/pdf', kind: 'artifact' }],
+  };
+  const recorder = previewRecorder({ receipt });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  await waitFor(() => documentRef.body.querySelectorAll('.handoff-receipt-file').length === 1);
+  documentRef.body.querySelectorAll('.handoff-receipt-file')[0].dispatchEvent({ type: 'click' });
+  await waitFor(() => hana.resourceCalls.length === 1);
+  assert.deepEqual(hana.resourceCalls[0].input, {
+    resource: { kind: 'session-file', sessionId: SESSION_A, fileId: 'sf_pdf_1' },
+    mode: 'preview',
+  });
+  await waitFor(() => /无法打开/.test(documentRef.body.textContent));
+  assert.equal(recorder.calls.length, 1, '非文本不得请求应用预览接口');
+  card.dispose();
+});
+
+test('closing the preview and disposing invalidate pending file responses', async () => {
+  const documentRef = createFakeDocument();
+  const hana = fakeHana({ slot: 'card', embeddedSessionId: SESSION_A });
+  const gate = deferred();
+  const recorder = previewRecorder({
+    previewHttp: fileId => gate.promise.then(() => response({ ok: true, preview: previewOf(fileId) })),
+  });
+  const card = createHandoffReceiptCard({ hana, documentRef, requestHost: recorder.requestHost });
+
+  await openFirstFile(documentRef);
+  await waitFor(() => recorder.calls.length === 2);
+  card.dispose();
+  gate.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(documentRef.body.children.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // 清单映射：没有 messageRenderers，宿主不会为这条 custom 消息生成流内卡
 // ---------------------------------------------------------------------------
 
@@ -281,6 +470,6 @@ test('the manifest maps branch-handoff to a declared card whose route page exist
   assert.ok(capabilities.includes('app/resources.write'));
   assert.equal(capabilities.length, 13, '只新增预览必需的只读资源能力');
 
-  assert.equal(manifest.version, '2.3.0-beta.4');
+  assert.equal(manifest.version, '2.3.0-beta.5');
   assert.equal(manifest.minAppVersion, '1.2.1-beta');
 });
