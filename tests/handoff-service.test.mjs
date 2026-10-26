@@ -125,9 +125,9 @@ function fakeHost(overrides = {}) {
   return Object.assign(host, overrides);
 }
 
-function fakeSdk(agentIds = ['agent-a']) {
+function fakeSdk(agentIds = ['agent-a'], { sessions = null } = {}) {
   const calls = [];
-  return {
+  const sdk = {
     calls,
     agents: {
       async list(input) {
@@ -136,6 +136,8 @@ function fakeSdk(agentIds = ['agent-a']) {
       },
     },
   };
+  if (sessions) sdk.sessions = sessions;
+  return sdk;
 }
 
 function requestContext({ principalId = PRINCIPAL, appId = 'timeline-reverser' } = {}) {
@@ -355,6 +357,90 @@ function fsWithDecisionCloseFailure({ failWrite = false } = {}) {
     },
   };
 }
+
+test('confirm writes v1 handoffView and the receipt route projects the saved custom message', async () => {
+  const dataDir = await makeDir();
+  const artifactId = 'a'.repeat(32);
+  const artifacts = fakeArtifacts({ [artifactId]: artifactFixture(artifactId) });
+  const host = fakeHost();
+  let entries = [];
+  const sessions = {
+    async get({ sessionId }) {
+      return { session: { sessionId, namespace: 'home', visibility: 'public', ownerPluginId: 'timeline-reverser' } };
+    },
+    async entries({ sessionId }) {
+      return { sessionId, entries, leafId: entries.at(-1)?.id ?? null };
+    },
+  };
+  const sdk = fakeSdk(['agent-a'], { sessions });
+  const store = createHandoffStore({ dataDir, fs: realFs, clock: () => 1 });
+  const harness = makeHarness({ dataDir, store, artifacts, host, sdk });
+
+  const prepared = actionOf(await prepareViaRoute(harness, handoffContext({ artifactIds: [artifactId] })));
+  const confirmed = await confirmViaRoute(harness, prepared.actionId);
+  assert.equal(confirmed.body.action.state, 'ready');
+
+  const write = host.calls.find(call => call[0] === 'writeContext')[1];
+  const view = write.details.handoffView;
+  assert.equal(view.version, 1);
+  assert.equal(view.agentId, 'agent-a');
+  assert.deepEqual(view.files.map(file => [file.name, file.kind]), [['报告.md', 'artifact'], ['handoff.md', 'archive']]);
+  assert.equal(typeof view.ownerScopeKey, 'string');
+  // 元数据不夹带 owner 原文、私有路径或产物私有标识
+  assert.equal(JSON.stringify(view).includes('user-1'), false);
+  assert.equal(JSON.stringify(view).includes(artifactId), false);
+  assert.deepEqual(Object.keys(write.details).sort(), ['actionId', 'handoffView', 'source']);
+  // 不因新增元数据而多出任何宿主副作用
+  assert.equal(host.calls.filter(call => call[0] === 'create').length, 1);
+  assert.equal(host.calls.filter(call => call[0] === 'stage').length, 2);
+
+  const customEntry = {
+    id: 'entry-1',
+    parentId: null,
+    type: 'custom_message',
+    customType: 'app:timeline-reverser/branch-handoff',
+    display: true,
+    content: write.content,
+    details: write.details,
+  };
+
+  // 旧消息（无 handoffView）只能凭当前 owner 的动作回执恢复
+  entries = [{ ...customEntry, details: { actionId: write.details.actionId, source: write.details.source } }];
+  const legacyHarness = makeHarness({ dataDir, store: createHandoffStore({ dataDir, fs: realFs, clock: () => 1 }), artifacts, host, sdk });
+  const legacy = await legacyHarness.call('GET', '/api/handoff/sessions/sess-1/receipt');
+  assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+  assert.equal(legacy.body.receipt.transcript, write.content);
+  assert.equal(legacy.body.receipt.actionId, confirmed.body.action.actionId);
+  assert.deepEqual(legacy.body.receipt.files.map(file => file.kind), ['artifact', 'archive']);
+
+  // 新消息（带 handoffView）：动作记录不在也能读（空 store 也不影响）
+  entries = [customEntry];
+  const stampedHarness = makeHarness({ dataDir, store: { ...createHandoffStore({ dataDir, fs: realFs, clock: () => 1 }), list: async () => [] }, artifacts, host, sdk });
+  const receipt = await stampedHarness.call('GET', '/api/handoff/sessions/sess-1/receipt');
+  assert.equal(receipt.status, 200, JSON.stringify(receipt.body));
+  assert.equal(receipt.body.receipt.sessionId, 'sess-1');
+  assert.equal(receipt.body.receipt.transcript, write.content);
+  assert.equal(receipt.body.receipt.agentId, 'agent-a');
+  assert.deepEqual(receipt.body.receipt.files.map(file => [file.fileId, file.name, file.mime, file.kind]), [
+    ['file-1', '报告.md', 'text/markdown', 'artifact'],
+    ['file-2', 'handoff.md', 'text/markdown', 'archive'],
+  ]);
+  // DTO 不回传 owner 指纹、路径或无关消息
+  assert.equal(JSON.stringify(receipt.body).includes('ownerScopeKey'), false);
+  assert.equal(JSON.stringify(receipt.body).includes(dataDir), false);
+
+  // 其它调用方读同一会话：归属不符，明确失败且不回正文
+  const foreign = await stampedHarness.call('GET', '/api/handoff/sessions/sess-1/receipt', { principal: 'user-2' });
+  assert.equal(foreign.status, 409);
+  assert.equal(foreign.body.ok, false);
+  assert.equal(JSON.stringify(foreign.body).includes('交接内容'), false);
+  // 无记录时明确不可用，而不是空成功
+  entries = [];
+  const emptyHarness = makeHarness({ dataDir, store: { ...createHandoffStore({ dataDir, fs: realFs, clock: () => 1 }), list: async () => [] }, artifacts, host, sdk });
+  const missing = await emptyHarness.call('GET', '/api/handoff/sessions/sess-1/receipt');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'HANDOFF_RECEIPT_NOT_FOUND');
+});
 
 test('a dispatch.decision write or close failure stops the claim before any host create', async () => {
   for (const failWrite of [false, true]) {

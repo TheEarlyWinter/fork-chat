@@ -353,9 +353,15 @@ test('integration: real builder/service/store delivery verifies canonical archiv
       assert.deepEqual(sdkCalls.agentList[0], { scope: 'all', lifecycle: 'active' });
       assert.equal(custom.display, true);
       assert.equal(custom.triggerTurn, false);
-      assert.deepEqual(Object.keys(custom.details).sort(), ['actionId', 'source']);
+      assert.deepEqual(Object.keys(custom.details).sort(), ['actionId', 'handoffView', 'source']);
       assert.equal(custom.details.actionId, confirmLog.body.actionId);
       assert.deepEqual(custom.details.source, preparedContext.source);
+      // 卡片视图元数据：只带 owner 指纹、目标助手与安全文件回执（含 archive）
+      const view = custom.details.handoffView;
+      assert.equal(view.version, 1);
+      assert.equal(view.agentId, 'agent-sol');
+      assert.deepEqual(view.files.map(file => [file.name, file.kind]), [['report.pdf', 'artifact'], ['handoff.md', 'archive']]);
+      assert.equal(JSON.stringify(view).includes('local-user'), false, '视图元数据不得包含 owner 原文');
       assert.deepEqual(stageReceipts.map(file => file.name).sort(), ['handoff.md', 'report.pdf']);
       assert.equal(readyAction.entryId, 'entry-custom-1');
       assert.deepEqual(readyAction.files.map(file => file.name).sort(), ['handoff.md', 'report.pdf']);

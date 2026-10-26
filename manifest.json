@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "timeline-reverser",
   "name": "分叉对话",
-  "version": "2.3.0-beta.3",
-  "minAppVersion": "1.1.111-beta",
+  "version": "2.3.0-beta.4",
+  "minAppVersion": "1.2.1-beta",
   "description": "树状多分支对话与模型推导工作台，支持真实模型流式推导及 App 自有 DOCX、PDF、HTML、MD 文档生成、内容预览与另存为。",
   "entry": "index.js",
   "icon": "assets/icon.png",
@@ -55,6 +55,21 @@
           "label": "模型列表",
           "route": "/function-panel.html"
         }
+      },
+      {
+        "id": "handoff-receipt",
+        "title": "交接记录",
+        "description": "只读展示本应用写入当前会话的交接正文与交付文件",
+        "route": "/handoff-receipt.html",
+        "face": {
+          "image": "assets/cover.png"
+        }
+      }
+    ],
+    "messageRenderers": [
+      {
+        "customType": "branch-handoff",
+        "cardId": "handoff-receipt"
       }
     ],
     "ui": {

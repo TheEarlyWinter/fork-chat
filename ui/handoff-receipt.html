@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交接记录 · 分叉对话</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --border: #e4e4e7;
+      --bg-subtle: #f7f5ef;
+      --text: #18181b;
+      --text-muted: #71717a;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .handoff-receipt { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .handoff-receipt-title {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .handoff-receipt-meta { font-size: 10.5px; color: var(--text-muted); }
+    .handoff-receipt-status {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 5px 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .handoff-receipt-transcript {
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 460px;
+      overflow: auto;
+      background: #fdfdfc;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 10px;
+    }
+    .handoff-receipt-transcript:empty { display: none; }
+    .handoff-receipt-files { display: flex; flex-wrap: wrap; gap: 6px; }
+    .handoff-receipt-file {
+      font-family: inherit;
+      font-size: 11px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #ffffff;
+      color: var(--text);
+      cursor: pointer;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .handoff-receipt-file:hover { border-color: #18181b; }
+    .handoff-receipt-file:focus-visible { outline: 1px solid #18181b; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <!-- 只读交接卡：内容由宿主盖戳的 embeddedSessionId 决定，页面本身不提供任何写入口 -->
+  <script type="module" src="./assets/handoff-receipt-boot.js"></script>
+</body>
+</html>
