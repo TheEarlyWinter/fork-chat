@@ -40,8 +40,41 @@ jobs:
         shell: bash
         run: node --experimental-vm-modules --test tests/*.test.mjs
 
+  test-node26-permission:
+    # 专项作业：这次故障只在 Node 26 的权限模型下出现，而普通 test 作业跑的是
+    # Node 24。全量测试继续留在 Node 24，这里只跑会被权限模型影响的那两份用例。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
+      - name: Ensure strace is available
+        shell: bash
+        # 有两条用例靠 strace 注入真实 fsync 失败、观察 fd 同步调用；
+        # runner 没有 strace 时它们会静默 skip，那道门就空了。
+        run: |
+          if ! command -v strace >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends strace
+          fi
+          strace -V | head -1
+      - name: Run permission-model regression
+        shell: bash
+        run: |
+          node --experimental-vm-modules --test \
+            tests/handoff-permission-model.test.mjs \
+            tests/artifact-permission-model.test.mjs | tee "$RUNNER_TEMP/pm.log"
+          if ! grep -q 'skipped 0' "$RUNNER_TEMP/pm.log"; then
+            echo "::error::permission-model cases were skipped; the Node 26 regression did not actually run"
+            exit 1
+          fi
+
   package:
-    needs: [test]
+    needs: [test, test-node26-permission]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
