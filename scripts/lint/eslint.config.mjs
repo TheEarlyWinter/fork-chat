@@ -115,8 +115,6 @@ export default [
   {
     ignores: [
       'ui/assets/sdk.js',
-      // 压缩后的第三方产物（React + antd bundle），不是本仓库源码。
-      'ui/assets/app-ui.js',
       'ui/vendor/**',
       'sdk/**',
       'dist/**',

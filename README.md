@@ -230,7 +230,7 @@ node scripts/lint/node_modules/eslint/bin/eslint.js --config scripts/lint/eslint
 - **只查正确性，不查风格**。启用的是未定义变量、重复键、不可达代码、不可靠的 `finally`、异步执行器里直接传 `async` 函数这一类。
 - 未使用变量与参数属于 `warning`，不会让门禁失败；`error` 为零是 CI 的前置条件。
 - **它抓不到漏掉的 `await`**。浮动 Promise 需要带类型信息的 `no-floating-promises`，本项目不引入那条链路。异步链路的正确性仍然只能靠测试。
-- 检查范围只含本仓库自有源码；SDK、`ui/vendor` 和压缩后的第三方 bundle（`ui/assets/app-ui.js`）不在范围内。
+- 检查范围只含本仓库自有源码；SDK（`ui/assets/sdk.js`）与 `ui/vendor` 不在范围内。
 - 默认不批量 `--fix`。
 - `scripts/**` 已被 `.gitattributes` 和打包排除表挡住，所以工具链和它的 `node_modules` 不会进安装包。
 
