@@ -40,11 +40,11 @@
 - Consumes: `receiptReader.read({owner,sessionId})`；`sdk.resources.stat/read(ref)`；现有安全文档渲染器。
 - Produces: `createHandoffFilePreviewReader({sdk,receiptReader}).read({owner,sessionId,fileId})`；GET preview 路由；规格定义的 preview DTO。
 
-- [ ] Step 1: 写行为 RED。覆盖已登记但前端表未加载时仍能显示真实 MD 字节；完整原文；无 ResourceOpen 调用；拒绝不属于回执的文件且资源读取次数为零。
-- [ ] Step 2: 补齐规格边界 RED。包括完整资源回执、空文件、stat/read 各自超限、错误身份、解码失败、恶意 HTML、复杂度/HTML 大小回退、并发合并/上限、绑定/关闭/卸载迟到。
-- [ ] Step 3: Node26 定向运行，保存 RED 输出；确认因功能缺失而失败，不是导入错误。再按上述接口最小实现并 GREEN。
-- [ ] Step 4: 跑相关 handoff、文档渲染、安全与 UI 回归。只跑一次 Node26 全量：`node --experimental-vm-modules --test --test-concurrency=4 "tests/*.test.mjs"`。日志放本计划 outputs；不存在根 npm lint/typecheck，不虚构。
-- [ ] Step 5: 自审 owner/Buffer/错误与生命周期，提交允许文件，记录精确 SHA 与验证。源码写手停止写，交父线程独立审查。
+- [x] Step 1: 写行为 RED。覆盖已登记但前端表未加载时仍能显示真实 MD 字节；完整原文；无 ResourceOpen 调用；拒绝不属于回执的文件且资源读取次数为零。
+- [x] Step 2: 补齐规格边界 RED。包括完整资源回执、空文件、stat/read 各自超限、错误身份、解码失败、恶意 HTML、复杂度/HTML 大小回退、并发合并/上限、绑定/关闭/卸载迟到。
+- [x] Step 3: Node26 定向运行，保存 RED 输出；确认因功能缺失而失败，不是导入错误。再按上述接口最小实现并 GREEN。
+- [x] Step 4: 跑相关 handoff、文档渲染、安全与 UI 回归。只跑一次 Node26 全量：`node --experimental-vm-modules --test --test-concurrency=4 "tests/*.test.mjs"`。日志放本计划 outputs；不存在根 npm lint/typecheck，不虚构。
+- [x] Step 5: 自审 owner/Buffer/错误与生命周期，提交允许文件，记录精确 SHA 与验证。源码写手停止写，交父线程独立审查。
 - [ ] Step 6: 审查通过后再打 beta.5 包，核版本、权限、ZIP CRC/SHA 与 HEAD 内容。用正式管理器提交更新。按原文件做实机核验，不重做交接。
 
 Node26：`/home/theearlywinter/.hanako/artifacts/server/1.2.1-beta-linux-x64-c4109a2859588978-g70ab71a32719fa1b/node`。
